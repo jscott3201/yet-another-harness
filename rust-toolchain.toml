@@ -1,0 +1,3 @@
+# EXP-001 §3 pins the gate toolchain; the run manifest records what actually ran.
+[toolchain]
+channel = "1.97.1"

@@ -1,0 +1,18 @@
+[workspace]
+resolver = "3"
+members = ["crates/exp001-harness"]
+
+# Crate boundaries are deliberately provisional: the crate-boundary proposal is
+# gated behind G01/G02 (decisions/01:382-384). Only gate harnesses live here yet.
+
+[workspace.package]
+edition = "2024"
+rust-version = "1.97"
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rand = "0.9"
+rand_chacha = "0.9"
+blake3 = "1"
+clap = { version = "4", features = ["derive"] }
