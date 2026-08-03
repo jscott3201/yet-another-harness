@@ -33,7 +33,11 @@ pub enum UnitPhase {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ExpectedRejection {
+    /// Superseded attempt epoch on a renewal or write.
     StaleLease,
+    /// Wrong holder for the current epoch — bar 6's "or a write" half needs
+    /// both dimensions injected (review finding, 2026-08-03).
+    StaleHolder,
 }
 
 /// One transaction's obligations. `expected_version` makes the CAS explicit:
@@ -71,13 +75,21 @@ pub struct EffectRow {
     pub state: EffectState,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct Slot {
     pub unit_id: u64,
     pub phase: UnitPhase,
     pub version: u64,
     pub attempt_epoch: u32,
     pub claimed: bool,
+    /// Holder of record for the current epoch: the writer that dispatched it.
+    /// Non-dispatch commands act on the holder's behalf and carry this id;
+    /// the funnel rejects a mismatch typed (bar 6's holder dimension).
+    pub holder: u64,
+    /// Operation key of the outstanding effect intent, if any. ToolCompletion
+    /// reuses it for the terminal observation row (A13-style key stability);
+    /// a key still open at audit time is a nonterminal intent.
+    pub open_op: Option<String>,
 }
 
 /// Shared unit population. Sized larger than the writer count so claims
@@ -90,7 +102,15 @@ pub struct UnitPool {
 impl UnitPool {
     pub fn new(size: usize) -> UnitPool {
         let slots = (0..size as u64)
-            .map(|id| Slot { unit_id: id, phase: UnitPhase::Ready, version: 0, attempt_epoch: 0, claimed: false })
+            .map(|id| Slot {
+                unit_id: id,
+                phase: UnitPhase::Ready,
+                version: 0,
+                attempt_epoch: 0,
+                claimed: false,
+                holder: 0,
+                open_op: None,
+            })
             .collect();
         UnitPool { next_unit: size as u64, slots }
     }
@@ -109,14 +129,22 @@ impl UnitPool {
                     version: 0,
                     attempt_epoch: 0,
                     claimed: false,
+                    holder: 0,
+                    open_op: None,
                 };
                 return;
             }
             let s = &mut self.slots[slot];
             s.phase = spec.new_phase;
             s.version += 1;
-            if spec.kind == CommandKind::Dispatch {
-                s.attempt_epoch = spec.attempt_epoch;
+            match spec.kind {
+                CommandKind::Dispatch => {
+                    s.attempt_epoch = spec.attempt_epoch;
+                    s.holder = spec.holder_id;
+                    s.open_op = spec.effect.as_ref().map(|e| e.operation_key.clone());
+                }
+                CommandKind::ToolCompletion => s.open_op = None,
+                _ => {}
             }
         }
         self.slots[slot].claimed = false;
@@ -154,7 +182,7 @@ impl WriterStream {
             return None;
         }
         let slot = free[self.rng.random_range(0..free.len())];
-        let s = pool.slots[slot];
+        let s = pool.slots[slot].clone();
         pool.slots[slot].claimed = true;
 
         let kind = match s.phase {
@@ -186,10 +214,27 @@ impl WriterStream {
         };
 
         let mut attempt_epoch = if kind == CommandKind::Dispatch { s.attempt_epoch + 1 } else { s.attempt_epoch };
+        // Bar 6 injections cover both dimensions of the superseded triple, on
+        // renewals AND writes: a stale epoch (needs a genuinely superseded
+        // epoch, so >= 2) or a wrong holder for the current epoch.
+        let mut holder_id = if kind == CommandKind::Dispatch { u64::from(self.writer) } else { s.holder };
         let mut expect_reject = None;
-        if kind == CommandKind::LeaseRenewal && s.attempt_epoch >= 2 && self.rng.random_range(0..16u32) == 0 {
-            attempt_epoch = s.attempt_epoch - 1;
-            expect_reject = Some(ExpectedRejection::StaleLease);
+        let injectable = matches!(
+            kind,
+            CommandKind::LeaseRenewal | CommandKind::ProgressRollup | CommandKind::ToolCompletion
+        );
+        if injectable {
+            match self.rng.random_range(0..32u32) {
+                0 if s.attempt_epoch >= 2 => {
+                    attempt_epoch = s.attempt_epoch - 1;
+                    expect_reject = Some(ExpectedRejection::StaleLease);
+                }
+                1 => {
+                    holder_id = s.holder ^ 0x5741_1E00;
+                    expect_reject = Some(ExpectedRejection::StaleHolder);
+                }
+                _ => {}
+            }
         }
 
         self.step += 1;
@@ -212,9 +257,16 @@ impl WriterStream {
                 operation_key: format!("op-{}-{command_id}", s.unit_id),
                 state: EffectState::Prepared,
             }),
+            // Terminal observation of the outstanding intent: SAME operation
+            // key, fresh row. Falls back to a self-keyed row if no intent is
+            // open (a cancelled-then-redispatched lineage can complete a tool
+            // under a fresh epoch's key).
             CommandKind::ToolCompletion => Some(EffectRow {
                 intent_id: (command_id << 8) | 2,
-                operation_key: format!("op-{}-{command_id}", s.unit_id),
+                operation_key: s
+                    .open_op
+                    .clone()
+                    .unwrap_or_else(|| format!("op-{}-{command_id}", s.unit_id)),
                 state: EffectState::Succeeded,
             }),
             _ => None,
@@ -230,7 +282,7 @@ impl WriterStream {
             unit_id: s.unit_id,
             expected_version: s.version,
             attempt_epoch,
-            holder_id: u64::from(self.writer),
+            holder_id,
             new_phase,
             expect_reject,
             command_id,
@@ -319,11 +371,19 @@ mod tests {
             "no unit ever re-dispatched; stale-lease coverage is impossible"
         );
         let stale: Vec<_> = specs.iter().filter(|s| s.expect_reject.is_some()).collect();
-        assert!(!stale.is_empty(), "no stale-lease injection in 4800 specs");
-        for s in &stale {
-            assert_eq!(s.kind, CommandKind::LeaseRenewal);
-            assert!(s.attempt_epoch >= 1);
-        }
+        assert!(!stale.is_empty(), "no bar-6 injection in 4800 specs");
+        assert!(
+            stale.iter().any(|s| s.expect_reject == Some(ExpectedRejection::StaleLease)),
+            "no stale-epoch injection"
+        );
+        assert!(
+            stale.iter().any(|s| s.expect_reject == Some(ExpectedRejection::StaleHolder)),
+            "no stale-holder injection"
+        );
+        assert!(
+            stale.iter().any(|s| s.kind != CommandKind::LeaseRenewal),
+            "bar 6's write half never injected"
+        );
     }
 
     #[test]

@@ -19,7 +19,7 @@ use selene_core::{
     db_string, DbString, GraphId, LabelDiff, LabelSet, NodeId, PropertyDiff, PropertyMap, Value,
 };
 use selene_graph::{
-    CommitBatching, GraphError, GraphTypeDef, NodeTypeDef, PropertyTypeDef, SharedGraph,
+    CommitBatching, GraphError, GraphTypeDef, NodeTypeDef, PropertyTypeDef, RowIndex, SharedGraph,
     ValidationMode,
 };
 use selene_core::{Change, PropertyValueType};
@@ -122,6 +122,7 @@ pub fn graph_type() -> GraphTypeDef {
                 "Lease",
                 vec![
                     prop_def("lease_key", PStr, true, true, true),
+                    prop_def("holder_id", Uint, true, true, false),
                     prop_def("expiry", Uint, true, false, false),
                     prop_def("last_renewal", Uint, true, false, false),
                 ],
@@ -180,15 +181,31 @@ pub enum Rejection {
     StaleVersion { unit_id: u64, expected: u64, actual: u64 },
     StaleLease { unit_id: u64, claimed_epoch: u32, current_epoch: u32 },
     UnknownUnit { unit_id: u64 },
+    /// Wrong holder for the unit's current epoch (bar 6's second dimension).
+    StaleHolder { unit_id: u64, claimed_holder: u64, current_holder: u64 },
     /// R26a: deletes of committed journal rows have no store-level rejection
     /// path, so the funnel types the rejection itself.
     JournalDelete { event_id: u64 },
+}
+
+/// A delete request routed through the funnel. Journal-class rows reject
+/// typed (R26a); nothing else is deletable in v0 either — the dispatch here
+/// is the enforcement point the amended card names.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DeleteTarget {
+    Event { event_id: u64 },
+    Receipt { receipt_key: String },
+    Artifact { digest: String },
 }
 
 #[derive(Debug)]
 pub enum ApplyError {
     Rejected(Rejection),
     Graph(GraphError),
+    /// Harness-internal incoherence (e.g. an address-book miss for a row the
+    /// spec requires). Never a domain rejection: callers treat it as a
+    /// harness defect and fail the trial loudly.
+    Harness(String),
 }
 
 impl From<GraphError> for ApplyError {
@@ -216,7 +233,9 @@ struct Books {
 }
 
 pub struct Store {
-    pub shared: SharedGraph,
+    // Private on purpose: the funnel premise (R26a) is that no code path
+    // reaches the graph except through this module's methods.
+    shared: SharedGraph,
     dir: PathBuf,
     books: Mutex<Books>,
 }
@@ -255,7 +274,9 @@ impl Store {
         let g = self.shared.read();
         let mut books = self.books.lock().expect("books lock");
         for raw in g.live_nodes().iter() {
-            let id = NodeId::new(u64::from(raw));
+            // The bitmap is over internal row indices; node_id_for_row is the
+            // sanctioned reverse mapping (rows remap under compaction).
+            let Some(id) = g.node_id_for_row(RowIndex::new(raw)) else { continue };
             let Some(labels) = g.node_labels(id) else { continue };
             let Some(props) = g.node_properties(id) else { continue };
             let get_u64 = |name: &str| props.get(&db(name)).and_then(value_u64);
@@ -299,10 +320,11 @@ impl Store {
         let existing = match unit_node {
             Some(n) => {
                 let props = txn.read().node_properties(n);
-                let (version, epoch) = match props {
+                let (version, epoch, holder) = match props {
                     Some(p) => (
                         p.get(&db("version")).and_then(value_u64).unwrap_or(0),
                         p.get(&db("attempt_epoch")).and_then(value_u64).unwrap_or(0) as u32,
+                        p.get(&db("holder_id")).and_then(value_u64).unwrap_or(0),
                     ),
                     None => {
                         txn.rollback();
@@ -331,6 +353,16 @@ impl Store {
                         current_epoch: epoch,
                     }));
                 }
+                // Bar 6's holder dimension: any non-dispatch command must act
+                // as the holder of record for the current epoch.
+                if spec.kind != CommandKind::Dispatch && spec.holder_id != holder {
+                    txn.rollback();
+                    return Err(ApplyError::Rejected(Rejection::StaleHolder {
+                        unit_id: spec.unit_id,
+                        claimed_holder: spec.holder_id,
+                        current_holder: holder,
+                    }));
+                }
                 Some(n)
             }
             None => {
@@ -356,10 +388,10 @@ impl Store {
                     let mut set = vec![
                         (db("version"), Value::Uint(spec.expected_version + 1)),
                         (db("phase"), Value::String(db(&format!("{:?}", spec.new_phase)))),
-                        (db("holder_id"), Value::Uint(spec.holder_id)),
                     ];
                     if spec.kind == CommandKind::Dispatch {
                         set.push((db("attempt_epoch"), Value::Uint(u64::from(spec.attempt_epoch))));
+                        set.push((db("holder_id"), Value::Uint(spec.holder_id)));
                     }
                     if let Some(a) = &spec.artifact_ref {
                         set.push((db("artifact_ref"), Value::String(db(a))));
@@ -404,6 +436,7 @@ impl Store {
                     LabelSet::single(db("Lease")),
                     PropertyMap::from_pairs([
                         (db("lease_key"), Value::String(db(&key))),
+                        (db("holder_id"), Value::Uint(spec.holder_id)),
                         (db("expiry"), Value::Uint(u64::from(spec.step) + 100)),
                         (db("last_renewal"), Value::Uint(u64::from(spec.step))),
                     ])
@@ -445,16 +478,26 @@ impl Store {
                     .attempts
                     .get(&(spec.unit_id, spec.attempt_epoch))
                     .copied();
-                if let Some(a) = attempt {
-                    let terminal = match spec.kind {
-                        CommandKind::Cancellation => "cancelled",
-                        _ => "decided",
-                    };
-                    m.update_node(
-                        a,
-                        no_labels(),
-                        props_set([(db("state"), Value::String(db(terminal)))]),
-                    )?;
+                match attempt {
+                    Some(a) => {
+                        let terminal = match spec.kind {
+                            CommandKind::Cancellation => "cancelled",
+                            _ => "decided",
+                        };
+                        m.update_node(
+                            a,
+                            no_labels(),
+                            props_set([(db("state"), Value::String(db(terminal)))]),
+                        )?;
+                    }
+                    None => {
+                        drop(m);
+                        txn.rollback();
+                        return Err(ApplyError::Harness(format!(
+                            "attempt {}/{} missing from address book",
+                            spec.unit_id, spec.attempt_epoch
+                        )));
+                    }
                 }
             }
 
@@ -553,12 +596,22 @@ impl Store {
         result
     }
 
-    /// §6 journal-mutation cell, delete arm: funnel-typed (R26a). The store
-    /// is never touched — there is no code path from the funnel to
-    /// `delete_node` on an Event row, and Selene offers no store-level
-    /// rejection to delegate to.
-    pub fn try_delete_event(&self, event_id: u64) -> Rejection {
-        Rejection::JournalDelete { event_id }
+    /// §6 journal-mutation cell, delete arm: a delete REQUEST routed through
+    /// the funnel's dispatch (R26a). Journal-class targets reject typed;
+    /// Selene offers no store-level rejection to delegate to, so this
+    /// dispatch — plus `shared` being private — is the enforcement.
+    pub fn apply_delete(&self, target: DeleteTarget) -> Result<(), ApplyError> {
+        match target {
+            DeleteTarget::Event { event_id } => {
+                Err(ApplyError::Rejected(Rejection::JournalDelete { event_id }))
+            }
+            DeleteTarget::Receipt { receipt_key } => Err(ApplyError::Harness(format!(
+                "receipt {receipt_key} is journal-class evidence; deletes are not implemented in the v0 funnel"
+            ))),
+            DeleteTarget::Artifact { digest } => Err(ApplyError::Harness(format!(
+                "artifact {digest} is content-addressed evidence; deletes are not implemented in the v0 funnel"
+            ))),
+        }
     }
 
     /// §6 journal-mutation cell, duplicate arm: a fresh write carrying a
@@ -612,7 +665,7 @@ impl Store {
         let g = self.shared.read();
         let mut out = Vec::new();
         for raw in g.live_nodes().iter() {
-            let id = NodeId::new(u64::from(raw));
+            let Some(id) = g.node_id_for_row(RowIndex::new(raw)) else { continue };
             let Some(labels) = g.node_labels(id) else { continue };
             if !labels.contains(&db("Event")) {
                 continue;
@@ -625,6 +678,78 @@ impl Store {
         }
         out.sort_unstable();
         out
+    }
+
+    /// One coherent scan of the published snapshot into the auditor's row
+    /// maps. Reads only — the auditor never writes (§6 corruption drill: it
+    /// names and quarantines, it does not repair).
+    pub fn audit_snapshot(&self) -> AuditSnapshot {
+        let g = self.shared.read();
+        let mut snap = AuditSnapshot::default();
+        for raw in g.live_nodes().iter() {
+            let Some(id) = g.node_id_for_row(RowIndex::new(raw)) else { continue };
+            let Some(labels) = g.node_labels(id) else { continue };
+            let Some(props) = g.node_properties(id) else { continue };
+            let get_u64 = |name: &str| props.get(&db(name)).and_then(value_u64);
+            let get_str = |name: &str| match props.get(&db(name)) {
+                Some(Value::String(s)) => Some(s.as_str().to_string()),
+                _ => None,
+            };
+            if labels.contains(&db("Unit")) {
+                if let (Some(unit_id), Some(version), Some(epoch), Some(phase)) =
+                    (get_u64("unit_id"), get_u64("version"), get_u64("attempt_epoch"), get_str("phase"))
+                {
+                    snap.units.insert(
+                        unit_id,
+                        UnitRow { version, attempt_epoch: epoch as u32, phase, artifact_ref: get_str("artifact_ref") },
+                    );
+                }
+            } else if labels.contains(&db("Event")) {
+                if let (Some(event_id), Some(aggregate_id), Some(aggregate_version), Some(payload)) =
+                    (get_u64("event_id"), get_u64("aggregate_id"), get_u64("aggregate_version"), get_str("payload"))
+                {
+                    snap.events.insert(event_id, EventRow { aggregate_id, aggregate_version, payload });
+                }
+            } else if labels.contains(&db("Receipt")) {
+                if let (Some(key), Some(digest), Some(transition_ref)) =
+                    (get_str("receipt_key"), get_str("request_digest"), get_u64("transition_ref"))
+                {
+                    snap.receipts.insert(key, ReceiptRow { request_digest: digest, transition_ref });
+                }
+            } else if labels.contains(&db("Effect")) {
+                if let (Some(intent_id), Some(op), Some(state), Some(unit_id)) =
+                    (get_u64("intent_id"), get_str("operation_key"), get_str("state"), get_u64("unit_id"))
+                {
+                    snap.effects.insert(intent_id, EffectStoreRow { operation_key: op, state, unit_id });
+                }
+            } else if labels.contains(&db("Artifact")) {
+                if let Some(d) = get_str("artifact_digest") {
+                    snap.artifacts.insert(d);
+                }
+            }
+        }
+        snap
+    }
+
+    /// Idempotent-replay probe for the post-publish-pre-response cell: a
+    /// fresh write claiming an existing receipt key must reject as a unique
+    /// duplicate — the substrate-level proof that retrying a command whose
+    /// response was lost cannot re-execute it.
+    pub fn probe_duplicate_receipt(&self, receipt_key: &str) -> Result<(), GraphError> {
+        let mut txn = self.shared.begin_write();
+        {
+            let mut m = txn.mutator();
+            m.create_node(
+                LabelSet::single(db("Receipt")),
+                PropertyMap::from_pairs([
+                    (db("receipt_key"), Value::String(db(receipt_key))),
+                    (db("request_digest"), Value::String(db("replay-probe"))),
+                    (db("transition_ref"), Value::Uint(0)),
+                ])
+                .expect("probe property map"),
+            )?;
+        }
+        txn.commit().map(|_| ())
     }
 
     /// Read one event's payload bytes back, for byte-identity assertions
@@ -640,6 +765,45 @@ impl Store {
     }
 }
 
+/// Row maps the auditor scores against (one field per property the bars
+/// reference; payload carried whole for byte-identity checks).
+#[derive(Debug, Default)]
+pub struct AuditSnapshot {
+    pub units: HashMap<u64, UnitRow>,
+    pub events: HashMap<u64, EventRow>,
+    pub receipts: HashMap<String, ReceiptRow>,
+    pub effects: HashMap<u64, EffectStoreRow>,
+    pub artifacts: std::collections::BTreeSet<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct UnitRow {
+    pub version: u64,
+    pub attempt_epoch: u32,
+    pub phase: String,
+    pub artifact_ref: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct EventRow {
+    pub aggregate_id: u64,
+    pub aggregate_version: u64,
+    pub payload: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct ReceiptRow {
+    pub request_digest: String,
+    pub transition_ref: u64,
+}
+
+#[derive(Debug, Clone)]
+pub struct EffectStoreRow {
+    pub operation_key: String,
+    pub state: String,
+    pub unit_id: u64,
+}
+
 /// The R26c watch substitute: poll the WAL for entries after `after`, trusting
 /// only entries at or below `watermark` (the committer's `durable_at`) — an
 /// unfiltered poll can observe appended-but-unflushed entries, which is the
@@ -653,9 +817,18 @@ pub fn poll_wal(
     let stream = reader.iterate(move |h| h.sequence > after && h.sequence <= watermark)?;
     let mut out = Vec::new();
     for entry in stream {
-        let entry = entry?;
-        let seq = entry.header.sequence;
-        out.push((seq, entry.body()?));
+        match entry {
+            Ok(entry) => {
+                let seq = entry.header.sequence;
+                out.push((seq, entry.body()?));
+            }
+            // A torn tail is a live in-flight append, necessarily past the
+            // durability frontier (the committer fsyncs before acking), so
+            // stopping here returns the complete durable prefix. Any other
+            // error (e.g. a checksum mismatch mid-file) propagates.
+            Err(PersistError::TruncatedEntry { .. }) => break,
+            Err(e) => return Err(e),
+        }
     }
     Ok(out)
 }

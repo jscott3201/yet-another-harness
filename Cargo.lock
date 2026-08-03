@@ -423,6 +423,7 @@ version = "0.0.1"
 dependencies = [
  "blake3",
  "clap",
+ "libc",
  "rand 0.9.5",
  "rand_chacha 0.9.0",
  "selene-db-core",

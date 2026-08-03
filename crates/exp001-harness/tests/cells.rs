@@ -8,8 +8,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use exp001_harness::schema::{Batching, CommandKind, SemanticEvent};
-use exp001_harness::store::{poll_wal, ApplyError, PersistError, Rejection, Store, TypeViolation};
-use exp001_harness::workload::{CommitSpec, UnitPool, WriterStream};
+use exp001_harness::store::{poll_wal, ApplyError, DeleteTarget, PersistError, Rejection, Store, TypeViolation};
+use exp001_harness::workload::{CommitSpec, ExpectedRejection, UnitPool, WriterStream};
 use selene_core::Change;
 use selene_graph::GraphError;
 
@@ -28,12 +28,17 @@ fn drive(store: &Store, pool: &mut UnitPool, stream: &mut WriterStream, steps: u
                 applied.push(spec);
             }
             Err(ApplyError::Rejected(r)) => {
-                assert!(
-                    spec.expect_reject.is_some(),
-                    "unplanned funnel rejection {r:?} for {spec:?}"
+                // The rejection KIND must match the plan — accepting any
+                // rejection would let bar 6 pass without its path running.
+                let planned_ok = matches!(
+                    (spec.expect_reject, &r),
+                    (Some(ExpectedRejection::StaleLease), Rejection::StaleLease { .. })
+                        | (Some(ExpectedRejection::StaleHolder), Rejection::StaleHolder { .. })
                 );
+                assert!(planned_ok, "unplanned funnel rejection {r:?} for {spec:?}");
                 pool.release(spec.slot, &spec, false);
             }
+            Err(ApplyError::Harness(msg)) => panic!("harness incoherence: {msg}"),
             Err(ApplyError::Graph(e)) => panic!("store error: {e}"),
         }
     }
@@ -96,9 +101,14 @@ fn journal_immutability_cell() {
         "wrong rejection: {err}"
     );
 
-    // Delete arm: funnel-enforced (R26a) — typed, store untouched.
-    let rejection = store.try_delete_event(target.event_id);
-    assert_eq!(rejection, Rejection::JournalDelete { event_id: target.event_id });
+    // Delete arm: a delete REQUEST through the funnel's dispatch (R26a) —
+    // typed rejection, store untouched.
+    match store.apply_delete(DeleteTarget::Event { event_id: target.event_id }) {
+        Err(ApplyError::Rejected(Rejection::JournalDelete { event_id })) => {
+            assert_eq!(event_id, target.event_id)
+        }
+        other => panic!("delete arm: wrong funnel outcome {other:?}"),
+    }
 
     // Duplicate arms: same event_id, then same composite key with a fresh id.
     let dup_id = SemanticEvent { payload: "{}".into(), ..target.clone() };
@@ -180,6 +190,7 @@ fn snapshot_plus_poll_handoff() {
                         pool.release(spec.slot, &spec, true);
                     }
                     Err(ApplyError::Rejected(_)) => pool.release(spec.slot, &spec, false),
+                    Err(ApplyError::Harness(msg)) => panic!("harness incoherence: {msg}"),
                     Err(ApplyError::Graph(e)) => panic!("store error: {e}"),
                 }
             }

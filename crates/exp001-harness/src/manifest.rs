@@ -41,8 +41,19 @@ fn probe(cmd: &str, args: &[&str]) -> String {
         .unwrap_or_else(|| "unrecorded".to_string())
 }
 
+/// HEAD SHA with an explicit `-dirty` suffix when the tree has uncommitted
+/// changes — a bare SHA over a dirty tree is a false provenance claim.
 fn git_head(dir: &str) -> String {
-    probe("git", &["-C", dir, "rev-parse", "HEAD"])
+    let sha = probe("git", &["-C", dir, "rev-parse", "HEAD"]);
+    if sha == "unrecorded" {
+        return sha;
+    }
+    let status = probe("git", &["-C", dir, "status", "--porcelain"]);
+    if status == "unrecorded" || status.is_empty() {
+        sha
+    } else {
+        format!("{sha}-dirty")
+    }
 }
 
 impl Manifest {
