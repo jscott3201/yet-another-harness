@@ -103,13 +103,34 @@ impl Ctx {
         )
     }
 
+    /// Every fixture unit is admitted into this run. §1.2 makes the run the
+    /// cancellation-ownership root, so a unit outside one is not a shape the
+    /// kernel represents.
+    pub const RUN: &'static str = "run-1";
+
+    pub fn open_run(&mut self, run: &str) -> Command {
+        self.authority_cmd(
+            &format!("open run {run}"),
+            None,
+            Method::RunOpen {
+                run_id: run.into(),
+                goal_work_item_id: "wi-goal".into(),
+            },
+        )
+    }
+
     pub fn admit(&mut self, unit: &str, wi: &str) -> Command {
+        self.admit_into(unit, wi, Self::RUN)
+    }
+
+    pub fn admit_into(&mut self, unit: &str, wi: &str, run: &str) -> Command {
         self.authority_cmd(
             &format!("admit {unit}"),
             None,
             Method::UnitAdmit {
                 unit_id: unit.into(),
                 work_item_id: wi.into(),
+                run_id: run.into(),
             },
         )
     }
@@ -151,8 +172,12 @@ impl Ctx {
         )
     }
 
-    /// Standard opening: work item wi-1 created, unit u-1 admitted (v1).
+    /// Standard opening: run-1 opened, work item wi-1 created, unit u-1
+    /// admitted (v1). The run comes first because §5.2 rule 4 resolves a
+    /// member up to its run, so admission into a nonexistent run is refused.
     pub fn seed_unit(&mut self) {
+        let run = self.open_run(Self::RUN);
+        completed(self.funnel.submit(&run));
         let wi = self.create_work_item("wi-1");
         completed(self.funnel.submit(&wi));
         let admit = self.admit("u-1", "wi-1");

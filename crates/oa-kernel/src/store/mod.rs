@@ -433,6 +433,30 @@ impl Store {
     /// the answer has to come from committed state — so this returns the
     /// node set and the caller reads it through the open write transaction,
     /// never the published snapshot.
+    /// Every (unit_id, node) pair. I11's close predicate has to find the
+    /// units belonging to a run, and `run_id` lives on the unit row rather
+    /// than in an edge — the control graph declares no edge types.
+    pub(crate) fn unit_entries(&self) -> Vec<(String, NodeId)> {
+        self.books
+            .lock()
+            .expect("books")
+            .units
+            .iter()
+            .map(|(k, v)| (k.clone(), *v))
+            .collect()
+    }
+
+    /// Every (operation_key, node) pair, for the same walk.
+    pub(crate) fn effect_entries(&self) -> Vec<(String, NodeId)> {
+        self.books
+            .lock()
+            .expect("books")
+            .effects
+            .iter()
+            .map(|(k, v)| (k.clone(), *v))
+            .collect()
+    }
+
     #[allow(dead_code)]
     pub(crate) fn cancel_request_nodes(&self) -> Vec<NodeId> {
         self.books

@@ -96,12 +96,22 @@ fn shared_id_across_kinds_commits_cleanly() {
     // Aggregate ids are unique per KIND: a work item and a unit sharing the
     // string "x" must not collide the journal's derived composite.
     let mut ctx = Ctx::new();
+    let run = ctx.open_run(Ctx::RUN);
+    completed(ctx.funnel.submit(&run));
     let wi = ctx.create_work_item("x");
     completed(ctx.funnel.submit(&wi));
     let admit = ctx.admit("x", "x");
     completed(ctx.funnel.submit(&admit));
 
-    let journal = ctx.funnel.store().journal();
+    // The run open is fixture setup for a different aggregate; this test is
+    // about the work_item/unit pair that share the id "x".
+    let journal: Vec<_> = ctx
+        .funnel
+        .store()
+        .journal()
+        .into_iter()
+        .filter(|e| e.aggregate_kind != "run")
+        .collect();
     assert_eq!(journal.len(), 2);
     assert_eq!(journal[0].aggregate_kind, "work_item");
     assert_eq!(journal[1].aggregate_kind, "unit");
@@ -114,6 +124,8 @@ fn journal_appends_exactly_one_event_set_per_completed_command() {
     // Obligation 2's journal half: one event set per completed command,
     // none on replay, none on reissue.
     let mut ctx = Ctx::new();
+    let run = ctx.open_run(Ctx::RUN);
+    completed(ctx.funnel.submit(&run));
     let wi = ctx.create_work_item("wi-1");
     completed(ctx.funnel.submit(&wi));
     let admit = ctx.admit("u-1", "wi-1");
@@ -124,11 +136,12 @@ fn journal_appends_exactly_one_event_set_per_completed_command() {
     completed(ctx.funnel.submit(&progress));
 
     let journal = ctx.funnel.store().journal();
-    assert_eq!(journal.len(), 4);
+    assert_eq!(journal.len(), 5);
     let kinds: Vec<&str> = journal.iter().map(|e| e.event_kind.as_str()).collect();
     assert_eq!(
         kinds,
         [
+            "run.opened",
             "work_item.created",
             "unit.admitted",
             "unit.dispatched",
@@ -147,10 +160,10 @@ fn journal_appends_exactly_one_event_set_per_completed_command() {
     assert_eq!(unit_versions, [1, 2, 3], "contiguous per aggregate");
 
     // Replays append nothing.
-    for cmd in [&wi, &admit, &dispatch, &progress] {
+    for cmd in [&run, &wi, &admit, &dispatch, &progress] {
         replayed(ctx.funnel.submit(cmd));
     }
-    assert_eq!(ctx.funnel.store().journal().len(), 4);
+    assert_eq!(ctx.funnel.store().journal().len(), 5);
 
     // token.reissue is not a domain transition: no event.
     let reissue = ctx.holder_cmd(
@@ -162,7 +175,7 @@ fn journal_appends_exactly_one_event_set_per_completed_command() {
         },
     );
     completed(ctx.funnel.submit(&reissue));
-    assert_eq!(ctx.funnel.store().journal().len(), 4);
+    assert_eq!(ctx.funnel.store().journal().len(), 5);
 }
 
 #[test]
@@ -171,6 +184,8 @@ fn concurrent_identical_retry_replays_instead_of_erroring() {
     // concurrent submits must resolve Completed + Replayed (in either
     // order), never a unique-constraint `internal`.
     let mut ctx = Ctx::new();
+    let run = ctx.open_run(Ctx::RUN);
+    completed(ctx.funnel.submit(&run));
     let wi = ctx.create_work_item("wi-1");
     completed(ctx.funnel.submit(&wi));
 

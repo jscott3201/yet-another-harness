@@ -22,14 +22,42 @@ fn pairs_for(label: &str, key: &str) -> PropertyMap {
             (db("stamp"), Value::Uint(0)),
             (db("status"), s("admitted")),
             (db("work_item_id"), s("w1")),
+            (db("run_id"), s("r1")),
             (db("record"), s("{}")),
         ]),
         "Attempt" => p(vec![
             (db("attempt_key"), s(key)),
+            (db("attempt_id"), s(&format!("aid-{key}"))),
             (db("unit_id"), s("u1")),
             (db("attempt_epoch"), Value::Uint(1)),
             (db("holder_id"), s("h1")),
             (db("status"), s("active")),
+        ]),
+        "Run" => p(vec![
+            (db("run_id"), s(key)),
+            (db("version"), Value::Uint(1)),
+            (db("status"), s("open")),
+            (db("goal_work_item_id"), s("w1")),
+            (db("record"), s("{}")),
+        ]),
+        "CancelRequest" => p(vec![
+            (db("cancel_request_id"), s(key)),
+            (db("version"), Value::Uint(1)),
+            (db("root_kind"), s("execution_unit")),
+            (db("root_id"), s("u1")),
+            (db("policy"), s("attached_cascade")),
+            (db("reason"), s("owner_request")),
+            (db("scope"), s("[]")),
+            (db("status"), s("requested")),
+            (db("record"), s("{}")),
+        ]),
+        "CancelDelivery" => p(vec![
+            (db("delivery_key"), s(key)),
+            (db("cancel_request_id"), s("cr1")),
+            (db("member_id"), s("u1")),
+            (db("member_kind"), s("execution_unit")),
+            (db("outcome"), s("observed_stopped")),
+            (db("record"), s("{}")),
         ]),
         "Lease" => p(vec![
             (db("unit_id"), s(key)),
@@ -117,6 +145,9 @@ fn recover_rebuilds_every_book() {
         ("WorkItem", "w1"),
         ("Receipt", "r1"),
         ("Evidence", "ev1"),
+        ("Run", "r1"),
+        ("CancelRequest", "cr1"),
+        ("CancelDelivery", "cr1|u1"),
     ] {
         create_raw(&store, label, pairs_for(label, key)).unwrap();
     }
@@ -131,6 +162,15 @@ fn recover_rebuilds_every_book() {
     assert!(store.receipt_node("r1").is_some(), "receipt book");
     assert!(store.effect_node("op1").is_some(), "effect book");
     assert!(store.evidence_node("ev1").is_some(), "evidence book");
+    assert!(store.run_node("r1").is_some(), "run book");
+    assert!(
+        store.cancel_request_node("cr1").is_some(),
+        "cancel request book"
+    );
+    assert!(
+        store.cancel_delivery_node("cr1|u1").is_some(),
+        "cancel delivery book"
+    );
     assert!(
         store.books.lock().unwrap().events.contains_key("e1"),
         "event book"
@@ -153,6 +193,9 @@ fn every_unique_key_rejects_a_duplicate() {
         ("WorkItem", "w1"),
         ("Receipt", "r1"),
         ("Evidence", "ev1"),
+        ("Run", "r1"),
+        ("CancelRequest", "cr1"),
+        ("CancelDelivery", "cr1|u1"),
     ] {
         create_raw(&store, label, pairs_for(label, key)).unwrap();
         assert!(
@@ -201,6 +244,13 @@ fn immutable_fields_reject_updates() {
         ),
         ("Receipt", pairs_for("Receipt", "r1"), "request_digest"),
         ("Evidence", pairs_for("Evidence", "ev1"), "record"),
+        // §5.2 rule 2: a committed scope can never be widened.
+        ("CancelRequest", pairs_for("CancelRequest", "cr1"), "scope"),
+        (
+            "CancelDelivery",
+            pairs_for("CancelDelivery", "cr1|u1"),
+            "outcome",
+        ),
     ];
     for (label, pairs, frozen) in cases {
         let node = create_raw(&store, label, pairs).unwrap();

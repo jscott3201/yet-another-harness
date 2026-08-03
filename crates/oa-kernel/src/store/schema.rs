@@ -101,6 +101,12 @@ pub fn graph_type() -> GraphTypeDef {
                     prop_def("stamp", Uint, true, false, false),
                     prop_def("status", PStr, true, false, false),
                     prop_def("work_item_id", PStr, true, true, false),
+                    // §1.2's ExecutionUnit.run_id. Required, not optional:
+                    // §5.2 rule 4 resolves a member up to its run to find an
+                    // applicable ancestor cancellation, and a unit with no
+                    // run would make that walk answer "none applicable" —
+                    // silently admitting work under a cancelled run.
+                    prop_def("run_id", PStr, true, true, false),
                     prop_def("record", PStr, true, false, false),
                 ],
             ),
@@ -110,6 +116,10 @@ pub fn graph_type() -> GraphTypeDef {
                 vec![
                     // UNIQUE(unit_id, attempt_epoch) as a derived key.
                     prop_def("attempt_key", PStr, true, true, true),
+                    // §1.2's Attempt.attempt_id. The derived key addresses a
+                    // row; this is the identity a CancelRequest roots at,
+                    // since §5.1 roots are ids and not composite keys.
+                    prop_def("attempt_id", PStr, true, true, true),
                     prop_def("unit_id", PStr, true, true, false),
                     prop_def("attempt_epoch", Uint, true, true, false),
                     prop_def("holder_id", PStr, true, true, false),
