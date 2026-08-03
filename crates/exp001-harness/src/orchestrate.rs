@@ -735,8 +735,12 @@ pub fn takeover_trial(ctx: &TrialCtx<'_>, attempt: u32) -> Result<TrialVerdict, 
 
 /// §6 corruption drill: flip one byte inside a committed record's WAL entry
 /// with the store closed; the auditor must fail closed — name the damage —
-/// never pass silently. Variants cycle per rep: event payload, receipt
-/// digest, current-state region of the same entry.
+/// never pass silently. Selene's corruption granularity is the WAL entry
+/// (per-entry payload checksum; header bytes are outside it — flipping one
+/// changes nothing semantic, which run 1 demonstrated), so the variants
+/// differ by which record class's entry is damaged, always flipping inside
+/// the checksummed payload: v0 any event's entry, v1 a receipt digest's
+/// entry, v2 the Dispatch entry that created the unit's current-state row.
 pub fn corruption_trial(ctx: &TrialCtx<'_>, variant: u32) -> Result<TrialVerdict, String> {
     let name = format!("CorruptionDrill-v{variant}");
     let (trial_dir, store_dir) = fresh_cell_dirs(ctx, &name, 0)?;
@@ -777,12 +781,18 @@ pub fn corruption_trial(ctx: &TrialCtx<'_>, variant: u32) -> Result<TrialVerdict
                 }
             }
             _ => {
-                // Current-state region: earlier bytes of the same entry hold
-                // the unit-row change (mutation order puts it first).
-                let filler = payload.split("\"filler\":\"").nth(1).and_then(|s| s.split('"').next());
-                if let Some(f) = filler {
-                    if f.len() >= 48 {
-                        break (f[..48].as_bytes().to_vec(), payload.len() + 60);
+                // Current-state variant: the Dispatch entry carries the unit
+                // row's creating change; corrupting its payload destroys the
+                // current-state row's durable record. The flip stays inside
+                // the checksummed region via the event filler needle — a
+                // back-off past the payload start can land on unchecksummed
+                // header/padding bytes and damage nothing (run-1 finding).
+                if rec.spec.kind == CommandKind::Dispatch {
+                    let filler = payload.split("\"filler\":\"").nth(1).and_then(|s| s.split('"').next());
+                    if let Some(f) = filler {
+                        if f.len() >= 48 {
+                            break (f[..48].as_bytes().to_vec(), 0usize);
+                        }
                     }
                 }
             }
@@ -792,7 +802,10 @@ pub fn corruption_trial(ctx: &TrialCtx<'_>, variant: u32) -> Result<TrialVerdict
         .windows(needle.len())
         .position(|w| w == needle.as_slice())
         .ok_or("needle not found in WAL bytes")?;
-    let target = hit.saturating_sub(back_off);
+    // Flip inside the needle itself: guaranteed within the entry's
+    // checksummed payload. back_off is retained for provenance in the log.
+    let _ = back_off;
+    let target = hit + 20;
     bytes[target] ^= 0x40;
     std::fs::write(&wal_path, &bytes).map_err(|e| format!("write wal: {e}"))?;
 
