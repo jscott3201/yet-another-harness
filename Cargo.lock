@@ -1172,7 +1172,7 @@ checksum = "1c107b6f4780854c8b126e228ea8869f4d7b71260f962fefb57b996b8959ba6b"
 
 [[package]]
 name = "selene-db-core"
-version = "1.3.0"
+version = "1.4.0"
 dependencies = [
  "bytes",
  "jiff",
@@ -1190,7 +1190,7 @@ dependencies = [
 
 [[package]]
 name = "selene-db-graph"
-version = "1.3.0"
+version = "1.4.0"
 dependencies = [
  "arc-swap",
  "imbl",
@@ -1216,7 +1216,7 @@ dependencies = [
 
 [[package]]
 name = "selene-db-persist"
-version = "1.3.0"
+version = "1.4.0"
 dependencies = [
  "blake3",
  "miette",

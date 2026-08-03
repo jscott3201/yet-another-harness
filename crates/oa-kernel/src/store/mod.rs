@@ -116,6 +116,14 @@ struct Books {
     effects: HashMap<String, NodeId>,
     events: HashMap<String, NodeId>,
     evidence: HashMap<String, NodeId>,
+    runs: HashMap<String, NodeId>,
+    /// Keyed by `cancel_request_id`. §5.2 rule 4 has to answer "is there an
+    /// applicable cancellation" on every admission, so the whole set stays
+    /// addressable rather than being found by scan.
+    cancel_requests: HashMap<String, NodeId>,
+    /// Keyed by the derived `delivery_key` — §5.1's
+    /// UNIQUE(cancel_request_id, member_id).
+    cancel_deliveries: HashMap<String, NodeId>,
 }
 
 pub struct Store {
@@ -238,6 +246,18 @@ impl Store {
             } else if labels.contains(&db("Effect")) {
                 if let Some(k) = get_str("operation_key") {
                     books.effects.insert(k, id);
+                }
+            } else if labels.contains(&db("Run")) {
+                if let Some(k) = get_str("run_id") {
+                    books.runs.insert(k, id);
+                }
+            } else if labels.contains(&db("CancelRequest")) {
+                if let Some(k) = get_str("cancel_request_id") {
+                    books.cancel_requests.insert(k, id);
+                }
+            } else if labels.contains(&db("CancelDelivery")) {
+                if let Some(k) = get_str("delivery_key") {
+                    books.cancel_deliveries.insert(k, id);
                 }
             } else if labels.contains(&db("Event")) {
                 if let Some(c) = props.get(&db("cursor")).and_then(value_u64) {
@@ -378,6 +398,52 @@ impl Store {
             .copied()
     }
 
+    // The four seams below address the §5 rows. They land here rather than
+    // with the funnel methods that consume them because `rebuild_books_and_cursor`
+    // already repopulates all three books on recover — the addressing and its
+    // recovery path are one decision, and splitting them across increments is
+    // how a book gets a writer but no rebuild arm.
+    #[allow(dead_code)]
+    pub(crate) fn run_node(&self, run_id: &str) -> Option<NodeId> {
+        self.books.lock().expect("books").runs.get(run_id).copied()
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn cancel_request_node(&self, cancel_request_id: &str) -> Option<NodeId> {
+        self.books
+            .lock()
+            .expect("books")
+            .cancel_requests
+            .get(cancel_request_id)
+            .copied()
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn cancel_delivery_node(&self, delivery_key: &str) -> Option<NodeId> {
+        self.books
+            .lock()
+            .expect("books")
+            .cancel_deliveries
+            .get(delivery_key)
+            .copied()
+    }
+
+    /// Every committed cancel-request node. §5.2 rule 4 asks "does an
+    /// applicable cancellation cover this member" on every admission, and
+    /// the answer has to come from committed state — so this returns the
+    /// node set and the caller reads it through the open write transaction,
+    /// never the published snapshot.
+    #[allow(dead_code)]
+    pub(crate) fn cancel_request_nodes(&self) -> Vec<NodeId> {
+        self.books
+            .lock()
+            .expect("books")
+            .cancel_requests
+            .values()
+            .copied()
+            .collect()
+    }
+
     pub(crate) fn book_insert(&self, kind: BookKind, key: String, node: NodeId) {
         let mut books = self.books.lock().expect("books");
         match kind {
@@ -389,6 +455,9 @@ impl Store {
             BookKind::Effect => books.effects.insert(key, node),
             BookKind::Event => books.events.insert(key, node),
             BookKind::Evidence => books.evidence.insert(key, node),
+            BookKind::Run => books.runs.insert(key, node),
+            BookKind::CancelRequest => books.cancel_requests.insert(key, node),
+            BookKind::CancelDelivery => books.cancel_deliveries.insert(key, node),
         };
     }
 
@@ -563,8 +632,14 @@ pub(crate) enum BookKind {
     #[allow(dead_code)] // effect-over-store layer (task 5c) inserts these
     Effect,
     Event,
-    #[allow(dead_code)] // evidence rows land with the cancellation layer (5d)
+    #[allow(dead_code)] // evidence rows land with the §8 gateway layer
     Evidence,
+    #[allow(dead_code)] // the §5 funnel methods construct these
+    Run,
+    #[allow(dead_code)]
+    CancelRequest,
+    #[allow(dead_code)]
+    CancelDelivery,
 }
 
 /// Fence-relevant fields of a unit row.

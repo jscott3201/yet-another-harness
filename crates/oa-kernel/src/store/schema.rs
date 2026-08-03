@@ -194,6 +194,57 @@ pub fn graph_type() -> GraphTypeDef {
                     prop_def("record", PStr, true, false, false),
                 ],
             ),
+            // §1.2 cancellation-ownership root. Present so I11's close
+            // predicate has an aggregate to guard: obligation 4 requires
+            // that the enclosing run cannot close success while a member is
+            // still reconciling.
+            node_type(
+                "oa.run",
+                "Run",
+                vec![
+                    prop_def("run_id", PStr, true, true, true),
+                    prop_def("version", Uint, true, false, false),
+                    prop_def("status", PStr, true, false, false),
+                    prop_def("goal_work_item_id", PStr, true, true, false),
+                    prop_def("record", PStr, true, false, false),
+                ],
+            ),
+            // §5.1. `scope` is its own IMMUTABLE property rather than a
+            // field inside the mutable `record`: rule 2's freeze then holds
+            // by construction, so no funnel path can widen a committed
+            // scope even by mistake. `status` stays mutable — the request
+            // walks requested -> delivering -> observed_partial -> settled.
+            node_type(
+                "oa.cancel_request",
+                "CancelRequest",
+                vec![
+                    prop_def("cancel_request_id", PStr, true, true, true),
+                    prop_def("version", Uint, true, false, false),
+                    prop_def("root_kind", PStr, true, true, false),
+                    prop_def("root_id", PStr, true, true, false),
+                    prop_def("policy", PStr, true, true, false),
+                    prop_def("reason", PStr, true, true, false),
+                    prop_def("scope", PStr, true, true, false),
+                    prop_def("status", PStr, true, false, false),
+                    prop_def("record", PStr, true, false, false),
+                ],
+            ),
+            // §5.1 UNIQUE(cancel_request_id, member_id) as a derived key.
+            // Write-once in every property: a delivery row records what was
+            // observed for one member, and rewriting an observation is how
+            // an `unresponsive` member would silently become `stopped`.
+            node_type(
+                "oa.cancel_delivery",
+                "CancelDelivery",
+                vec![
+                    prop_def("delivery_key", PStr, true, true, true),
+                    prop_def("cancel_request_id", PStr, true, true, false),
+                    prop_def("member_id", PStr, true, true, false),
+                    prop_def("member_kind", PStr, true, true, false),
+                    prop_def("outcome", PStr, true, true, false),
+                    prop_def("record", PStr, true, true, false),
+                ],
+            ),
             // §8.1: immutable once sealed — every property immutable.
             node_type(
                 "oa.evidence",
