@@ -12,6 +12,7 @@
 
 mod manifest;
 mod schema;
+mod workload;
 
 use clap::{Parser, Subcommand};
 use schema::{Arm, Cell};
