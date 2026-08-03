@@ -35,7 +35,7 @@ runs.
 | Gate | Proves | Status |
 |---|---|---|
 | G02 — storage fan-in and crash recovery | Atomic CAS + receipt + journal append under process kill, writer-takeover contest, corruption drill | **Passed** — [report](docs/gates/G02-storage-fanin-recovery.md) |
-| G01 — model-free kernel milestone | Command/state/effect/cancellation semantics against fake provider and fake effects; 23 deterministic exit obligations | **In progress** |
+| G01 — model-free kernel milestone | Command/state/effect/cancellation semantics against fake provider and fake effects; 23 deterministic exit obligations | **Next up** |
 | Protocol conformance, adapters 2–4 | Same conformance corpus over UDS, named pipe, loopback HTTP/SSE | Not started |
 | Install and negative tests | Clean-machine install, daemon lifecycle, honest `local.trusted` negative tests | Not started |
 | Multi-agent evaluation freeze | Frozen arms, budgets, and thresholds for the first live multi-agent proof | Blocked on G01/G02 |
