@@ -741,8 +741,12 @@ name = "oa-kernel"
 version = "0.0.1"
 dependencies = [
  "blake3",
+ "selene-db-core",
+ "selene-db-graph",
+ "selene-db-persist",
  "serde",
  "serde_json",
+ "tempfile",
 ]
 
 [[package]]

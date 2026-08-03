@@ -16,6 +16,8 @@
 //! Modules land in dependency order; a module absent from the tree is not
 //! built yet, not implied.
 
+pub mod effect;
 pub mod error;
 pub mod ids;
 pub mod provider;
+pub mod store;

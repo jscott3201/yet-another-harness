@@ -10,6 +10,12 @@ description = "MILE-001: model-free kernel — normalized provider events, effec
 # crate-boundary proposal is gated behind G01/G02 (decisions/01:382-384).
 
 [dependencies]
+selene-core.workspace = true
+selene-graph.workspace = true
+selene-persist.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 blake3.workspace = true
+
+[dev-dependencies]
+tempfile = "3"
