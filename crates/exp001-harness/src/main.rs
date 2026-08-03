@@ -10,14 +10,14 @@
 use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
+use exp001_harness::audit;
 use exp001_harness::manifest::Manifest;
-use exp001_harness::orchestrate::{run_gate, scan_wal, RunConfig};
+use exp001_harness::orchestrate::{RunConfig, run_gate, scan_wal};
 use exp001_harness::plan::trial_seed;
 use exp001_harness::schema::{Arm, Batching, Cell, CommandKind};
 use exp001_harness::sidecar::read_confirmed;
 use exp001_harness::store::Store;
 use exp001_harness::worker::{self, KillDirective, KillMode, WorkerConfig};
-use exp001_harness::audit;
 
 #[derive(Parser)]
 #[command(name = "exp001", about = "EXP-001 Selene fan-in/recovery gate (G02)")]
@@ -30,7 +30,7 @@ struct Cli {
 enum Cmd {
     /// Print the run manifest that a gate run would embed (EXP-001 §3).
     Manifest {
-        #[arg(long, default_value = "/Users/justin/Development/selene-db")]
+        #[arg(long, default_value = "../selene-db")]
         selene_dir: String,
         #[arg(long, default_value = ".")]
         open_agent_dir: String,
@@ -174,9 +174,16 @@ fn parse_arms(s: &str) -> Vec<Arm> {
 fn main() {
     let cli = Cli::parse();
     match cli.cmd {
-        Cmd::Manifest { selene_dir, open_agent_dir, seed } => {
+        Cmd::Manifest {
+            selene_dir,
+            open_agent_dir,
+            seed,
+        } => {
             let m = Manifest::capture(&selene_dir, &open_agent_dir, seed, 20, 50);
-            println!("{}", serde_json::to_string_pretty(&m).expect("manifest serializes"));
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&m).expect("manifest serializes")
+            );
         }
         Cmd::Plan { seed, reps } => {
             let mut trials = 0u32;
@@ -199,7 +206,14 @@ fn main() {
                 Cell::all().count()
             );
         }
-        Cmd::Run { out, seed, reps, arms, cells, attempt_cap } => {
+        Cmd::Run {
+            out,
+            seed,
+            reps,
+            arms,
+            cells,
+            attempt_cap,
+        } => {
             let cfg = RunConfig {
                 out,
                 root_seed: seed,
@@ -210,7 +224,10 @@ fn main() {
             };
             match run_gate(&cfg) {
                 Ok(summary) => {
-                    println!("{}", serde_json::to_string_pretty(&summary).expect("summary"));
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&summary).expect("summary")
+                    );
                     if summary.failed > 0 || !summary.shortfalls.is_empty() {
                         std::process::exit(1);
                     }
@@ -222,8 +239,17 @@ fn main() {
             }
         }
         Cmd::Worker {
-            dir, sidecar, trial_seed, writers, batching, steps, create,
-            kill_mode, kill_at, kill_kind, timer_us,
+            dir,
+            sidecar,
+            trial_seed,
+            writers,
+            batching,
+            steps,
+            create,
+            kill_mode,
+            kill_at,
+            kill_kind,
+            timer_us,
         } => {
             let kill = kill_mode.map(|m| KillDirective {
                 mode: match m.as_str() {
@@ -273,7 +299,11 @@ fn main() {
             }
         },
         Cmd::Contend { dir } => std::process::exit(worker::contend(&dir)),
-        Cmd::Race { dir, racer, hold_ms } => std::process::exit(worker::race(&dir, racer, hold_ms)),
+        Cmd::Race {
+            dir,
+            racer,
+            hold_ms,
+        } => std::process::exit(worker::race(&dir, racer, hold_ms)),
         Cmd::Audit { dir, sidecar } => {
             let scan = scan_wal(&Store::wal_path(&dir));
             let confirmed = read_confirmed(&sidecar).expect("sidecar readable");

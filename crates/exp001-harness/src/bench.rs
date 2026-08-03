@@ -53,8 +53,14 @@ pub struct ArmMeasurement {
 /// Reference totals in seconds for 1000 commits (BENCHMARKS.md:1902-1903).
 fn reference_total_s(writers: u32, batching: Batching) -> (f64, &'static str) {
     match (writers, batching) {
-        (2, Batching::Off) => (4.71, "1-thread batchOFF 4.71s (nearest anchor; no 2-thread row)"),
-        (2, Batching::DefaultBound) => (4.57, "1-thread batchON 4.57s (nearest anchor; no 2-thread row)"),
+        (2, Batching::Off) => (
+            4.71,
+            "1-thread batchOFF 4.71s (nearest anchor; no 2-thread row)",
+        ),
+        (2, Batching::DefaultBound) => (
+            4.57,
+            "1-thread batchON 4.57s (nearest anchor; no 2-thread row)",
+        ),
         (8, Batching::Off) => (3.86, "8-thread batchOFF 3.86s"),
         (8, Batching::DefaultBound) => (0.953, "8-thread batchON 953ms"),
         (32, Batching::Off) => (3.83, "32-thread batchOFF 3.83s"),
@@ -116,7 +122,10 @@ pub fn measure_arm(dir: &Path, arm: Arm, seed: u64) -> Result<ArmMeasurement, St
                 samples
             }));
         }
-        handles.into_iter().flat_map(|h| h.join().expect("writer")).collect()
+        handles
+            .into_iter()
+            .flat_map(|h| h.join().expect("writer"))
+            .collect()
     });
     let total_s = started.elapsed().as_secs_f64();
     let commits = all_samples.len() as u32;
@@ -166,12 +175,19 @@ pub fn run_bench(out: &Path, seed: u64) -> Result<Vec<ArmMeasurement>, String> {
         let m = measure_arm(out, arm, seed)?;
         eprintln!(
             "  p50={}us p95={}us (envelope {}us, within={}) throughput={:.0}/s replay={:.2}s",
-            m.p50_us, m.p95_us, m.envelope_p95_us, m.p95_within_envelope,
-            m.throughput_commits_per_s, m.recovery_replay_s
+            m.p50_us,
+            m.p95_us,
+            m.envelope_p95_us,
+            m.p95_within_envelope,
+            m.throughput_commits_per_s,
+            m.recovery_replay_s
         );
         results.push(m);
     }
-    std::fs::write(out.join("measured.json"), serde_json::to_vec_pretty(&results).expect("measured"))
-        .map_err(|e| e.to_string())?;
+    std::fs::write(
+        out.join("measured.json"),
+        serde_json::to_vec_pretty(&results).expect("measured"),
+    )
+    .map_err(|e| e.to_string())?;
     Ok(results)
 }

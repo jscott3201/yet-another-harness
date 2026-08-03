@@ -96,7 +96,10 @@ pub fn score(snap: &AuditSnapshot, confirmed: &[Confirmed]) -> AuditReport {
         match snap.units.get(&rec.spec.unit_id) {
             None => v.push(Violation {
                 bar: Bar::CommittedTransitionLoss,
-                detail: format!("unit {} confirmed durable but absent after reopen", rec.spec.unit_id),
+                detail: format!(
+                    "unit {} confirmed durable but absent after reopen",
+                    rec.spec.unit_id
+                ),
             }),
             Some(u) => {
                 if u.version < ev.aggregate_version {
@@ -118,7 +121,10 @@ pub fn score(snap: &AuditSnapshot, confirmed: &[Confirmed]) -> AuditReport {
     // direction; artifact refs resolve.
     let mut events_by_aggregate: std::collections::HashMap<u64, Vec<u64>> = Default::default();
     for row in snap.events.values() {
-        events_by_aggregate.entry(row.aggregate_id).or_default().push(row.aggregate_version);
+        events_by_aggregate
+            .entry(row.aggregate_id)
+            .or_default()
+            .push(row.aggregate_version);
     }
     for (unit_id, unit) in &snap.units {
         let mut versions = events_by_aggregate.remove(unit_id).unwrap_or_default();
@@ -133,13 +139,13 @@ pub fn score(snap: &AuditSnapshot, confirmed: &[Confirmed]) -> AuditReport {
                 ),
             });
         }
-        if let Some(a) = &unit.artifact_ref {
-            if !snap.artifacts.contains(a) {
-                v.push(Violation {
-                    bar: Bar::Atomicity,
-                    detail: format!("unit {unit_id} references unpublished artifact {a}"),
-                });
-            }
+        if let Some(a) = &unit.artifact_ref
+            && !snap.artifacts.contains(a)
+        {
+            v.push(Violation {
+                bar: Bar::Atomicity,
+                detail: format!("unit {unit_id} references unpublished artifact {a}"),
+            });
         }
     }
     for (aggregate_id, versions) in events_by_aggregate {
@@ -158,11 +164,17 @@ pub fn score(snap: &AuditSnapshot, confirmed: &[Confirmed]) -> AuditReport {
             Some(1) => {}
             Some(n) => v.push(Violation {
                 bar: Bar::Agreement,
-                detail: format!("event {event_id} (unit {}) has {n} receipts", row.aggregate_id),
+                detail: format!(
+                    "event {event_id} (unit {}) has {n} receipts",
+                    row.aggregate_id
+                ),
             }),
             None => v.push(Violation {
                 bar: Bar::Atomicity,
-                detail: format!("event {event_id} (unit {}) has no receipt", row.aggregate_id),
+                detail: format!(
+                    "event {event_id} (unit {}) has no receipt",
+                    row.aggregate_id
+                ),
             }),
         }
     }

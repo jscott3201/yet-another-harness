@@ -34,7 +34,9 @@ pub struct Sidecar {
 impl Sidecar {
     pub fn create(path: &Path) -> std::io::Result<Sidecar> {
         let file = OpenOptions::new().create(true).append(true).open(path)?;
-        Ok(Sidecar { file: Mutex::new(file) })
+        Ok(Sidecar {
+            file: Mutex::new(file),
+        })
     }
 
     pub fn append(&self, record: &Confirmed) -> std::io::Result<()> {
@@ -79,7 +81,9 @@ mod tests {
     use crate::workload::{UnitPool, WriterStream};
 
     fn spec() -> CommitSpec {
-        WriterStream::new(1, 0).next_spec(&mut UnitPool::new(2)).unwrap()
+        WriterStream::new(1, 0)
+            .next_spec(&mut UnitPool::new(2))
+            .unwrap()
     }
 
     #[test]

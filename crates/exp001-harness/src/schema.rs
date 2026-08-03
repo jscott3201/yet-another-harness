@@ -205,12 +205,30 @@ pub const READERS: u32 = 8;
 
 impl Arm {
     pub const ALL: [Arm; 6] = [
-        Arm { writers: 2, batching: Batching::Off },
-        Arm { writers: 2, batching: Batching::DefaultBound },
-        Arm { writers: 8, batching: Batching::Off },
-        Arm { writers: 8, batching: Batching::DefaultBound },
-        Arm { writers: 32, batching: Batching::Off },
-        Arm { writers: 32, batching: Batching::DefaultBound },
+        Arm {
+            writers: 2,
+            batching: Batching::Off,
+        },
+        Arm {
+            writers: 2,
+            batching: Batching::DefaultBound,
+        },
+        Arm {
+            writers: 8,
+            batching: Batching::Off,
+        },
+        Arm {
+            writers: 8,
+            batching: Batching::DefaultBound,
+        },
+        Arm {
+            writers: 32,
+            batching: Batching::Off,
+        },
+        Arm {
+            writers: 32,
+            batching: Batching::DefaultBound,
+        },
     ];
 
     pub fn label(&self) -> String {

@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+# Fast text gates on every commit: fmt, file-size cap, no-secret scan.
+# Skip once with `git commit --no-verify`; skip a session with
+# `export OA_SKIP_HOOKS=1` (empty, 0, and false do not skip).
+
+set -euo pipefail
+
+case "${OA_SKIP_HOOKS:-}" in
+  "" | 0 | false) ;;
+  *) echo "pre-commit: skipped (OA_SKIP_HOOKS=${OA_SKIP_HOOKS})"; exit 0 ;;
+esac
+
+cd "$(git rev-parse --show-toplevel)"
+
+cargo fmt --all --check
+bash .github/scripts/check-file-size.sh
+bash .github/scripts/check-no-secrets.sh

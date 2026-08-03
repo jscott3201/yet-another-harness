@@ -1,0 +1,55 @@
+# CI for open-agent — runs on pushes and PRs to `main`.
+#
+# This is the TEXT gate: rustfmt, the 700-LOC file-size cap, and the
+# no-secret scan — everything that runs without resolving the workspace. The
+# compile gates (clippy -D warnings --all-targets, the full test suite)
+# CANNOT run on a hosted runner yet: the workspace pins selene-db as a path
+# dependency (`../selene-db`, a private sibling repo) that does not exist
+# here, and even `cargo fmt`/`cargo metadata` refuse a workspace with a
+# missing path dep — hence direct `rustfmt` below. Until selene-db is
+# vendored, published, or wired in via a deploy key, the compile gates run
+# locally in the tracked pre-push hook (.githooks/pre-push;
+# `bash scripts/install-hooks.sh` installs it once per clone).
+#
+# Security: no `${{ github.event.* }}` in any `run:` (confined to if:/with:/env:).
+
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  fmt:
+    name: fmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.97.1
+        with:
+          components: rustfmt
+      - run: git ls-files '*.rs' | xargs rustfmt --check --edition 2024
+
+  file-size-cap:
+    name: file-size cap (700 LOC)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: bash .github/scripts/check-file-size.sh
+
+  no-secret-scan:
+    name: no-secret scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: bash .github/scripts/check-no-secrets.sh

@@ -106,7 +106,8 @@ pub fn run(cfg: &WorkerConfig) -> Result<(), String> {
 
                     let directive_fires = kill.as_ref().is_some_and(|k| {
                         let eligible = k.only_kind.is_none_or(|kind| spec.kind == kind);
-                        eligible && eligible_seen.fetch_add(1, Ordering::SeqCst) + 1 == k.at_eligible
+                        eligible
+                            && eligible_seen.fetch_add(1, Ordering::SeqCst) + 1 == k.at_eligible
                     });
 
                     if directive_fires {
@@ -130,7 +131,9 @@ pub fn run(cfg: &WorkerConfig) -> Result<(), String> {
                         Ok(applied) => {
                             let stale_accepted = spec.expect_reject.is_some();
                             if directive_fires
-                                && kill.as_ref().is_some_and(|k| k.mode == KillMode::ResponseWindow)
+                                && kill
+                                    .as_ref()
+                                    .is_some_and(|k| k.mode == KillMode::ResponseWindow)
                             {
                                 sigkill_self();
                             }
@@ -143,11 +146,15 @@ pub fn run(cfg: &WorkerConfig) -> Result<(), String> {
                                 })
                                 .expect("sidecar append");
                             if directive_fires
-                                && kill.as_ref().is_some_and(|k| k.mode == KillMode::AfterCommit)
+                                && kill
+                                    .as_ref()
+                                    .is_some_and(|k| k.mode == KillMode::AfterCommit)
                             {
                                 sigkill_self();
                             }
-                            pool.lock().expect("pool lock").release(spec.slot, &spec, true);
+                            pool.lock()
+                                .expect("pool lock")
+                                .release(spec.slot, &spec, true);
                         }
                         Err(ApplyError::Rejected(r)) => {
                             // Only the PLANNED rejection kind is legal here: an
@@ -156,13 +163,20 @@ pub fn run(cfg: &WorkerConfig) -> Result<(), String> {
                             // pass without ever exercising its path.
                             let planned_ok = matches!(
                                 (spec.expect_reject, &r),
-                                (Some(ExpectedRejection::StaleLease), Rejection::StaleLease { .. })
-                                    | (Some(ExpectedRejection::StaleHolder), Rejection::StaleHolder { .. })
+                                (
+                                    Some(ExpectedRejection::StaleLease),
+                                    Rejection::StaleLease { .. }
+                                ) | (
+                                    Some(ExpectedRejection::StaleHolder),
+                                    Rejection::StaleHolder { .. }
+                                )
                             );
                             if !planned_ok {
                                 panic!("unplanned funnel rejection {r:?} for {spec:?}");
                             }
-                            pool.lock().expect("pool lock").release(spec.slot, &spec, false);
+                            pool.lock()
+                                .expect("pool lock")
+                                .release(spec.slot, &spec, false);
                         }
                         Err(ApplyError::Harness(msg)) => panic!("harness incoherence: {msg}"),
                         Err(ApplyError::Graph(e)) => {
@@ -225,7 +239,9 @@ pub fn race(dir: &std::path::Path, racer: u32, hold_ms: u64) -> i32 {
             let mut stream = WriterStream::new(0x0ACE_5EED ^ u64::from(racer), 1000 + racer);
             let mut applied = 0;
             while applied < 3 {
-                let Some(spec) = stream.next_spec(&mut pool) else { break };
+                let Some(spec) = stream.next_spec(&mut pool) else {
+                    break;
+                };
                 match store.apply(&spec) {
                     Ok(_) => {
                         pool.release(spec.slot, &spec, true);

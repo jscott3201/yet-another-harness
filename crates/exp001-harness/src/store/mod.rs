@@ -15,15 +15,10 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
-use selene_core::{
-    db_string, DbString, GraphId, LabelDiff, LabelSet, NodeId, PropertyDiff, PropertyMap, Value,
-};
-use selene_graph::{
-    CommitBatching, GraphError, GraphTypeDef, NodeTypeDef, PropertyTypeDef, RowIndex, SharedGraph,
-    ValidationMode,
-};
-use selene_core::{Change, PropertyValueType};
-use selene_persist::{PersistResult, WalReader, DEFAULT_WAL_FILE_NAME};
+use selene_core::Change;
+use selene_core::{GraphId, LabelSet, NodeId, PropertyDiff, PropertyMap, Value};
+use selene_graph::{CommitBatching, GraphError, RowIndex, SharedGraph};
+use selene_persist::{DEFAULT_WAL_FILE_NAME, PersistResult, WalReader};
 
 use crate::schema::{Batching, CommandKind};
 use crate::workload::CommitSpec;
@@ -35,157 +30,41 @@ pub use selene_persist::PersistError;
 
 pub const GRAPH_ID: u64 = 1;
 
-fn db(s: &str) -> DbString {
-    db_string(s).expect("harness strings are valid db strings")
-}
+mod audit;
+mod schema;
 
-fn value_u64(v: &Value) -> Option<u64> {
-    match v {
-        Value::Uint(u) => Some(*u),
-        Value::Int(i) => u64::try_from(*i).ok(),
-        _ => None,
-    }
-}
-
-fn no_labels() -> LabelDiff {
-    LabelDiff::new([], []).expect("empty label diff is valid")
-}
-
-fn props_set(set: impl IntoIterator<Item = (DbString, Value)>) -> PropertyDiff {
-    PropertyDiff::new(set, []).expect("property diff keys are distinct")
-}
-
-fn prop_def(
-    name: &str,
-    value_type: PropertyValueType,
-    required: bool,
-    immutable: bool,
-    unique: bool,
-) -> PropertyTypeDef {
-    PropertyTypeDef {
-        name: db(name),
-        value_type,
-        list_element_type: None,
-        required,
-        default: None,
-        immutable,
-        unique,
-        decimal_type: None,
-        character_string_type: None,
-        byte_string_type: None,
-        record_field_types: None,
-    }
-}
-
-fn node_type(name: &str, label: &str, properties: Vec<PropertyTypeDef>) -> NodeTypeDef {
-    NodeTypeDef {
-        name: db(name),
-        key_labels: LabelSet::single(db(label)),
-        properties,
-        validation_mode: ValidationMode::Strict,
-    }
-}
-
-/// The closed-graph schema. Illustrative per EXP-001 §4 — ADR-001 owns the
-/// real byte-bounded schema; this is the minimum that makes the §7 bars
-/// store-checkable.
-pub fn graph_type() -> GraphTypeDef {
-    use PropertyValueType::{String as PStr, Uint};
-    GraphTypeDef {
-        name: db("exp001.harness"),
-        node_types: vec![
-            node_type(
-                "exp001.unit",
-                "Unit",
-                vec![
-                    prop_def("unit_id", Uint, true, true, true),
-                    prop_def("phase", PStr, true, false, false),
-                    prop_def("version", Uint, true, false, false),
-                    prop_def("attempt_epoch", Uint, true, false, false),
-                    prop_def("holder_id", Uint, true, false, false),
-                    prop_def("artifact_ref", PStr, false, false, false),
-                ],
-            ),
-            node_type(
-                "exp001.attempt",
-                "Attempt",
-                vec![
-                    prop_def("attempt_key", PStr, true, true, true),
-                    prop_def("unit_id", Uint, true, true, false),
-                    prop_def("attempt_epoch", Uint, true, true, false),
-                    prop_def("holder_id", Uint, true, true, false),
-                    prop_def("state", PStr, true, false, false),
-                ],
-            ),
-            node_type(
-                "exp001.lease",
-                "Lease",
-                vec![
-                    prop_def("lease_key", PStr, true, true, true),
-                    prop_def("holder_id", Uint, true, true, false),
-                    prop_def("expiry", Uint, true, false, false),
-                    prop_def("last_renewal", Uint, true, false, false),
-                ],
-            ),
-            node_type(
-                "exp001.effect",
-                "Effect",
-                vec![
-                    prop_def("intent_id", Uint, true, true, true),
-                    prop_def("operation_key", PStr, true, true, false),
-                    prop_def("state", PStr, true, true, false),
-                    prop_def("unit_id", Uint, true, true, false),
-                    prop_def("attempt_epoch", Uint, true, true, false),
-                ],
-            ),
-            node_type(
-                "exp001.receipt",
-                "Receipt",
-                vec![
-                    prop_def("receipt_key", PStr, true, true, true),
-                    prop_def("request_digest", PStr, true, true, false),
-                    prop_def("transition_ref", Uint, true, true, false),
-                ],
-            ),
-            node_type(
-                "exp001.event",
-                "Event",
-                vec![
-                    prop_def("event_id", Uint, true, true, true),
-                    // Derived composite key: Selene's `unique` is
-                    // single-property, so `(aggregate_id, aggregate_version,
-                    // ordinal)` rides one derived string (R26a).
-                    prop_def("agg_ver_ord", PStr, true, true, true),
-                    prop_def("aggregate_id", Uint, true, true, false),
-                    prop_def("aggregate_version", Uint, true, true, false),
-                    prop_def("ordinal", Uint, true, true, false),
-                    prop_def("kind", PStr, true, true, false),
-                    prop_def("payload", PStr, true, true, false),
-                    prop_def("causation_ref", Uint, false, true, false),
-                ],
-            ),
-            node_type(
-                "exp001.artifact",
-                "Artifact",
-                vec![prop_def("artifact_digest", PStr, true, true, true)],
-            ),
-        ],
-        edge_types: Vec::new(),
-    }
-}
+pub use audit::*;
+pub use schema::graph_type;
+use schema::{db, no_labels, props_set, value_u64};
 
 /// Typed funnel rejections. The store never sees the write (EXP-001 §4 as
 /// amended: funnel-enforced rows).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Rejection {
-    StaleVersion { unit_id: u64, expected: u64, actual: u64 },
-    StaleLease { unit_id: u64, claimed_epoch: u32, current_epoch: u32 },
-    UnknownUnit { unit_id: u64 },
+    StaleVersion {
+        unit_id: u64,
+        expected: u64,
+        actual: u64,
+    },
+    StaleLease {
+        unit_id: u64,
+        claimed_epoch: u32,
+        current_epoch: u32,
+    },
+    UnknownUnit {
+        unit_id: u64,
+    },
     /// Wrong holder for the unit's current epoch (bar 6's second dimension).
-    StaleHolder { unit_id: u64, claimed_holder: u64, current_holder: u64 },
+    StaleHolder {
+        unit_id: u64,
+        claimed_holder: u64,
+        current_holder: u64,
+    },
     /// R26a: deletes of committed journal rows have no store-level rejection
     /// path, so the funnel types the rejection itself.
-    JournalDelete { event_id: u64 },
+    JournalDelete {
+        event_id: u64,
+    },
 }
 
 /// A delete request routed through the funnel. Journal-class rows reject
@@ -236,7 +115,6 @@ pub struct Store {
     // Private on purpose: the funnel premise (R26a) is that no code path
     // reaches the graph except through this module's methods.
     shared: SharedGraph,
-    dir: PathBuf,
     books: Mutex<Books>,
 }
 
@@ -256,14 +134,20 @@ impl Store {
             .with_wal(Self::wal_path(dir), selene_persist::WalConfig::default())?
             .with_commit_batching(commit_batching)
             .build()?;
-        Ok(Store { shared, dir: dir.to_path_buf(), books: Mutex::new(Books::default()) })
+        Ok(Store {
+            shared,
+            books: Mutex::new(Books::default()),
+        })
     }
 
     /// Reopen after a kill. Recovery is a writer takeover: a live holder makes
     /// this fail fast with `WriterLockHeld` rather than block or corrupt.
     pub fn recover(dir: &Path) -> Result<Store, GraphError> {
         let shared = SharedGraph::recover_closed(dir, GraphId::new(GRAPH_ID), graph_type())?;
-        let store = Store { shared, dir: dir.to_path_buf(), books: Mutex::new(Books::default()) };
+        let store = Store {
+            shared,
+            books: Mutex::new(Books::default()),
+        };
         store.rebuild_books();
         Ok(store)
     }
@@ -276,9 +160,15 @@ impl Store {
         for raw in g.live_nodes().iter() {
             // The bitmap is over internal row indices; node_id_for_row is the
             // sanctioned reverse mapping (rows remap under compaction).
-            let Some(id) = g.node_id_for_row(RowIndex::new(raw)) else { continue };
-            let Some(labels) = g.node_labels(id) else { continue };
-            let Some(props) = g.node_properties(id) else { continue };
+            let Some(id) = g.node_id_for_row(RowIndex::new(raw)) else {
+                continue;
+            };
+            let Some(labels) = g.node_labels(id) else {
+                continue;
+            };
+            let Some(props) = g.node_properties(id) else {
+                continue;
+            };
             let get_u64 = |name: &str| props.get(&db(name)).and_then(value_u64);
             if labels.contains(&db("Unit")) {
                 if let Some(uid) = get_u64("unit_id") {
@@ -296,10 +186,10 @@ impl Store {
                 // lease_key is "unit/epoch"; recover it from the key string.
                 if let Some(Value::String(k)) = props.get(&db("lease_key")) {
                     let s = k.as_str();
-                    if let Some((u, e)) = s.split_once('/') {
-                        if let (Ok(u), Ok(e)) = (u.parse(), e.parse()) {
-                            books.leases.insert((u, e), id);
-                        }
+                    if let Some((u, e)) = s.split_once('/')
+                        && let (Ok(u), Ok(e)) = (u.parse(), e.parse())
+                    {
+                        books.leases.insert((u, e), id);
                     }
                 }
             }
@@ -310,7 +200,13 @@ impl Store {
     /// receipt claim + journal append (+ effect/artifact rows) — the exact
     /// shape the R1 hypothesis requires (EXP-001 §1).
     pub fn apply(&self, spec: &CommitSpec) -> Result<Applied, ApplyError> {
-        let unit_node = self.books.lock().expect("books lock").units.get(&spec.unit_id).copied();
+        let unit_node = self
+            .books
+            .lock()
+            .expect("books lock")
+            .units
+            .get(&spec.unit_id)
+            .copied();
 
         let mut txn = self.shared.begin_write();
 
@@ -387,29 +283,37 @@ impl Store {
                 Some(n) => {
                     let mut set = vec![
                         (db("version"), Value::Uint(spec.expected_version + 1)),
-                        (db("phase"), Value::String(db(&format!("{:?}", spec.new_phase)))),
+                        (
+                            db("phase"),
+                            Value::String(db(&format!("{:?}", spec.new_phase))),
+                        ),
                     ];
                     if spec.kind == CommandKind::Dispatch {
-                        set.push((db("attempt_epoch"), Value::Uint(u64::from(spec.attempt_epoch))));
+                        set.push((
+                            db("attempt_epoch"),
+                            Value::Uint(u64::from(spec.attempt_epoch)),
+                        ));
                         set.push((db("holder_id"), Value::Uint(spec.holder_id)));
                     }
                     if let Some(a) = &spec.artifact_ref {
                         set.push((db("artifact_ref"), Value::String(db(a))));
                     }
-                    m.update_node(
-                        n,
-                        no_labels(),
-                        props_set(set),
-                    )?;
+                    m.update_node(n, no_labels(), props_set(set))?;
                 }
                 None => {
                     let n = m.create_node(
                         LabelSet::single(db("Unit")),
                         PropertyMap::from_pairs([
                             (db("unit_id"), Value::Uint(spec.unit_id)),
-                            (db("phase"), Value::String(db(&format!("{:?}", spec.new_phase)))),
+                            (
+                                db("phase"),
+                                Value::String(db(&format!("{:?}", spec.new_phase))),
+                            ),
                             (db("version"), Value::Uint(1)),
-                            (db("attempt_epoch"), Value::Uint(u64::from(spec.attempt_epoch))),
+                            (
+                                db("attempt_epoch"),
+                                Value::Uint(u64::from(spec.attempt_epoch)),
+                            ),
                             (db("holder_id"), Value::Uint(spec.holder_id)),
                         ])
                         .expect("unit property map"),
@@ -425,7 +329,10 @@ impl Store {
                     PropertyMap::from_pairs([
                         (db("attempt_key"), Value::String(db(&key))),
                         (db("unit_id"), Value::Uint(spec.unit_id)),
-                        (db("attempt_epoch"), Value::Uint(u64::from(spec.attempt_epoch))),
+                        (
+                            db("attempt_epoch"),
+                            Value::Uint(u64::from(spec.attempt_epoch)),
+                        ),
                         (db("holder_id"), Value::Uint(spec.holder_id)),
                         (db("state"), Value::String(db("active"))),
                     ])
@@ -470,7 +377,10 @@ impl Store {
                 }
             }
 
-            if matches!(spec.kind, CommandKind::Cancellation | CommandKind::OwnerDecision) {
+            if matches!(
+                spec.kind,
+                CommandKind::Cancellation | CommandKind::OwnerDecision
+            ) {
                 let attempt = self
                     .books
                     .lock()
@@ -491,7 +401,9 @@ impl Store {
                         )?;
                     }
                     None => {
-                        drop(m);
+                        // End the mutator borrow before rolling back; the
+                        // guard has no Drop, so a plain rebind releases it.
+                        let _released = m;
                         txn.rollback();
                         return Err(ApplyError::Harness(format!(
                             "attempt {}/{} missing from address book",
@@ -518,7 +430,10 @@ impl Store {
                     (db("ordinal"), Value::Uint(u64::from(ev.ordinal))),
                     (db("kind"), Value::String(db(&ev.kind))),
                     (db("payload"), Value::String(db(&ev.payload))),
-                    (db("causation_ref"), Value::Uint(ev.causation_ref.unwrap_or(0))),
+                    (
+                        db("causation_ref"),
+                        Value::Uint(ev.causation_ref.unwrap_or(0)),
+                    ),
                 ])
                 .expect("event property map"),
             )?;
@@ -526,8 +441,14 @@ impl Store {
             m.create_node(
                 LabelSet::single(db("Receipt")),
                 PropertyMap::from_pairs([
-                    (db("receipt_key"), Value::String(db(&format!("{}/{}", spec.unit_id, spec.command_id)))),
-                    (db("request_digest"), Value::String(db(&spec.request_digest))),
+                    (
+                        db("receipt_key"),
+                        Value::String(db(&format!("{}/{}", spec.unit_id, spec.command_id))),
+                    ),
+                    (
+                        db("request_digest"),
+                        Value::String(db(&spec.request_digest)),
+                    ),
                     (db("transition_ref"), Value::Uint(spec.events[0].event_id)),
                 ])
                 .expect("receipt property map"),
@@ -541,7 +462,10 @@ impl Store {
                         (db("operation_key"), Value::String(db(&e.operation_key))),
                         (db("state"), Value::String(db(&format!("{:?}", e.state)))),
                         (db("unit_id"), Value::Uint(spec.unit_id)),
-                        (db("attempt_epoch"), Value::Uint(u64::from(spec.attempt_epoch))),
+                        (
+                            db("attempt_epoch"),
+                            Value::Uint(u64::from(spec.attempt_epoch)),
+                        ),
                     ])
                     .expect("effect property map"),
                 )?;
@@ -570,7 +494,11 @@ impl Store {
         }
         books.events.insert(spec.events[0].event_id, event_node);
 
-        Ok(Applied { generation: outcome.generation, durable_at: outcome.durable_at, event_node })
+        Ok(Applied {
+            generation: outcome.generation,
+            durable_at: outcome.durable_at,
+            event_node,
+        })
     }
 
     /// §6 journal-mutation cell, update arm: attempt an in-place payload
@@ -647,7 +575,13 @@ impl Store {
 
     /// Current-state read for audits: (version, attempt_epoch, phase).
     pub fn unit_state(&self, unit_id: u64) -> Option<(u64, u32, String)> {
-        let node = self.books.lock().expect("books lock").units.get(&unit_id).copied()?;
+        let node = self
+            .books
+            .lock()
+            .expect("books lock")
+            .units
+            .get(&unit_id)
+            .copied()?;
         let g = self.shared.read();
         let props = g.node_properties(node)?;
         let version = props.get(&db("version")).and_then(value_u64)?;
@@ -665,15 +599,19 @@ impl Store {
         let g = self.shared.read();
         let mut out = Vec::new();
         for raw in g.live_nodes().iter() {
-            let Some(id) = g.node_id_for_row(RowIndex::new(raw)) else { continue };
-            let Some(labels) = g.node_labels(id) else { continue };
+            let Some(id) = g.node_id_for_row(RowIndex::new(raw)) else {
+                continue;
+            };
+            let Some(labels) = g.node_labels(id) else {
+                continue;
+            };
             if !labels.contains(&db("Event")) {
                 continue;
             }
-            if let Some(props) = g.node_properties(id) {
-                if let Some(eid) = props.get(&db("event_id")).and_then(value_u64) {
-                    out.push(eid);
-                }
+            if let Some(props) = g.node_properties(id)
+                && let Some(eid) = props.get(&db("event_id")).and_then(value_u64)
+            {
+                out.push(eid);
             }
         }
         out.sort_unstable();
@@ -687,45 +625,92 @@ impl Store {
         let g = self.shared.read();
         let mut snap = AuditSnapshot::default();
         for raw in g.live_nodes().iter() {
-            let Some(id) = g.node_id_for_row(RowIndex::new(raw)) else { continue };
-            let Some(labels) = g.node_labels(id) else { continue };
-            let Some(props) = g.node_properties(id) else { continue };
+            let Some(id) = g.node_id_for_row(RowIndex::new(raw)) else {
+                continue;
+            };
+            let Some(labels) = g.node_labels(id) else {
+                continue;
+            };
+            let Some(props) = g.node_properties(id) else {
+                continue;
+            };
             let get_u64 = |name: &str| props.get(&db(name)).and_then(value_u64);
             let get_str = |name: &str| match props.get(&db(name)) {
                 Some(Value::String(s)) => Some(s.as_str().to_string()),
                 _ => None,
             };
             if labels.contains(&db("Unit")) {
-                if let (Some(unit_id), Some(version), Some(epoch), Some(phase)) =
-                    (get_u64("unit_id"), get_u64("version"), get_u64("attempt_epoch"), get_str("phase"))
-                {
+                if let (Some(unit_id), Some(version), Some(epoch), Some(phase)) = (
+                    get_u64("unit_id"),
+                    get_u64("version"),
+                    get_u64("attempt_epoch"),
+                    get_str("phase"),
+                ) {
                     snap.units.insert(
                         unit_id,
-                        UnitRow { version, attempt_epoch: epoch as u32, phase, artifact_ref: get_str("artifact_ref") },
+                        UnitRow {
+                            version,
+                            attempt_epoch: epoch as u32,
+                            phase,
+                            artifact_ref: get_str("artifact_ref"),
+                        },
                     );
                 }
             } else if labels.contains(&db("Event")) {
-                if let (Some(event_id), Some(aggregate_id), Some(aggregate_version), Some(payload)) =
-                    (get_u64("event_id"), get_u64("aggregate_id"), get_u64("aggregate_version"), get_str("payload"))
-                {
-                    snap.events.insert(event_id, EventRow { aggregate_id, aggregate_version, payload });
+                if let (
+                    Some(event_id),
+                    Some(aggregate_id),
+                    Some(aggregate_version),
+                    Some(payload),
+                ) = (
+                    get_u64("event_id"),
+                    get_u64("aggregate_id"),
+                    get_u64("aggregate_version"),
+                    get_str("payload"),
+                ) {
+                    snap.events.insert(
+                        event_id,
+                        EventRow {
+                            aggregate_id,
+                            aggregate_version,
+                            payload,
+                        },
+                    );
                 }
             } else if labels.contains(&db("Receipt")) {
-                if let (Some(key), Some(digest), Some(transition_ref)) =
-                    (get_str("receipt_key"), get_str("request_digest"), get_u64("transition_ref"))
-                {
-                    snap.receipts.insert(key, ReceiptRow { request_digest: digest, transition_ref });
+                if let (Some(key), Some(digest), Some(transition_ref)) = (
+                    get_str("receipt_key"),
+                    get_str("request_digest"),
+                    get_u64("transition_ref"),
+                ) {
+                    snap.receipts.insert(
+                        key,
+                        ReceiptRow {
+                            request_digest: digest,
+                            transition_ref,
+                        },
+                    );
                 }
             } else if labels.contains(&db("Effect")) {
-                if let (Some(intent_id), Some(op), Some(state), Some(unit_id)) =
-                    (get_u64("intent_id"), get_str("operation_key"), get_str("state"), get_u64("unit_id"))
-                {
-                    snap.effects.insert(intent_id, EffectStoreRow { operation_key: op, state, unit_id });
+                if let (Some(intent_id), Some(op), Some(state), Some(unit_id)) = (
+                    get_u64("intent_id"),
+                    get_str("operation_key"),
+                    get_str("state"),
+                    get_u64("unit_id"),
+                ) {
+                    snap.effects.insert(
+                        intent_id,
+                        EffectStoreRow {
+                            operation_key: op,
+                            state,
+                            unit_id,
+                        },
+                    );
                 }
-            } else if labels.contains(&db("Artifact")) {
-                if let Some(d) = get_str("artifact_digest") {
-                    snap.artifacts.insert(d);
-                }
+            } else if labels.contains(&db("Artifact"))
+                && let Some(d) = get_str("artifact_digest")
+            {
+                snap.artifacts.insert(d);
             }
         }
         snap
@@ -755,7 +740,13 @@ impl Store {
     /// Read one event's payload bytes back, for byte-identity assertions
     /// around mutation attempts.
     pub fn event_payload(&self, event_id: u64) -> Option<String> {
-        let node = self.books.lock().expect("books lock").events.get(&event_id).copied()?;
+        let node = self
+            .books
+            .lock()
+            .expect("books lock")
+            .events
+            .get(&event_id)
+            .copied()?;
         let g = self.shared.read();
         let props = g.node_properties(node)?;
         match props.get(&db("payload")) {
@@ -763,72 +754,4 @@ impl Store {
             _ => None,
         }
     }
-}
-
-/// Row maps the auditor scores against (one field per property the bars
-/// reference; payload carried whole for byte-identity checks).
-#[derive(Debug, Default)]
-pub struct AuditSnapshot {
-    pub units: HashMap<u64, UnitRow>,
-    pub events: HashMap<u64, EventRow>,
-    pub receipts: HashMap<String, ReceiptRow>,
-    pub effects: HashMap<u64, EffectStoreRow>,
-    pub artifacts: std::collections::BTreeSet<String>,
-}
-
-#[derive(Debug, Clone)]
-pub struct UnitRow {
-    pub version: u64,
-    pub attempt_epoch: u32,
-    pub phase: String,
-    pub artifact_ref: Option<String>,
-}
-
-#[derive(Debug, Clone)]
-pub struct EventRow {
-    pub aggregate_id: u64,
-    pub aggregate_version: u64,
-    pub payload: String,
-}
-
-#[derive(Debug, Clone)]
-pub struct ReceiptRow {
-    pub request_digest: String,
-    pub transition_ref: u64,
-}
-
-#[derive(Debug, Clone)]
-pub struct EffectStoreRow {
-    pub operation_key: String,
-    pub state: String,
-    pub unit_id: u64,
-}
-
-/// The R26c watch substitute: poll the WAL for entries after `after`, trusting
-/// only entries at or below `watermark` (the committer's `durable_at`) — an
-/// unfiltered poll can observe appended-but-unflushed entries, which is the
-/// I13 hazard the amended cell documents.
-pub fn poll_wal(
-    wal_path: &Path,
-    after: u64,
-    watermark: u64,
-) -> PersistResult<Vec<(u64, Vec<Change>)>> {
-    let reader = WalReader::open(wal_path)?;
-    let stream = reader.iterate(move |h| h.sequence > after && h.sequence <= watermark)?;
-    let mut out = Vec::new();
-    for entry in stream {
-        match entry {
-            Ok(entry) => {
-                let seq = entry.header.sequence;
-                out.push((seq, entry.body()?));
-            }
-            // A torn tail is a live in-flight append, necessarily past the
-            // durability frontier (the committer fsyncs before acking), so
-            // stopping here returns the complete durable prefix. Any other
-            // error (e.g. a checksum mismatch mid-file) propagates.
-            Err(PersistError::TruncatedEntry { .. }) => break,
-            Err(e) => return Err(e),
-        }
-    }
-    Ok(out)
 }

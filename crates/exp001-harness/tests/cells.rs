@@ -8,13 +8,20 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use exp001_harness::schema::{Batching, CommandKind, SemanticEvent};
-use exp001_harness::store::{poll_wal, ApplyError, DeleteTarget, PersistError, Rejection, Store, TypeViolation};
+use exp001_harness::store::{
+    ApplyError, DeleteTarget, PersistError, Rejection, Store, TypeViolation, poll_wal,
+};
 use exp001_harness::workload::{CommitSpec, ExpectedRejection, UnitPool, WriterStream};
 use selene_core::Change;
 use selene_graph::GraphError;
 
 /// Claim → apply → release loop for one writer; returns applied specs.
-fn drive(store: &Store, pool: &mut UnitPool, stream: &mut WriterStream, steps: u32) -> Vec<CommitSpec> {
+fn drive(
+    store: &Store,
+    pool: &mut UnitPool,
+    stream: &mut WriterStream,
+    steps: u32,
+) -> Vec<CommitSpec> {
     let mut applied = Vec::new();
     for _ in 0..steps {
         let spec = stream.next_spec(pool).expect("free slot");
@@ -32,8 +39,13 @@ fn drive(store: &Store, pool: &mut UnitPool, stream: &mut WriterStream, steps: u
                 // rejection would let bar 6 pass without its path running.
                 let planned_ok = matches!(
                     (spec.expect_reject, &r),
-                    (Some(ExpectedRejection::StaleLease), Rejection::StaleLease { .. })
-                        | (Some(ExpectedRejection::StaleHolder), Rejection::StaleHolder { .. })
+                    (
+                        Some(ExpectedRejection::StaleLease),
+                        Rejection::StaleLease { .. }
+                    ) | (
+                        Some(ExpectedRejection::StaleHolder),
+                        Rejection::StaleHolder { .. }
+                    )
                 );
                 assert!(planned_ok, "unplanned funnel rejection {r:?} for {spec:?}");
                 pool.release(spec.slot, &spec, false);
@@ -79,7 +91,11 @@ fn funnel_round_trip_and_recovery() {
             continue; // retired units keep their row but no further claims exist
         }
         let (version, _, _) = store.unit_state(unit_id).expect("unit survives recovery");
-        assert_eq!(version, spec.expected_version + 1, "unit {unit_id} version diverged");
+        assert_eq!(
+            version,
+            spec.expected_version + 1,
+            "unit {unit_id} version diverged"
+        );
     }
 }
 
@@ -95,15 +111,22 @@ fn journal_immutability_cell() {
 
     // Update arm: store-enforced, rejects at the mutator call (immutable
     // property), before any commit.
-    let err = store.try_update_event(target.event_id).expect_err("update must reject");
+    let err = store
+        .try_update_event(target.event_id)
+        .expect_err("update must reject");
     assert!(
-        matches!(err, GraphError::TypeViolation(TypeViolation::ImmutablePropertyUpdate { .. })),
+        matches!(
+            err,
+            GraphError::TypeViolation(TypeViolation::ImmutablePropertyUpdate { .. })
+        ),
         "wrong rejection: {err}"
     );
 
     // Delete arm: a delete REQUEST through the funnel's dispatch (R26a) —
     // typed rejection, store untouched.
-    match store.apply_delete(DeleteTarget::Event { event_id: target.event_id }) {
+    match store.apply_delete(DeleteTarget::Event {
+        event_id: target.event_id,
+    }) {
         Err(ApplyError::Rejected(Rejection::JournalDelete { event_id })) => {
             assert_eq!(event_id, target.event_id)
         }
@@ -111,22 +134,41 @@ fn journal_immutability_cell() {
     }
 
     // Duplicate arms: same event_id, then same composite key with a fresh id.
-    let dup_id = SemanticEvent { payload: "{}".into(), ..target.clone() };
-    let err = store.try_duplicate_event(&dup_id).expect_err("dup event_id must reject");
+    let dup_id = SemanticEvent {
+        payload: "{}".into(),
+        ..target.clone()
+    };
+    let err = store
+        .try_duplicate_event(&dup_id)
+        .expect_err("dup event_id must reject");
     assert!(
-        matches!(err, GraphError::TypeViolation(TypeViolation::UniquePropertyDuplicate { .. })),
+        matches!(
+            err,
+            GraphError::TypeViolation(TypeViolation::UniquePropertyDuplicate { .. })
+        ),
         "wrong rejection: {err}"
     );
-    let dup_composite = SemanticEvent { event_id: 0xDEAD_BEEF, ..target.clone() };
-    let err = store.try_duplicate_event(&dup_composite).expect_err("dup composite must reject");
+    let dup_composite = SemanticEvent {
+        event_id: 0xDEAD_BEEF,
+        ..target.clone()
+    };
+    let err = store
+        .try_duplicate_event(&dup_composite)
+        .expect_err("dup composite must reject");
     assert!(
-        matches!(err, GraphError::TypeViolation(TypeViolation::UniquePropertyDuplicate { .. })),
+        matches!(
+            err,
+            GraphError::TypeViolation(TypeViolation::UniquePropertyDuplicate { .. })
+        ),
         "wrong rejection: {err}"
     );
 
     // Byte identity across all four attempts.
     let after = store.event_payload(target.event_id).expect("payload");
-    assert_eq!(before, after, "journal bytes changed under rejected mutations");
+    assert_eq!(
+        before, after,
+        "journal bytes changed under rejected mutations"
+    );
 }
 
 #[test]
@@ -151,7 +193,11 @@ fn stale_lease_rejects_typed() {
     stale.expected_version = version;
     stale.attempt_epoch = epoch.wrapping_sub(1);
     match store.apply(&stale) {
-        Err(ApplyError::Rejected(Rejection::StaleLease { claimed_epoch, current_epoch, .. })) => {
+        Err(ApplyError::Rejected(Rejection::StaleLease {
+            claimed_epoch,
+            current_epoch,
+            ..
+        })) => {
             assert_eq!(claimed_epoch, epoch.wrapping_sub(1));
             assert_eq!(current_epoch, epoch);
         }

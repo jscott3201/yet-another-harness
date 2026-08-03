@@ -14,7 +14,7 @@
 //! `(unit, epoch, holder)` triples in the stream) and the funnel's own CAS,
 //! which stays armed as defense against harness bugs and kill races.
 
-use crate::schema::{digest, CommandKind, EffectState, SemanticEvent};
+use crate::schema::{CommandKind, EffectState, SemanticEvent, digest};
 use rand::{Rng, SeedableRng};
 use rand_chacha::ChaCha20Rng;
 use serde::{Deserialize, Serialize};
@@ -112,7 +112,10 @@ impl UnitPool {
                 open_op: None,
             })
             .collect();
-        UnitPool { next_unit: size as u64, slots }
+        UnitPool {
+            next_unit: size as u64,
+            slots,
+        }
     }
 
     /// Release a claimed slot, folding in the apply outcome. A rejected apply
@@ -163,7 +166,12 @@ impl WriterStream {
         let mut seed = [0u8; 32];
         seed[..8].copy_from_slice(&trial_seed.to_le_bytes());
         seed[8..12].copy_from_slice(&writer.to_le_bytes());
-        WriterStream { writer, rng: ChaCha20Rng::from_seed(seed), step: 0, command_seq: 0 }
+        WriterStream {
+            writer,
+            rng: ChaCha20Rng::from_seed(seed),
+            step: 0,
+            command_seq: 0,
+        }
     }
 
     /// Claim an unclaimed slot and produce its next legal command. Returns
@@ -205,19 +213,27 @@ impl WriterStream {
         // OwnerDecision retires a unit. Epochs therefore grow past 1, which
         // the stale-lease injection below needs.
         let new_phase = match kind {
-            CommandKind::Dispatch
-            | CommandKind::LeaseRenewal
-            | CommandKind::ProgressRollup => UnitPhase::Working,
+            CommandKind::Dispatch | CommandKind::LeaseRenewal | CommandKind::ProgressRollup => {
+                UnitPhase::Working
+            }
             CommandKind::ToolCompletion | CommandKind::ReviewEvidence => UnitPhase::Reviewing,
             CommandKind::Cancellation => UnitPhase::Ready,
             CommandKind::OwnerDecision => UnitPhase::Terminal,
         };
 
-        let mut attempt_epoch = if kind == CommandKind::Dispatch { s.attempt_epoch + 1 } else { s.attempt_epoch };
+        let mut attempt_epoch = if kind == CommandKind::Dispatch {
+            s.attempt_epoch + 1
+        } else {
+            s.attempt_epoch
+        };
         // Bar 6 injections cover both dimensions of the superseded triple, on
         // renewals AND writes: a stale epoch (needs a genuinely superseded
         // epoch, so >= 2) or a wrong holder for the current epoch.
-        let mut holder_id = if kind == CommandKind::Dispatch { u64::from(self.writer) } else { s.holder };
+        let mut holder_id = if kind == CommandKind::Dispatch {
+            u64::from(self.writer)
+        } else {
+            s.holder
+        };
         let mut expect_reject = None;
         let injectable = matches!(
             kind,
@@ -272,7 +288,8 @@ impl WriterStream {
             _ => None,
         };
 
-        let artifact_ref = (kind == CommandKind::ReviewEvidence).then(|| digest(payload.as_bytes()));
+        let artifact_ref =
+            (kind == CommandKind::ReviewEvidence).then(|| digest(payload.as_bytes()));
 
         Some(CommitSpec {
             writer: self.writer,
@@ -350,16 +367,21 @@ mod tests {
     fn mix_covers_all_seven_commands() {
         let specs = generate(11, 8, 400);
         for kind in CommandKind::MIX {
-            assert!(specs.iter().any(|s| s.kind == kind), "{kind:?} never generated");
+            assert!(
+                specs.iter().any(|s| s.kind == kind),
+                "{kind:?} never generated"
+            );
         }
     }
 
     #[test]
     fn artifact_refs_ride_review_evidence() {
         let specs = generate(11, 8, 400);
-        assert!(specs
-            .iter()
-            .all(|s| s.artifact_ref.is_some() == (s.kind == CommandKind::ReviewEvidence)));
+        assert!(
+            specs
+                .iter()
+                .all(|s| s.artifact_ref.is_some() == (s.kind == CommandKind::ReviewEvidence))
+        );
         assert!(specs.iter().any(|s| s.artifact_ref.is_some()));
     }
 
@@ -367,17 +389,23 @@ mod tests {
     fn rework_grows_epochs_and_injects_stale_leases() {
         let specs = generate(13, 8, 600);
         assert!(
-            specs.iter().any(|s| s.kind == CommandKind::Dispatch && s.attempt_epoch >= 2),
+            specs
+                .iter()
+                .any(|s| s.kind == CommandKind::Dispatch && s.attempt_epoch >= 2),
             "no unit ever re-dispatched; stale-lease coverage is impossible"
         );
         let stale: Vec<_> = specs.iter().filter(|s| s.expect_reject.is_some()).collect();
         assert!(!stale.is_empty(), "no bar-6 injection in 4800 specs");
         assert!(
-            stale.iter().any(|s| s.expect_reject == Some(ExpectedRejection::StaleLease)),
+            stale
+                .iter()
+                .any(|s| s.expect_reject == Some(ExpectedRejection::StaleLease)),
             "no stale-epoch injection"
         );
         assert!(
-            stale.iter().any(|s| s.expect_reject == Some(ExpectedRejection::StaleHolder)),
+            stale
+                .iter()
+                .any(|s| s.expect_reject == Some(ExpectedRejection::StaleHolder)),
             "no stale-holder injection"
         );
         assert!(
