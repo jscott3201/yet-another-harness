@@ -6,17 +6,19 @@ rust-version.workspace = true
 publish = false
 description = "EXP-001: Selene fan-in and crash-recovery gate harness (G02)"
 
-# selene-db is added once the API map lands; the schema/manifest layers are
-# store-independent by design (EXP-001 §4 is illustrative until ADR-001's
-# byte-bounded schema supersedes it).
-
 [dependencies]
+selene-core.workspace = true
+selene-graph.workspace = true
+selene-persist.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 rand.workspace = true
 rand_chacha.workspace = true
 blake3.workspace = true
 clap.workspace = true
+
+[dev-dependencies]
+tempfile = "3"
 
 [[bin]]
 name = "exp001"

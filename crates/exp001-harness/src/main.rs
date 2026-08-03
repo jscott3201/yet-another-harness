@@ -6,16 +6,15 @@
 //! — mercy a real crash doesn't grant), reopens the store, and audits.
 //! `audit` alone never writes.
 //!
-//! Store integration is not wired yet: `run`/`worker`/`audit` exit with an
-//! honest error until the selene-db dependency lands. `plan` and `manifest`
-//! are complete and deterministic.
-
-mod manifest;
-mod schema;
-mod workload;
+//! Kill orchestration is not wired yet: `run`/`worker`/`audit` exit with an
+//! honest error until it lands. `plan` and `manifest` are complete and
+//! deterministic; the funnel and the non-kill cells live in the library and
+//! run under `cargo test`.
 
 use clap::{Parser, Subcommand};
-use schema::{Arm, Cell};
+use exp001_harness::plan::trial_seed;
+use exp001_harness::schema::{Arm, Cell};
+use exp001_harness::manifest::Manifest;
 
 #[derive(Parser)]
 #[command(name = "exp001", about = "EXP-001 Selene fan-in/recovery gate (G02)")]
@@ -44,7 +43,7 @@ enum Cmd {
         #[arg(long, default_value_t = 20)]
         reps: u32,
     },
-    /// Execute the gate (orchestrator role). Not wired until selene-db lands.
+    /// Execute the gate (orchestrator role). Not wired yet.
     Run,
     /// Internal: workload process spawned and killed by `run`.
     Worker,
@@ -52,20 +51,11 @@ enum Cmd {
     Audit,
 }
 
-/// Per-trial seeds derive from the root seed and the trial's identity, so one
-/// failing trial replays alone without re-running its predecessors (§10's
-/// replay-exactly obligation).
-fn trial_seed(root: u64, arm: &Arm, cell: Cell, rep: u32) -> u64 {
-    let key = format!("{root}/{}/{:?}/{rep}", arm.label(), cell);
-    let hash = blake3::hash(key.as_bytes());
-    u64::from_le_bytes(hash.as_bytes()[..8].try_into().unwrap())
-}
-
 fn main() {
     let cli = Cli::parse();
     match cli.cmd {
         Cmd::Manifest { selene_dir, open_agent_dir, seed } => {
-            let m = manifest::Manifest::capture(&selene_dir, &open_agent_dir, seed, 20, 50);
+            let m = Manifest::capture(&selene_dir, &open_agent_dir, seed, 20, 50);
             println!("{}", serde_json::to_string_pretty(&m).expect("manifest serializes"));
         }
         Cmd::Plan { seed, reps } => {
@@ -83,28 +73,17 @@ fn main() {
                     }
                 }
             }
-            eprintln!("{trials} trials ({} arms x {} cells x {reps} reps)", Arm::ALL.len(), Cell::all().count());
+            eprintln!(
+                "{trials} trials ({} arms x {} cells x {reps} reps)",
+                Arm::ALL.len(),
+                Cell::all().count()
+            );
         }
         Cmd::Run | Cmd::Worker | Cmd::Audit => {
             eprintln!(
-                "not wired: selene-db integration pending (OA Queue: EXP-001 harness implementation)"
+                "not wired: kill orchestration pending (OA Queue: EXP-001 harness implementation)"
             );
             std::process::exit(2);
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn trial_seeds_are_stable_and_distinct() {
-        let arm = Arm::ALL[0];
-        let a = trial_seed(7, &arm, Cell::Kill(schema::KillPoint::PreSeal), 0);
-        let b = trial_seed(7, &arm, Cell::Kill(schema::KillPoint::PreSeal), 0);
-        let c = trial_seed(7, &arm, Cell::Kill(schema::KillPoint::PreSeal), 1);
-        assert_eq!(a, b);
-        assert_ne!(a, c);
     }
 }

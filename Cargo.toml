@@ -10,6 +10,12 @@ edition = "2024"
 rust-version = "1.97"
 
 [workspace.dependencies]
+# Path deps at the R25/EXP-001 pinned SHA (9a61de1); the run manifest records
+# the actual checkout. Unreleased APIs are required — crates.io v1.4.0 lacks
+# them — so switch these to git deps pinned to the SHA at the public flip.
+selene-core = { package = "selene-db-core", path = "../selene-db/crates/selene-core" }
+selene-graph = { package = "selene-db-graph", path = "../selene-db/crates/selene-graph" }
+selene-persist = { package = "selene-db-persist", path = "../selene-db/crates/selene-persist" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 rand = "0.9"
