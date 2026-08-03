@@ -102,6 +102,13 @@ enum Cmd {
         #[arg(long, default_value_t = 1500)]
         hold_ms: u64,
     },
+    /// MEASURED metrics (EXP-001 §8): latency/throughput/replay per arm.
+    Bench {
+        #[arg(long)]
+        out: PathBuf,
+        #[arg(long, default_value_t = 1)]
+        seed: u64,
+    },
     /// Rescore an existing trial directory (never writes to its store).
     Audit {
         #[arg(long)]
@@ -245,6 +252,26 @@ fn main() {
                 std::process::exit(1);
             }
         }
+        Cmd::Bench { out, seed } => match exp001_harness::bench::run_bench(&out, seed) {
+            Ok(results) => {
+                let breaches: Vec<&str> = results
+                    .iter()
+                    .filter(|m| !m.p95_within_envelope || !m.replay_within_10s)
+                    .map(|m| m.arm.as_str())
+                    .collect();
+                if breaches.is_empty() {
+                    println!("all arms within the provisional envelope");
+                } else {
+                    // A breach forces an owner ruling before the gate can be
+                    // scored PASS (s8) - it is not a gate failure by itself.
+                    println!("envelope breaches requiring owner ruling: {breaches:?}");
+                }
+            }
+            Err(e) => {
+                eprintln!("bench failed: {e}");
+                std::process::exit(2);
+            }
+        },
         Cmd::Contend { dir } => std::process::exit(worker::contend(&dir)),
         Cmd::Race { dir, racer, hold_ms } => std::process::exit(worker::race(&dir, racer, hold_ms)),
         Cmd::Audit { dir, sidecar } => {

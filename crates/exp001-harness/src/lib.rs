@@ -4,6 +4,7 @@
 //! worker, auditor) and the integration tests share.
 
 pub mod audit;
+pub mod bench;
 pub mod manifest;
 pub mod orchestrate;
 pub mod plan;
