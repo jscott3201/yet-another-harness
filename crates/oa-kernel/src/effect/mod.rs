@@ -246,9 +246,7 @@ impl EffectIntent {
     /// §9.7) does so on that evidence through `settle`, not through this
     /// classifier.
     pub fn classify_targets(&self) -> EffectTerminal {
-        if self.targets.is_empty() {
-            EffectTerminal::Unknown
-        } else if self.targets.iter().any(|t| t.state == TargetState::Unknown) {
+        if self.targets.is_empty() || self.targets.iter().any(|t| t.state == TargetState::Unknown) {
             EffectTerminal::Unknown
         } else if self.targets.iter().all(|t| t.state == TargetState::Applied) {
             EffectTerminal::Succeeded

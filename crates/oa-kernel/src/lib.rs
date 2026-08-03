@@ -18,6 +18,7 @@
 
 pub mod effect;
 pub mod error;
+pub mod funnel;
 pub mod ids;
 pub mod provider;
 pub mod store;
