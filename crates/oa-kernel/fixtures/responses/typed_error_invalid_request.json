@@ -1,0 +1,20 @@
+{
+  "fixture_id": "typed_error_invalid_request",
+  "scenario_id": "typed_error",
+  "dialect": "responses",
+  "description": "Invalid-request failure surfaces as a typed error.",
+  "turns": [
+    {
+      "attempts": [
+        {
+          "chunks": [
+            {"type": "response.failed", "sequence_number": 1, "response": {"error": {"code": "invalid_request", "message": "Missing required parameter: input"}}}
+          ]
+        }
+      ]
+    }
+  ],
+  "expect": [
+    {"error_kind": "invalid_request"}
+  ]
+}

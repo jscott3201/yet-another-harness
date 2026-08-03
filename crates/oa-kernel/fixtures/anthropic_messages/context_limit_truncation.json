@@ -1,0 +1,21 @@
+{
+  "fixture_id": "context_limit_truncation",
+  "scenario_id": "context_limit_truncation",
+  "dialect": "anthropic_messages",
+  "description": "Input exceeds the scripted 200k context window: the kernel must surface the typed rejection, not silently shorten the prompt and retry.",
+  "context_window_tokens": 200000,
+  "turns": [
+    {
+      "attempts": [
+        {
+          "chunks": [
+            {"type": "error", "error": {"type": "invalid_request_error", "message": "prompt is too long: 214730 tokens > 200000 maximum"}}
+          ]
+        }
+      ]
+    }
+  ],
+  "expect": [
+    {"error_kind": "context_length_exceeded"}
+  ]
+}

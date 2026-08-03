@@ -1,0 +1,30 @@
+{
+  "fixture_id": "malformed_event",
+  "scenario_id": "malformed_event",
+  "dialect": "responses",
+  "description": "An unknown event type is quarantined and the stream continues; a chunk that is not JSON poisons the stream with a typed defect. Neither crashes the run.",
+  "turns": [
+    {
+      "attempts": [
+        {
+          "chunks": [
+            {"type": "response.created", "sequence_number": 1, "response": {"id": "resp_1", "model": "gpt-fake-1"}},
+            {"type": "response.output_item.added", "sequence_number": 2, "item": {"type": "message", "id": "item_1"}},
+            {"type": "response.reasoning_summary_text.delta", "sequence_number": 3, "item_id": "item_1", "delta": "hmm"},
+            {"type": "response.output_text.delta", "sequence_number": 4, "item_id": "item_1", "delta": "partial"},
+            "{this is not json",
+            {"type": "response.output_text.delta", "sequence_number": 5, "item_id": "item_1", "delta": "never delivered"}
+          ]
+        }
+      ]
+    }
+  ],
+  "expect": [
+    {
+      "text": "partial",
+      "defect": "malformed",
+      "quarantined": 1,
+      "quarantined_types": ["response.reasoning_summary_text.delta"]
+    }
+  ]
+}

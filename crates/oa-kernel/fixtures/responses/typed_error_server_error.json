@@ -1,0 +1,20 @@
+{
+  "fixture_id": "typed_error_server_error",
+  "scenario_id": "typed_error",
+  "dialect": "responses",
+  "description": "Provider-side failure surfaces as a typed transient server error.",
+  "turns": [
+    {
+      "attempts": [
+        {
+          "chunks": [
+            {"type": "response.failed", "sequence_number": 1, "response": {"error": {"code": "server_error", "message": "The server had an error processing your request"}}}
+          ]
+        }
+      ]
+    }
+  ],
+  "expect": [
+    {"error_kind": "server_error"}
+  ]
+}

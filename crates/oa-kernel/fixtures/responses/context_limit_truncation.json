@@ -1,0 +1,21 @@
+{
+  "fixture_id": "context_limit_truncation",
+  "scenario_id": "context_limit_truncation",
+  "dialect": "responses",
+  "description": "Input exceeds the scripted 128k context window: the kernel must surface the typed rejection, not silently shorten the prompt and retry.",
+  "context_window_tokens": 128000,
+  "turns": [
+    {
+      "attempts": [
+        {
+          "chunks": [
+            {"type": "response.failed", "sequence_number": 1, "response": {"error": {"code": "context_length_exceeded", "message": "Your input of 141200 tokens exceeds the model's context window of 128000 tokens"}}}
+          ]
+        }
+      ]
+    }
+  ],
+  "expect": [
+    {"error_kind": "context_length_exceeded"}
+  ]
+}

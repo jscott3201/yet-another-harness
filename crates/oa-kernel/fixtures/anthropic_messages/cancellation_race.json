@@ -1,0 +1,31 @@
+{
+  "fixture_id": "cancellation_race",
+  "scenario_id": "cancellation_race",
+  "dialect": "anthropic_messages",
+  "description": "Cancel and natural completion land in the same tick (the message_stop chunk): exactly one terminal outcome may be recorded, never a double terminal.",
+  "turns": [
+    {
+      "attempts": [
+        {
+          "chunks": [
+            {"type": "message_start", "message": {"id": "msg_1", "model": "claude-fake-1", "usage": {"input_tokens": 6, "cache_read_input_tokens": 0}}},
+            {"type": "content_block_start", "index": 0, "content_block": {"type": "text"}},
+            {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "done"}},
+            {"type": "content_block_stop", "index": 0},
+            {"type": "message_delta", "delta": {"stop_reason": "end_turn"}, "usage": {"output_tokens": 2}},
+            {"type": "message_stop"}
+          ]
+        }
+      ]
+    }
+  ],
+  "control": [
+    {"turn": 0, "at_chunk": 5, "action": "cancel"}
+  ],
+  "expect": [
+    {
+      "text": "done",
+      "finish_reason": "stop"
+    }
+  ]
+}

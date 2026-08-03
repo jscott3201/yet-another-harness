@@ -1,0 +1,20 @@
+{
+  "fixture_id": "typed_error_unsupported_capability",
+  "scenario_id": "typed_error",
+  "dialect": "anthropic_messages",
+  "description": "Capability the endpoint cannot serve: exercises the R5.2 capability-matrix failure path.",
+  "turns": [
+    {
+      "attempts": [
+        {
+          "chunks": [
+            {"type": "error", "error": {"type": "not_supported_error", "message": "Extended thinking is not supported on this endpoint"}}
+          ]
+        }
+      ]
+    }
+  ],
+  "expect": [
+    {"error_kind": "unsupported_capability"}
+  ]
+}

@@ -1,0 +1,50 @@
+{
+  "fixture_id": "tool_call_sequential_dependent",
+  "scenario_id": "tool_call_sequential_dependent",
+  "dialect": "anthropic_messages",
+  "description": "Turn 2's tool arguments depend on turn 1's tool result; ordering is preserved through the normalized event stream.",
+  "turns": [
+    {
+      "attempts": [
+        {
+          "chunks": [
+            {"type": "message_start", "message": {"id": "msg_1", "model": "claude-fake-1", "usage": {"input_tokens": 10, "cache_read_input_tokens": 0}}},
+            {"type": "content_block_start", "index": 0, "content_block": {"type": "tool_use", "id": "toolu_1", "name": "read_file"}},
+            {"type": "content_block_delta", "index": 0, "delta": {"type": "input_json_delta", "partial_json": "{\"path\":\"/etc/hosts\"}"}},
+            {"type": "content_block_stop", "index": 0},
+            {"type": "message_delta", "delta": {"stop_reason": "tool_use"}, "usage": {"output_tokens": 6}},
+            {"type": "message_stop"}
+          ]
+        }
+      ]
+    },
+    {
+      "attempts": [
+        {
+          "chunks": [
+            {"type": "message_start", "message": {"id": "msg_2", "model": "claude-fake-1", "usage": {"input_tokens": 24, "cache_read_input_tokens": 0}}},
+            {"type": "content_block_start", "index": 0, "content_block": {"type": "tool_use", "id": "toolu_2", "name": "write_file"}},
+            {"type": "content_block_delta", "index": 0, "delta": {"type": "input_json_delta", "partial_json": "{\"path\":\"/etc/hosts.bak\",\"content\":\"127.0.0.1 localhost\"}"}},
+            {"type": "content_block_stop", "index": 0},
+            {"type": "message_delta", "delta": {"stop_reason": "tool_use"}, "usage": {"output_tokens": 14}},
+            {"type": "message_stop"}
+          ]
+        }
+      ]
+    }
+  ],
+  "expect": [
+    {
+      "tool_calls": [
+        {"tool_call_id": "toolu_1", "tool_name": "read_file", "arguments": {"path": "/etc/hosts"}}
+      ],
+      "finish_reason": "tool_call"
+    },
+    {
+      "tool_calls": [
+        {"tool_call_id": "toolu_2", "tool_name": "write_file", "arguments": {"path": "/etc/hosts.bak", "content": "127.0.0.1 localhost"}}
+      ],
+      "finish_reason": "tool_call"
+    }
+  ]
+}

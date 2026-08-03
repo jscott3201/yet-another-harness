@@ -1,0 +1,28 @@
+{
+  "fixture_id": "usage_accounting",
+  "scenario_id": "usage_accounting",
+  "dialect": "responses",
+  "description": "Token counts including cached-input and reasoning variants land in kernel field names without reinterpreting the wire names.",
+  "turns": [
+    {
+      "attempts": [
+        {
+          "chunks": [
+            {"type": "response.created", "sequence_number": 1, "response": {"id": "resp_1", "model": "gpt-fake-1"}},
+            {"type": "response.output_item.added", "sequence_number": 2, "item": {"type": "message", "id": "item_1"}},
+            {"type": "response.output_text.delta", "sequence_number": 3, "item_id": "item_1", "delta": "ok"},
+            {"type": "response.output_item.done", "sequence_number": 4, "item": {"type": "message", "id": "item_1"}},
+            {"type": "response.completed", "sequence_number": 5, "response": {"status": "completed", "usage": {"input_tokens": 100, "input_tokens_details": {"cached_tokens": 60}, "output_tokens": 25, "output_tokens_details": {"reasoning_tokens": 15}}}}
+          ]
+        }
+      ]
+    }
+  ],
+  "expect": [
+    {
+      "text": "ok",
+      "finish_reason": "stop",
+      "usage": {"input_tokens": 100, "cached_input_tokens": 60, "output_tokens": 25, "reasoning_tokens": 15}
+    }
+  ]
+}

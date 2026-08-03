@@ -1,0 +1,20 @@
+{
+  "fixture_id": "typed_error_rate_limit",
+  "scenario_id": "typed_error",
+  "dialect": "responses",
+  "description": "Rate-limit failure surfaces as a typed error, not a raw provider payload.",
+  "turns": [
+    {
+      "attempts": [
+        {
+          "chunks": [
+            {"type": "response.failed", "sequence_number": 1, "response": {"error": {"code": "rate_limit_exceeded", "message": "Rate limit reached for requests"}}}
+          ]
+        }
+      ]
+    }
+  ],
+  "expect": [
+    {"error_kind": "rate_limit"}
+  ]
+}

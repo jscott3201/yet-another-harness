@@ -1,0 +1,48 @@
+{
+  "fixture_id": "tool_call_sequential_dependent",
+  "scenario_id": "tool_call_sequential_dependent",
+  "dialect": "responses",
+  "description": "Turn 2's function-call arguments depend on turn 1's tool result; ordering is preserved through the normalized event stream.",
+  "turns": [
+    {
+      "attempts": [
+        {
+          "chunks": [
+            {"type": "response.created", "sequence_number": 1, "response": {"id": "resp_1", "model": "gpt-fake-1"}},
+            {"type": "response.output_item.added", "sequence_number": 2, "item": {"type": "function_call", "id": "item_1", "call_id": "call_1", "name": "read_file"}},
+            {"type": "response.function_call_arguments.delta", "sequence_number": 3, "item_id": "item_1", "delta": "{\"path\":\"/etc/hosts\"}"},
+            {"type": "response.output_item.done", "sequence_number": 4, "item": {"type": "function_call", "id": "item_1", "call_id": "call_1", "name": "read_file", "arguments": "{\"path\":\"/etc/hosts\"}"}},
+            {"type": "response.completed", "sequence_number": 5, "response": {"status": "completed", "usage": {"input_tokens": 10, "input_tokens_details": {"cached_tokens": 0}, "output_tokens": 6, "output_tokens_details": {"reasoning_tokens": 0}}}}
+          ]
+        }
+      ]
+    },
+    {
+      "attempts": [
+        {
+          "chunks": [
+            {"type": "response.created", "sequence_number": 1, "response": {"id": "resp_2", "model": "gpt-fake-1"}},
+            {"type": "response.output_item.added", "sequence_number": 2, "item": {"type": "function_call", "id": "item_1", "call_id": "call_2", "name": "write_file"}},
+            {"type": "response.function_call_arguments.delta", "sequence_number": 3, "item_id": "item_1", "delta": "{\"path\":\"/etc/hosts.bak\",\"content\":\"127.0.0.1 localhost\"}"},
+            {"type": "response.output_item.done", "sequence_number": 4, "item": {"type": "function_call", "id": "item_1", "call_id": "call_2", "name": "write_file", "arguments": "{\"path\":\"/etc/hosts.bak\",\"content\":\"127.0.0.1 localhost\"}"}},
+            {"type": "response.completed", "sequence_number": 5, "response": {"status": "completed", "usage": {"input_tokens": 24, "input_tokens_details": {"cached_tokens": 0}, "output_tokens": 14, "output_tokens_details": {"reasoning_tokens": 0}}}}
+          ]
+        }
+      ]
+    }
+  ],
+  "expect": [
+    {
+      "tool_calls": [
+        {"tool_call_id": "call_1", "tool_name": "read_file", "arguments": {"path": "/etc/hosts"}}
+      ],
+      "finish_reason": "tool_call"
+    },
+    {
+      "tool_calls": [
+        {"tool_call_id": "call_2", "tool_name": "write_file", "arguments": {"path": "/etc/hosts.bak", "content": "127.0.0.1 localhost"}}
+      ],
+      "finish_reason": "tool_call"
+    }
+  ]
+}

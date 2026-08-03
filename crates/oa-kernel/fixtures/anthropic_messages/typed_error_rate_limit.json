@@ -1,0 +1,20 @@
+{
+  "fixture_id": "typed_error_rate_limit",
+  "scenario_id": "typed_error",
+  "dialect": "anthropic_messages",
+  "description": "Rate-limit failure surfaces as a typed error, not a raw provider payload.",
+  "turns": [
+    {
+      "attempts": [
+        {
+          "chunks": [
+            {"type": "error", "error": {"type": "rate_limit_error", "message": "Number of request tokens has exceeded your per-minute rate limit"}}
+          ]
+        }
+      ]
+    }
+  ],
+  "expect": [
+    {"error_kind": "rate_limit"}
+  ]
+}

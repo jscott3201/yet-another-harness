@@ -1,0 +1,24 @@
+{
+  "fixture_id": "out_of_order_event",
+  "scenario_id": "out_of_order_event",
+  "dialect": "responses",
+  "description": "A duplicate sequence_number is the duplicate-delta case: it must be detected and reported as an ordering violation, never silently accepted.",
+  "turns": [
+    {
+      "attempts": [
+        {
+          "chunks": [
+            {"type": "response.created", "sequence_number": 1, "response": {"id": "resp_1", "model": "gpt-fake-1"}},
+            {"type": "response.output_item.added", "sequence_number": 2, "item": {"type": "message", "id": "item_1"}},
+            {"type": "response.output_text.delta", "sequence_number": 3, "item_id": "item_1", "delta": "fin"},
+            {"type": "response.output_text.delta", "sequence_number": 3, "item_id": "item_1", "delta": "fin"},
+            {"type": "response.output_item.done", "sequence_number": 4, "item": {"type": "message", "id": "item_1"}}
+          ]
+        }
+      ]
+    }
+  ],
+  "expect": [
+    {"defect": "ordering_violation"}
+  ]
+}

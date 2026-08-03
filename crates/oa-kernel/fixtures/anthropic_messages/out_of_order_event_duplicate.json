@@ -1,0 +1,24 @@
+{
+  "fixture_id": "out_of_order_event_duplicate",
+  "scenario_id": "out_of_order_event",
+  "dialect": "anthropic_messages",
+  "description": "The duplicate-delta case for this arm: a reused content-block index must be detected and reported, never silently accepted.",
+  "turns": [
+    {
+      "attempts": [
+        {
+          "chunks": [
+            {"type": "message_start", "message": {"id": "msg_1", "model": "claude-fake-1", "usage": {"input_tokens": 5, "cache_read_input_tokens": 0}}},
+            {"type": "content_block_start", "index": 0, "content_block": {"type": "text"}},
+            {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "one"}},
+            {"type": "content_block_stop", "index": 0},
+            {"type": "content_block_start", "index": 0, "content_block": {"type": "text"}}
+          ]
+        }
+      ]
+    }
+  ],
+  "expect": [
+    {"defect": "ordering_violation"}
+  ]
+}

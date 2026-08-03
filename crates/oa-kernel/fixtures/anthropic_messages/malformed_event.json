@@ -1,0 +1,30 @@
+{
+  "fixture_id": "malformed_event",
+  "scenario_id": "malformed_event",
+  "dialect": "anthropic_messages",
+  "description": "An unknown event type is quarantined and the stream continues; a chunk that is not JSON poisons the stream with a typed defect. Neither crashes the run.",
+  "turns": [
+    {
+      "attempts": [
+        {
+          "chunks": [
+            {"type": "message_start", "message": {"id": "msg_1", "model": "claude-fake-1", "usage": {"input_tokens": 5, "cache_read_input_tokens": 0}}},
+            {"type": "content_block_start", "index": 0, "content_block": {"type": "text"}},
+            {"type": "ping"},
+            {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "partial"}},
+            "{this is not json",
+            {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "never delivered"}}
+          ]
+        }
+      ]
+    }
+  ],
+  "expect": [
+    {
+      "text": "partial",
+      "defect": "malformed",
+      "quarantined": 1,
+      "quarantined_types": ["ping"]
+    }
+  ]
+}

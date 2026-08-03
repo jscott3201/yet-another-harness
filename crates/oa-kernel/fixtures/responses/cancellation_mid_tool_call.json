@@ -1,0 +1,32 @@
+{
+  "fixture_id": "cancellation_mid_tool_call",
+  "scenario_id": "cancellation_mid_tool_call",
+  "dialect": "responses",
+  "description": "Cancel observed at tick 2 while the function call's arguments are still streaming: the call must resolve to cancelled — started, never completed, never dropped — and the finish is interrupted.",
+  "turns": [
+    {
+      "attempts": [
+        {
+          "chunks": [
+            {"type": "response.created", "sequence_number": 1, "response": {"id": "resp_1", "model": "gpt-fake-1"}},
+            {"type": "response.output_item.added", "sequence_number": 2, "item": {"type": "function_call", "id": "item_1", "call_id": "call_1", "name": "run_command"}},
+            {"type": "response.function_call_arguments.delta", "sequence_number": 3, "item_id": "item_1", "delta": "{\"argv\":[\"sle"},
+            {"type": "response.function_call_arguments.delta", "sequence_number": 4, "item_id": "item_1", "delta": "ep\",\"600\"]}"},
+            {"type": "response.output_item.done", "sequence_number": 5, "item": {"type": "function_call", "id": "item_1", "call_id": "call_1", "name": "run_command", "arguments": "{\"argv\":[\"sleep\",\"600\"]}"}},
+            {"type": "response.completed", "sequence_number": 6, "response": {"status": "completed", "usage": {"input_tokens": 15, "input_tokens_details": {"cached_tokens": 0}, "output_tokens": 7, "output_tokens_details": {"reasoning_tokens": 0}}}}
+          ]
+        }
+      ]
+    }
+  ],
+  "control": [
+    {"turn": 0, "at_chunk": 2, "action": "cancel"}
+  ],
+  "expect": [
+    {
+      "tool_calls": [],
+      "cancelled_tool_calls": ["call_1"],
+      "finish_reason": "interrupted"
+    }
+  ]
+}

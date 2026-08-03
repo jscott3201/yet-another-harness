@@ -1,0 +1,33 @@
+{
+  "fixture_id": "cancellation_mid_stream",
+  "scenario_id": "cancellation_mid_stream",
+  "dialect": "anthropic_messages",
+  "description": "Cancel observed at tick 3 while text deltas are still arriving: the consumer appends the same-tick delta, then nothing more — the scripted tail (ticks 4-7) must never land, and the finish is interrupted.",
+  "turns": [
+    {
+      "attempts": [
+        {
+          "chunks": [
+            {"type": "message_start", "message": {"id": "msg_1", "model": "claude-fake-1", "usage": {"input_tokens": 9, "cache_read_input_tokens": 0}}},
+            {"type": "content_block_start", "index": 0, "content_block": {"type": "text"}},
+            {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "counting "}},
+            {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "one two "}},
+            {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "three four"}},
+            {"type": "content_block_stop", "index": 0},
+            {"type": "message_delta", "delta": {"stop_reason": "end_turn"}, "usage": {"output_tokens": 8}},
+            {"type": "message_stop"}
+          ]
+        }
+      ]
+    }
+  ],
+  "control": [
+    {"turn": 0, "at_chunk": 3, "action": "cancel"}
+  ],
+  "expect": [
+    {
+      "text": "counting one two ",
+      "finish_reason": "interrupted"
+    }
+  ]
+}

@@ -1,0 +1,33 @@
+{
+  "fixture_id": "tool_call_parallel",
+  "scenario_id": "tool_call_parallel",
+  "dialect": "responses",
+  "description": "Two tool calls issued in one turn; both are pending when the turn ends, so the kernel tracks independent tool-call state concurrently.",
+  "turns": [
+    {
+      "attempts": [
+        {
+          "chunks": [
+            {"type": "response.created", "sequence_number": 1, "response": {"id": "resp_1", "model": "gpt-fake-1"}},
+            {"type": "response.output_item.added", "sequence_number": 2, "item": {"type": "function_call", "id": "item_1", "call_id": "call_1", "name": "read_file"}},
+            {"type": "response.function_call_arguments.delta", "sequence_number": 3, "item_id": "item_1", "delta": "{\"path\":\"/a\"}"},
+            {"type": "response.output_item.done", "sequence_number": 4, "item": {"type": "function_call", "id": "item_1", "call_id": "call_1", "name": "read_file", "arguments": "{\"path\":\"/a\"}"}},
+            {"type": "response.output_item.added", "sequence_number": 5, "item": {"type": "function_call", "id": "item_2", "call_id": "call_2", "name": "read_file"}},
+            {"type": "response.function_call_arguments.delta", "sequence_number": 6, "item_id": "item_2", "delta": "{\"path\":\"/b\"}"},
+            {"type": "response.output_item.done", "sequence_number": 7, "item": {"type": "function_call", "id": "item_2", "call_id": "call_2", "name": "read_file", "arguments": "{\"path\":\"/b\"}"}},
+            {"type": "response.completed", "sequence_number": 8, "response": {"status": "completed", "usage": {"input_tokens": 20, "input_tokens_details": {"cached_tokens": 0}, "output_tokens": 11, "output_tokens_details": {"reasoning_tokens": 0}}}}
+          ]
+        }
+      ]
+    }
+  ],
+  "expect": [
+    {
+      "tool_calls": [
+        {"tool_call_id": "call_1", "tool_name": "read_file", "arguments": {"path": "/a"}},
+        {"tool_call_id": "call_2", "tool_name": "read_file", "arguments": {"path": "/b"}}
+      ],
+      "finish_reason": "tool_call"
+    }
+  ]
+}

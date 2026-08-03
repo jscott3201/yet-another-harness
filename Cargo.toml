@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/exp001-harness"]
+members = ["crates/exp001-harness", "crates/oa-kernel"]
 
 # Crate boundaries are deliberately provisional: the crate-boundary proposal is
 # gated behind G01/G02 (decisions/01:382-384). Only gate harnesses live here yet.

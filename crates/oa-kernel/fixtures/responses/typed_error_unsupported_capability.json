@@ -1,0 +1,20 @@
+{
+  "fixture_id": "typed_error_unsupported_capability",
+  "scenario_id": "typed_error",
+  "dialect": "responses",
+  "description": "Capability the endpoint cannot serve: exercises the R5.2 capability-matrix failure path.",
+  "turns": [
+    {
+      "attempts": [
+        {
+          "chunks": [
+            {"type": "response.failed", "sequence_number": 1, "response": {"error": {"code": "unsupported_parameter", "message": "Parameter 'reasoning' is not supported with this model"}}}
+          ]
+        }
+      ]
+    }
+  ],
+  "expect": [
+    {"error_kind": "unsupported_capability"}
+  ]
+}

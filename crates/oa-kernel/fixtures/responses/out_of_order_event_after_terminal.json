@@ -1,0 +1,25 @@
+{
+  "fixture_id": "out_of_order_event_after_terminal",
+  "scenario_id": "out_of_order_event",
+  "dialect": "responses",
+  "description": "The terminal-then-delta case for this arm: an event after response.completed must be detected and reported even with a strictly increasing sequence_number.",
+  "turns": [
+    {
+      "attempts": [
+        {
+          "chunks": [
+            {"type": "response.created", "sequence_number": 1, "response": {"id": "resp_1", "model": "gpt-fake-1"}},
+            {"type": "response.output_item.added", "sequence_number": 2, "item": {"type": "message", "id": "item_1"}},
+            {"type": "response.output_text.delta", "sequence_number": 3, "item_id": "item_1", "delta": "fin"},
+            {"type": "response.output_item.done", "sequence_number": 4, "item": {"type": "message", "id": "item_1"}},
+            {"type": "response.completed", "sequence_number": 5, "response": {"status": "completed", "usage": {"input_tokens": 5, "input_tokens_details": {"cached_tokens": 0}, "output_tokens": 1, "output_tokens_details": {"reasoning_tokens": 0}}}},
+            {"type": "response.output_text.delta", "sequence_number": 6, "item_id": "item_1", "delta": "late"}
+          ]
+        }
+      ]
+    }
+  ],
+  "expect": [
+    {"defect": "ordering_violation"}
+  ]
+}

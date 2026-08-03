@@ -1,0 +1,15 @@
+[package]
+name = "oa-kernel"
+version = "0.0.1"
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+description = "MILE-001: model-free kernel — normalized provider events, effect ledger, mutation funnel (G01)"
+
+# Crate name is provisional like every boundary in this workspace: the
+# crate-boundary proposal is gated behind G01/G02 (decisions/01:382-384).
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+blake3.workspace = true

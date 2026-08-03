@@ -1,0 +1,32 @@
+{
+  "fixture_id": "cancellation_mid_stream",
+  "scenario_id": "cancellation_mid_stream",
+  "dialect": "responses",
+  "description": "Cancel observed at tick 3 while text deltas are still arriving: the consumer appends the same-tick delta, then nothing more — the scripted tail (ticks 4-6) must never land, and the finish is interrupted.",
+  "turns": [
+    {
+      "attempts": [
+        {
+          "chunks": [
+            {"type": "response.created", "sequence_number": 1, "response": {"id": "resp_1", "model": "gpt-fake-1"}},
+            {"type": "response.output_item.added", "sequence_number": 2, "item": {"type": "message", "id": "item_1"}},
+            {"type": "response.output_text.delta", "sequence_number": 3, "item_id": "item_1", "delta": "counting "},
+            {"type": "response.output_text.delta", "sequence_number": 4, "item_id": "item_1", "delta": "one two "},
+            {"type": "response.output_text.delta", "sequence_number": 5, "item_id": "item_1", "delta": "three four"},
+            {"type": "response.output_item.done", "sequence_number": 6, "item": {"type": "message", "id": "item_1"}},
+            {"type": "response.completed", "sequence_number": 7, "response": {"status": "completed", "usage": {"input_tokens": 9, "input_tokens_details": {"cached_tokens": 0}, "output_tokens": 8, "output_tokens_details": {"reasoning_tokens": 0}}}}
+          ]
+        }
+      ]
+    }
+  ],
+  "control": [
+    {"turn": 0, "at_chunk": 3, "action": "cancel"}
+  ],
+  "expect": [
+    {
+      "text": "counting one two ",
+      "finish_reason": "interrupted"
+    }
+  ]
+}

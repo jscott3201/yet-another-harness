@@ -1,0 +1,42 @@
+{
+  "fixture_id": "fragmented_stream",
+  "scenario_id": "fragmented_stream",
+  "dialect": "anthropic_messages",
+  "description": "Text split mid-token and tool-call arguments split mid-string; reassembly must not depend on chunk boundaries (R5.1).",
+  "turns": [
+    {
+      "attempts": [
+        {
+          "chunks": [
+            {"type": "message_start", "message": {"id": "msg_1", "model": "claude-fake-1", "usage": {"input_tokens": 12, "cache_read_input_tokens": 0}}},
+            {"type": "content_block_start", "index": 0, "content_block": {"type": "text"}},
+            {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "unbel"}},
+            {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "ievable det"}},
+            {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "erminism"}},
+            {"type": "content_block_stop", "index": 0},
+            {"type": "content_block_start", "index": 1, "content_block": {"type": "tool_use", "id": "toolu_1", "name": "write_file"}},
+            {"type": "content_block_delta", "index": 1, "delta": {"type": "input_json_delta", "partial_json": "{\"pa"}},
+            {"type": "content_block_delta", "index": 1, "delta": {"type": "input_json_delta", "partial_json": "th\":\"/tmp/"}},
+            {"type": "content_block_delta", "index": 1, "delta": {"type": "input_json_delta", "partial_json": "a.txt\",\"conte"}},
+            {"type": "content_block_delta", "index": 1, "delta": {"type": "input_json_delta", "partial_json": "nt\":\"hi\"}"}},
+            {"type": "content_block_stop", "index": 1},
+            {"type": "message_delta", "delta": {"stop_reason": "tool_use"}, "usage": {"output_tokens": 9}},
+            {"type": "message_stop"}
+          ]
+        }
+      ]
+    }
+  ],
+  "expect": [
+    {
+      "text": "unbelievable determinism",
+      "tool_calls": [
+        {"tool_call_id": "toolu_1", "tool_name": "write_file", "arguments": {"path": "/tmp/a.txt", "content": "hi"}}
+      ],
+      "finish_reason": "tool_call",
+      "usage": {"input_tokens": 12, "cached_input_tokens": 0, "output_tokens": 9, "reasoning_tokens": 0},
+      "served_model_id": "claude-fake-1",
+      "served_model_evidence": "response_field"
+    }
+  ]
+}

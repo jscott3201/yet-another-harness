@@ -1,0 +1,33 @@
+{
+  "fixture_id": "cancellation_mid_tool_call",
+  "scenario_id": "cancellation_mid_tool_call",
+  "dialect": "anthropic_messages",
+  "description": "Cancel observed at tick 2 while the tool call's arguments are still streaming: the call must resolve to cancelled — started, never completed, never dropped — and the finish is interrupted.",
+  "turns": [
+    {
+      "attempts": [
+        {
+          "chunks": [
+            {"type": "message_start", "message": {"id": "msg_1", "model": "claude-fake-1", "usage": {"input_tokens": 15, "cache_read_input_tokens": 0}}},
+            {"type": "content_block_start", "index": 0, "content_block": {"type": "tool_use", "id": "toolu_1", "name": "run_command"}},
+            {"type": "content_block_delta", "index": 0, "delta": {"type": "input_json_delta", "partial_json": "{\"argv\":[\"sle"}},
+            {"type": "content_block_delta", "index": 0, "delta": {"type": "input_json_delta", "partial_json": "ep\",\"600\"]}"}},
+            {"type": "content_block_stop", "index": 0},
+            {"type": "message_delta", "delta": {"stop_reason": "tool_use"}, "usage": {"output_tokens": 7}},
+            {"type": "message_stop"}
+          ]
+        }
+      ]
+    }
+  ],
+  "control": [
+    {"turn": 0, "at_chunk": 2, "action": "cancel"}
+  ],
+  "expect": [
+    {
+      "tool_calls": [],
+      "cancelled_tool_calls": ["toolu_1"],
+      "finish_reason": "interrupted"
+    }
+  ]
+}

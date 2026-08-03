@@ -1,0 +1,20 @@
+{
+  "fixture_id": "typed_error_server_error",
+  "scenario_id": "typed_error",
+  "dialect": "anthropic_messages",
+  "description": "Provider-side failure surfaces as a typed transient server error.",
+  "turns": [
+    {
+      "attempts": [
+        {
+          "chunks": [
+            {"type": "error", "error": {"type": "api_error", "message": "Internal server error"}}
+          ]
+        }
+      ]
+    }
+  ],
+  "expect": [
+    {"error_kind": "server_error"}
+  ]
+}

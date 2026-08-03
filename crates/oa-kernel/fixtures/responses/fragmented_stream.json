@@ -1,0 +1,41 @@
+{
+  "fixture_id": "fragmented_stream",
+  "scenario_id": "fragmented_stream",
+  "dialect": "responses",
+  "description": "Text split mid-token and function-call arguments split mid-string; reassembly must not depend on chunk boundaries (R5.1).",
+  "turns": [
+    {
+      "attempts": [
+        {
+          "chunks": [
+            {"type": "response.created", "sequence_number": 1, "response": {"id": "resp_1", "model": "gpt-fake-1"}},
+            {"type": "response.output_item.added", "sequence_number": 2, "item": {"type": "message", "id": "item_1"}},
+            {"type": "response.output_text.delta", "sequence_number": 3, "item_id": "item_1", "delta": "unbel"},
+            {"type": "response.output_text.delta", "sequence_number": 4, "item_id": "item_1", "delta": "ievable det"},
+            {"type": "response.output_text.delta", "sequence_number": 5, "item_id": "item_1", "delta": "erminism"},
+            {"type": "response.output_item.done", "sequence_number": 6, "item": {"type": "message", "id": "item_1"}},
+            {"type": "response.output_item.added", "sequence_number": 7, "item": {"type": "function_call", "id": "item_2", "call_id": "call_1", "name": "write_file"}},
+            {"type": "response.function_call_arguments.delta", "sequence_number": 8, "item_id": "item_2", "delta": "{\"pa"},
+            {"type": "response.function_call_arguments.delta", "sequence_number": 9, "item_id": "item_2", "delta": "th\":\"/tmp/"},
+            {"type": "response.function_call_arguments.delta", "sequence_number": 10, "item_id": "item_2", "delta": "a.txt\",\"conte"},
+            {"type": "response.function_call_arguments.delta", "sequence_number": 11, "item_id": "item_2", "delta": "nt\":\"hi\"}"},
+            {"type": "response.output_item.done", "sequence_number": 12, "item": {"type": "function_call", "id": "item_2", "call_id": "call_1", "name": "write_file", "arguments": "{\"path\":\"/tmp/a.txt\",\"content\":\"hi\"}"}},
+            {"type": "response.completed", "sequence_number": 13, "response": {"status": "completed", "usage": {"input_tokens": 12, "input_tokens_details": {"cached_tokens": 0}, "output_tokens": 9, "output_tokens_details": {"reasoning_tokens": 0}}}}
+          ]
+        }
+      ]
+    }
+  ],
+  "expect": [
+    {
+      "text": "unbelievable determinism",
+      "tool_calls": [
+        {"tool_call_id": "call_1", "tool_name": "write_file", "arguments": {"path": "/tmp/a.txt", "content": "hi"}}
+      ],
+      "finish_reason": "tool_call",
+      "usage": {"input_tokens": 12, "cached_input_tokens": 0, "output_tokens": 9, "reasoning_tokens": 0},
+      "served_model_id": "gpt-fake-1",
+      "served_model_evidence": "response_field"
+    }
+  ]
+}

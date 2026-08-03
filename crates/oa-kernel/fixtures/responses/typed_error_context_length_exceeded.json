@@ -1,0 +1,20 @@
+{
+  "fixture_id": "typed_error_context_length_exceeded",
+  "scenario_id": "typed_error",
+  "dialect": "responses",
+  "description": "Context exhaustion carries its own error code in this dialect; the mapping is direct.",
+  "turns": [
+    {
+      "attempts": [
+        {
+          "chunks": [
+            {"type": "response.failed", "sequence_number": 1, "response": {"error": {"code": "context_length_exceeded", "message": "This model's maximum context length is 128000 tokens"}}}
+          ]
+        }
+      ]
+    }
+  ],
+  "expect": [
+    {"error_kind": "context_length_exceeded"}
+  ]
+}

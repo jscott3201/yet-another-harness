@@ -1,0 +1,19 @@
+{
+  "fixture_id": "retry_ceiling",
+  "scenario_id": "retry_ceiling",
+  "dialect": "anthropic_messages",
+  "description": "Four scripted transient failures against a retry ceiling of 3 (R25c): the kernel must stop at the ceiling with a terminal typed error, never requesting the fourth attempt.",
+  "turns": [
+    {
+      "attempts": [
+        {"chunks": [{"type": "error", "error": {"type": "overloaded_error", "message": "Overloaded"}}]},
+        {"chunks": [{"type": "error", "error": {"type": "overloaded_error", "message": "Overloaded"}}]},
+        {"chunks": [{"type": "error", "error": {"type": "overloaded_error", "message": "Overloaded"}}]},
+        {"chunks": [{"type": "error", "error": {"type": "overloaded_error", "message": "Overloaded"}}]}
+      ]
+    }
+  ],
+  "expect": [
+    {"error_kind": "server_error", "attempts": 3}
+  ]
+}
