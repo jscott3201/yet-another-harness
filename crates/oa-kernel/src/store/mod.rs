@@ -470,6 +470,22 @@ impl Store {
         status
     }
 
+    /// Effect-row read-back (audit/test seam, like [`Store::journal`]):
+    /// the indexed columns plus the serialized intent record, so tests can
+    /// assert durable state rather than in-memory results.
+    pub fn effect_record(&self, operation_key: &str) -> Option<EffectRecordRow> {
+        let node = self.effect_node(operation_key)?;
+        let txn = self.shared.begin_write();
+        let row = txn.read().node_properties(node).map(|p| EffectRecordRow {
+            version: p.get(&db("version")).and_then(value_u64).unwrap_or(0),
+            state: p.get(&db("state")).and_then(value_str).unwrap_or_default(),
+            terminal: p.get(&db("terminal")).and_then(value_str),
+            record: p.get(&db("record")).and_then(value_str).unwrap_or_default(),
+        });
+        txn.rollback();
+        row
+    }
+
     /// The committed journal in cursor order. Reads the write-side working
     /// graph (briefly taking the writer lock), so it reflects every commit
     /// that has returned — an audit/test seam for the obligation-2 "exactly
@@ -511,6 +527,16 @@ impl Store {
         out.sort_by_key(|e| e.cursor);
         out
     }
+}
+
+/// One effect row as read back through [`Store::effect_record`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EffectRecordRow {
+    pub version: u64,
+    pub state: String,
+    pub terminal: Option<String>,
+    /// The serialized `EffectIntent` JSON.
+    pub record: String,
 }
 
 /// One committed journal row as read back through [`Store::journal`].

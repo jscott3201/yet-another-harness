@@ -30,6 +30,7 @@
 //! across recover; the unique `event_id` constraint remains the backstop
 //! beyond 4096 takeovers, where the 12-bit rand_a field wraps).
 
+use crate::effect::{EffectIntent, EffectTerminal, TargetObservation};
 use crate::error::ErrorKind;
 use crate::ids::{AttemptEpoch, AuthorityEpoch, Digest, Stamp, Uuid7};
 use crate::store::{
@@ -40,7 +41,31 @@ use selene_core::{LabelSet, NodeId, PropertyMap, Value};
 use serde_json::json;
 use std::sync::Mutex;
 
+mod effect_rules;
+mod effects;
+mod replay;
+#[cfg(test)]
+#[path = "unit_tests.rs"]
+mod tests;
 mod validate;
+
+pub use effect_rules::SettleEvidence;
+pub use effects::EffectSpec;
+pub use replay::token_from_result;
+
+/// §2.1's `PrincipalRef.principal_kind`. MILE-001 carries the kind alone —
+/// `principal_id` and `capability_id` belong to the daemon boundary, whose
+/// in-process derivation ADR-002 P14.4 exempts — but the KIND is what the
+/// §2.1/§3.3 authorization classes are stated in terms of, so omitting it
+/// would leave the authority class resting entirely on an epoch integer the
+/// holder is handed in its own dispatch result.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PrincipalKind {
+    Owner,
+    DelegateHuman,
+    Agent,
+    Daemon,
+}
 
 /// ADR-002 §5 scope kinds; the receipt key is the P5.2 idempotency triple.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -70,11 +95,18 @@ pub struct Command {
     /// P3.4's digest over the canonical request; equality decides replay vs
     /// `idempotency_conflict` (§2.2, I3).
     pub request_digest: Digest,
-    /// Simplified §2.1 `expected_versions`: the one unit aggregate this
-    /// increment's methods mutate. REQUIRED on every method that mutates an
-    /// existing unit (I2's optimistic-concurrency rule); `None` is lawful
-    /// only for pure creations and for `token.reissue` (no transition).
-    pub expected_unit_version: Option<u64>,
+    /// Simplified §2.1 `expected_versions`: the version of the ONE
+    /// aggregate the method mutates — the unit for unit methods, the effect
+    /// for effect methods. REQUIRED on every mutation of existing state
+    /// (I2's optimistic-concurrency rule); `None` is lawful only for pure
+    /// creations (including idempotent `effect.prepare`) and for
+    /// `token.reissue` (no transition).
+    pub expected_version: Option<u64>,
+    /// §2.1 principal. Authority-class methods require `Daemon`; holder
+    /// methods require `Agent` — without this axis the authority class
+    /// would rest entirely on an epoch integer the holder is handed in its
+    /// own dispatch result.
+    pub principal_kind: PrincipalKind,
     pub authority_epoch: Option<AuthorityEpoch>,
     pub attempt_token: Option<AttemptTokenClaims>,
     pub method: Method,
@@ -107,6 +139,51 @@ pub enum Method {
     /// Holder-reauth: re-arm after a stamp bump. No journal event and no
     /// version bump — minting a token is not a domain transition.
     TokenReissue { unit_id: String },
+    /// Holder: §4.2 step 1 — durably record the intent before any dispatch.
+    /// Idempotent on the derived operation key: re-preparing an existing key
+    /// returns the existing intent, never a second record (§4.1, row A13).
+    EffectPrepare { unit_id: String, spec: EffectSpec },
+    /// Holder (§3.3 row 5): `prepared -> dispatching` — the transition that
+    /// AUTHORIZES the adapter to act, re-validating approval, retry safety,
+    /// and the fence. An adapter MUST NOT perform the operation unless this
+    /// committed.
+    EffectDispatch {
+        unit_id: String,
+        operation_key: String,
+    },
+    /// Holder: §4.2 step 2's second half — `dispatching -> dispatched`,
+    /// recording that the adapter was invoked. Dispatch is recorded;
+    /// dispatch is not success.
+    EffectRecordDispatched {
+        unit_id: String,
+        operation_key: String,
+        dispatched_at: u64,
+    },
+    /// AUTHORITY (§3.3 row 6): §4.2 step 3 — atomically record the
+    /// write-once terminal and the settle-time observations (§4.3 legality
+    /// and lifecycle legality enforced). Deliberately NOT holder-fenced:
+    /// settling records an observation about the world, and fencing it on
+    /// attempt/stamp/lease would let a stamp bump manufacture `unknown`
+    /// out of a known outcome.
+    EffectSettle {
+        unit_id: String,
+        operation_key: String,
+        terminal: EffectTerminal,
+        targets: Vec<TargetObservation>,
+        /// Statements about the operation as a whole that only the settling
+        /// authority can make (§4.3 wait status, §5.3's target-reported
+        /// cancellation).
+        evidence: SettleEvidence,
+        settled_at: u64,
+    },
+    /// AUTHORITY (§3.3 row 6, like settle): §4.2 step 4's parking state — a
+    /// dispatched nonterminal intent waits at `reconciling` with its §11.1
+    /// backoff position durable (row A16).
+    EffectParkReconciling {
+        unit_id: String,
+        operation_key: String,
+        next_reconcile_at: u64,
+    },
 }
 
 impl Method {
@@ -117,7 +194,22 @@ impl Method {
             | Method::UnitDispatch { unit_id, .. }
             | Method::ProgressReport { unit_id, .. }
             | Method::StampBump { unit_id }
-            | Method::TokenReissue { unit_id } => Some(unit_id),
+            | Method::TokenReissue { unit_id }
+            | Method::EffectPrepare { unit_id, .. }
+            | Method::EffectDispatch { unit_id, .. }
+            | Method::EffectRecordDispatched { unit_id, .. }
+            | Method::EffectSettle { unit_id, .. }
+            | Method::EffectParkReconciling { unit_id, .. } => Some(unit_id),
+        }
+    }
+
+    fn operation_key(&self) -> Option<&str> {
+        match self {
+            Method::EffectDispatch { operation_key, .. }
+            | Method::EffectRecordDispatched { operation_key, .. }
+            | Method::EffectSettle { operation_key, .. }
+            | Method::EffectParkReconciling { operation_key, .. } => Some(operation_key),
+            _ => None,
         }
     }
 }
@@ -145,6 +237,19 @@ struct UnitRow {
     version: u64,
     epoch: u64,
     stamp: u64,
+    /// §4.1 operation-key derivation input for `effect.prepare`.
+    work_item_id: String,
+}
+
+/// Effect row pre-read for the §4 methods, keyed by operation_key.
+struct EffectRow {
+    node: NodeId,
+    version: u64,
+    /// The full serialized [`EffectIntent`]. The indexed `state`/`terminal`
+    /// columns exist for the recovery scan's snapshot queries; the funnel
+    /// itself reads legality off this record, so there is exactly one
+    /// source of truth per decision.
+    record: String,
 }
 
 struct LeaseRow {
@@ -163,6 +268,11 @@ struct PreRead {
     for_unit: Option<String>,
     unit: Option<UnitRow>,
     lease: Option<LeaseRow>,
+    /// The operation key this command resolves to: carried by the update
+    /// methods, derived from (work_item_id, logical_operation_id,
+    /// request_digest) for `effect.prepare`.
+    effect_key: Option<String>,
+    effect: Option<EffectRow>,
 }
 
 impl UnitFenceRead for PreRead {
@@ -219,6 +329,21 @@ enum Plan {
         unit_node: NodeId,
         new_version: u64,
         new_stamp: Option<u64>,
+    },
+    CreateEffect {
+        operation_key: String,
+        effect_intent_id: String,
+        unit_id: String,
+        record: String,
+    },
+    UpdateEffect {
+        effect_node: NodeId,
+        new_version: u64,
+        state: &'static str,
+        /// Set exactly once, at settle — the store column mirrors the
+        /// record's write-once terminal.
+        terminal: Option<&'static str>,
+        record: String,
     },
     Nothing,
 }
@@ -326,6 +451,10 @@ impl Funnel {
                         .and_then(value_u64)
                         .unwrap_or(0),
                     stamp: props.get(&db("stamp")).and_then(value_u64).unwrap_or(0),
+                    work_item_id: props
+                        .get(&db("work_item_id"))
+                        .and_then(value_str)
+                        .unwrap_or_default(),
                 })
             });
             let lease = cmd.method.unit_id().and_then(|uid| {
@@ -338,10 +467,31 @@ impl Funnel {
                     version: props.get(&db("version")).and_then(value_u64).unwrap_or(0),
                 })
             });
+            let effect_key = match &cmd.method {
+                Method::EffectPrepare { spec, .. } => unit.as_ref().map(|u| {
+                    EffectIntent::derive_operation_key(
+                        &u.work_item_id,
+                        spec.logical_operation_id,
+                        &spec.request_digest,
+                    )
+                }),
+                _ => cmd.method.operation_key().map(str::to_owned),
+            };
+            let effect = effect_key.as_deref().and_then(|key| {
+                let node = self.store.effect_node(key)?;
+                let props = read.node_properties(node)?;
+                Some(EffectRow {
+                    node,
+                    version: props.get(&db("version")).and_then(value_u64).unwrap_or(0),
+                    record: props.get(&db("record")).and_then(value_str)?,
+                })
+            });
             PreRead {
                 for_unit: cmd.method.unit_id().map(str::to_owned),
                 unit,
                 lease,
+                effect_key,
+                effect,
             }
         };
 
@@ -535,6 +685,46 @@ impl Funnel {
                     m.update_node(*unit_node, no_labels(), props_set(set))
                         .map_err(|e| format!("{e:?}"))?;
                 }
+                Plan::CreateEffect {
+                    operation_key,
+                    effect_intent_id,
+                    unit_id,
+                    record,
+                } => {
+                    let n = m
+                        .create_node(
+                            LabelSet::single(db("Effect")),
+                            PropertyMap::from_pairs([
+                                (db("operation_key"), s(operation_key)),
+                                (db("effect_intent_id"), s(effect_intent_id)),
+                                (db("unit_id"), s(unit_id)),
+                                (db("version"), Value::Uint(1)),
+                                (db("state"), s("prepared")),
+                                (db("record"), s(record)),
+                            ])
+                            .expect("effect property map"),
+                        )
+                        .map_err(|e| format!("{e:?}"))?;
+                    new_books.push((BookKind::Effect, operation_key.clone(), n));
+                }
+                Plan::UpdateEffect {
+                    effect_node,
+                    new_version,
+                    state,
+                    terminal,
+                    record,
+                } => {
+                    let mut set = vec![
+                        (db("version"), Value::Uint(*new_version)),
+                        (db("state"), s(state)),
+                        (db("record"), s(record)),
+                    ];
+                    if let Some(t) = terminal {
+                        set.push((db("terminal"), s(t)));
+                    }
+                    m.update_node(*effect_node, no_labels(), props_set(set))
+                        .map_err(|e| format!("{e:?}"))?;
+                }
                 Plan::Nothing => {}
             }
 
@@ -626,112 +816,5 @@ impl Funnel {
         Submission::Completed {
             result: accepted.result,
         }
-    }
-
-    fn replay_stored(
-        cmd: &Command,
-        stored: Option<(Option<String>, Option<String>, Option<String>)>,
-    ) -> Submission {
-        let Some((Some(digest), Some(status), Some(result))) = stored else {
-            return Submission::Rejected {
-                kind: ErrorKind::Internal,
-                detail: "receipt row unreadable".into(),
-                replayed: false,
-            };
-        };
-        if digest != cmd.request_digest.as_str() {
-            return Submission::Rejected {
-                kind: ErrorKind::IdempotencyConflict,
-                detail: "same command_id, different request digest".into(),
-                replayed: false,
-            };
-        }
-        let result: serde_json::Value =
-            serde_json::from_str(&result).unwrap_or(serde_json::Value::Null);
-        if status == "completed" {
-            Submission::Replayed { result }
-        } else {
-            let kind = result
-                .get("error_kind")
-                .cloned()
-                .and_then(|v| serde_json::from_value(v).ok())
-                .unwrap_or(ErrorKind::Internal);
-            let detail = result
-                .get("detail")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_owned();
-            Submission::Rejected {
-                kind,
-                detail,
-                replayed: true,
-            }
-        }
-    }
-}
-
-/// Rebuild token claims from a dispatch or reissue result — the in-process
-/// stand-in for the daemon's sealed token (MILE-001 carries claims unsealed;
-/// the MAC boundary is INSTALL-001's).
-pub fn token_from_result(result: &serde_json::Value) -> Option<AttemptTokenClaims> {
-    Some(AttemptTokenClaims {
-        unit_id: result.get("unit_id")?.as_str()?.to_owned(),
-        attempt_epoch: AttemptEpoch(result.get("attempt_epoch")?.as_u64()?),
-        stamp: Stamp(result.get("stamp")?.as_u64()?),
-        authority_epoch: AuthorityEpoch(result.get("authority_epoch")?.as_u64()?),
-        holder_id: result.get("holder_id")?.as_str()?.to_owned(),
-    })
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn scratch_funnel() -> (tempfile::TempDir, Funnel) {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let store = Store::create(dir.path(), "kernel-t").expect("create");
-        (dir, Funnel::new(store, 1_000))
-    }
-
-    /// Commit faults cannot be injected through Selene, so the latch is
-    /// exercised directly: a poisoned funnel answers `unavailable` to
-    /// everything, including a replay of an already-completed command.
-    #[test]
-    fn poisoned_funnel_rejects_every_submit_unavailable() {
-        let (_dir, funnel) = scratch_funnel();
-        let cmd = Command {
-            command_id: Uuid7::mint(1, 1),
-            scope_kind: ScopeKind::Global,
-            scope_id: "g".into(),
-            request_digest: Digest::of_bytes(b"create wi-1"),
-            expected_unit_version: None,
-            authority_epoch: Some(funnel.store().authority_epoch()),
-            attempt_token: None,
-            method: Method::WorkItemCreate {
-                work_item_id: "wi-1".into(),
-                acceptance_contract_digest: Digest::of_bytes(b"c"),
-                declared_write_scope: vec![],
-            },
-        };
-        assert!(matches!(funnel.submit(&cmd), Submission::Completed { .. }));
-
-        *funnel.gate.lock().expect("gate") = Some("injected".into());
-        match funnel.submit(&cmd) {
-            Submission::Rejected {
-                kind: ErrorKind::Unavailable,
-                replayed: false,
-                ..
-            } => {}
-            other => panic!("expected Unavailable, got {other:?}"),
-        }
-    }
-
-    /// Two lifetimes minting at the SAME logical millisecond and sequence
-    /// produce distinct ids because the authority epoch rides the entropy.
-    #[test]
-    fn minted_ids_differ_across_authority_epochs() {
-        let a = Uuid7::mint(1_000, (1u128 << 64) | 1);
-        let b = Uuid7::mint(1_000, (2u128 << 64) | 1);
-        assert_ne!(a, b);
     }
 }

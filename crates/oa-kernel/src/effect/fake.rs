@@ -166,6 +166,7 @@ impl FakeEffectBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::effect::TargetEnumeration;
     use crate::effect::{EffectState, RetryClass, ReversibilityClass};
     use crate::ids::{AttemptEpoch, AuthorityEpoch, Digest, Stamp};
 
@@ -174,7 +175,7 @@ mod tests {
         EffectIntent {
             effect_intent_id: Uuid7::mint(epoch, epoch as u128),
             version: 1,
-            unit_id: Uuid7::mint(1, 2),
+            unit_id: "u-test".into(),
             attempt_epoch: AttemptEpoch(epoch),
             stamp: Stamp(0),
             authority_epoch: AuthorityEpoch(1),
@@ -189,6 +190,7 @@ mod tests {
             policy_snapshot_digest: digest,
             state: EffectState::Prepared,
             terminal: None,
+            target_enumeration: TargetEnumeration::PostHoc,
             targets: vec![],
             decomposable: false,
             parent_effect_intent_id: None,

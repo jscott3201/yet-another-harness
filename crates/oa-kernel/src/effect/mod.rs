@@ -71,6 +71,24 @@ pub enum ReversibilityClass {
     Irreversible,
 }
 
+/// §4.3's adapter declaration of how its targets become knowable. This is
+/// DECLARED, never inferred: an empty target list must not be readable as
+/// "post-hoc", or an adapter that simply skipped its enumeration duty would
+/// silently buy the untrusted classification path.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TargetEnumeration {
+    /// Targets are knowable at prepare (patch paths, ref names, artifact
+    /// paths) and MUST be enumerated there; settle observations are matched
+    /// against that declaration and classified by digest comparison.
+    Declared,
+    /// Targets are not knowable in advance (arbitrary shell). The adapter
+    /// records the workspace subtree digest before dispatch and the observed
+    /// set after; classification is by observation plus wait status, and the
+    /// declared-target digest rules do not apply.
+    PostHoc,
+}
+
 /// §4.3 per-target observation states.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -126,7 +144,7 @@ impl TargetObservation {
 pub struct EffectIntent {
     pub effect_intent_id: Uuid7,
     pub version: u64,
-    pub unit_id: Uuid7,
+    pub unit_id: String,
     pub attempt_epoch: AttemptEpoch,
     pub stamp: Stamp,
     pub authority_epoch: AuthorityEpoch,
@@ -142,6 +160,9 @@ pub struct EffectIntent {
     pub state: EffectState,
     /// Write-once: set through [`EffectIntent::settle`], never overwritten.
     pub terminal: Option<EffectTerminal>,
+    /// §4.3 adapter declaration, pinned at prepare — decides which
+    /// classification rules settle applies.
+    pub target_enumeration: TargetEnumeration,
     pub targets: Vec<TargetObservation>,
     pub decomposable: bool,
     pub parent_effect_intent_id: Option<Uuid7>,
@@ -171,15 +192,18 @@ impl EffectIntent {
     /// `blake3:<hex(BLAKE3-256(work_item_id · logical_operation_id · request_digest))>`.
     /// Deliberately excludes `attempt_epoch`, `attempt_id`, `holder_id`, and
     /// `authority_epoch`, so the key survives retries, recovery takeovers,
-    /// and rework of the same logical operation (row A13). All three inputs
-    /// are fixed-width in wire form, so plain concatenation is unambiguous.
+    /// and rework of the same logical operation (row A13). Concatenation is
+    /// unambiguous because the SUFFIX is fixed-width (36-char Uuid7 display,
+    /// 71-char digest wire form), which pins the split from the end even
+    /// though `work_item_id` is variable-length; a fourth variable-width
+    /// input must NOT be appended without adding a separator scheme.
     pub fn derive_operation_key(
-        work_item_id: Uuid7,
+        work_item_id: &str,
         logical_operation_id: Uuid7,
         request_digest: &Digest,
     ) -> String {
         let mut hasher = blake3::Hasher::new();
-        hasher.update(work_item_id.to_string().as_bytes());
+        hasher.update(work_item_id.as_bytes());
         hasher.update(logical_operation_id.to_string().as_bytes());
         hasher.update(request_digest.as_str().as_bytes());
         format!("blake3:{}", hasher.finalize().to_hex())
@@ -265,14 +289,14 @@ mod tests {
         EffectIntent {
             effect_intent_id: Uuid7::mint(1, 1),
             version: 1,
-            unit_id: Uuid7::mint(1, 2),
+            unit_id: "u-test".into(),
             attempt_epoch: AttemptEpoch(1),
             stamp: Stamp(0),
             authority_epoch: AuthorityEpoch(1),
             adapter_id: "fake".into(),
             adapter_version: "0".into(),
             operation_key: EffectIntent::derive_operation_key(
-                Uuid7::mint(1, 3),
+                &Uuid7::mint(1, 3).to_string(),
                 Uuid7::mint(1, 4),
                 &digest,
             ),
@@ -284,6 +308,7 @@ mod tests {
             policy_snapshot_digest: digest,
             state: EffectState::Prepared,
             terminal: None,
+            target_enumeration: TargetEnumeration::PostHoc,
             targets,
             decomposable: false,
             parent_effect_intent_id: None,
@@ -307,22 +332,22 @@ mod tests {
 
     #[test]
     fn operation_key_ignores_every_epoch_axis() {
-        let (w, l) = (Uuid7::mint(5, 7), Uuid7::mint(5, 8));
+        let (w, l) = (Uuid7::mint(5, 7).to_string(), Uuid7::mint(5, 8));
         let d = Digest::of_bytes(b"same request");
         // Same logical operation from two different attempts/epochs: the key
         // inputs simply do not include those axes.
-        let a = EffectIntent::derive_operation_key(w, l, &d);
-        let b = EffectIntent::derive_operation_key(w, l, &d);
+        let a = EffectIntent::derive_operation_key(&w, l, &d);
+        let b = EffectIntent::derive_operation_key(&w, l, &d);
         assert_eq!(a, b);
         assert!(a.starts_with("blake3:"));
         // Any input change changes the key.
         assert_ne!(
             a,
-            EffectIntent::derive_operation_key(w, l, &Digest::of_bytes(b"other"))
+            EffectIntent::derive_operation_key(&w, l, &Digest::of_bytes(b"other"))
         );
         assert_ne!(
             a,
-            EffectIntent::derive_operation_key(w, Uuid7::mint(5, 9), &d)
+            EffectIntent::derive_operation_key(&w, Uuid7::mint(5, 9), &d)
         );
     }
 
@@ -399,17 +424,17 @@ mod tests {
         // Pinned so a derivation change (input reorder, separator, dropped
         // input) cannot ship silently — the key is the cross-restart
         // idempotency anchor (row A13).
-        let w = Uuid7::mint(1, 1);
+        let w = Uuid7::mint(1, 1).to_string();
         let l = Uuid7::mint(2, 2);
         let d = Digest::of_bytes(b"fixed request");
         assert_eq!(
-            EffectIntent::derive_operation_key(w, l, &d),
+            EffectIntent::derive_operation_key(&w, l, &d),
             "blake3:3d833f813676a1feb677ce3e74ece71d42862ba1fd8b834297faeeaf5dc49881"
         );
         // work_item_id sensitivity (the axis the other test misses).
         assert_ne!(
-            EffectIntent::derive_operation_key(Uuid7::mint(9, 9), l, &d),
-            EffectIntent::derive_operation_key(w, l, &d)
+            EffectIntent::derive_operation_key(&Uuid7::mint(9, 9).to_string(), l, &d),
+            EffectIntent::derive_operation_key(&w, l, &d)
         );
     }
 

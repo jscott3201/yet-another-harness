@@ -9,46 +9,12 @@ impl Funnel {
     /// §2.2 step 3 as a pure function of the pre-read state.
     pub(super) fn validate(&self, cmd: &Command, pre: &PreRead) -> Result<Accepted, Rejection> {
         let current_epoch = self.store.authority_epoch();
-        // Epoch-mismatch classification, shared by both authorization
-        // classes: behind is permanently stale (epochs are monotonic), so
-        // the rejection persists; ahead is a split-brain signature that a
-        // later lawful takeover could make current, so it must not.
-        let epoch_mismatch = |e: AuthorityEpoch| -> Rejection {
-            if e.0 < current_epoch.0 {
-                (
-                    ErrorKind::FenceRejected,
-                    format!("authority epoch {} behind current {}", e.0, current_epoch.0),
-                    true,
-                )
-            } else {
-                (
-                    ErrorKind::FenceRejected,
-                    format!(
-                        "authority epoch {} ahead of current {} (split-brain suspect)",
-                        e.0, current_epoch.0
-                    ),
-                    false,
-                )
-            }
-        };
-        let authority_ok = || -> Result<(), Rejection> {
-            if cmd.attempt_token.is_some() {
-                return Err((
-                    ErrorKind::InvalidRequest,
-                    "authority method must not carry an attempt token".into(),
-                    true,
-                ));
-            }
-            match cmd.authority_epoch {
-                Some(e) if e == current_epoch => Ok(()),
-                Some(e) => Err(epoch_mismatch(e)),
-                None => Err((
-                    ErrorKind::InvalidRequest,
-                    "authority method requires authority_epoch".into(),
-                    true,
-                )),
-            }
-        };
+        let epoch_mismatch =
+            |e: AuthorityEpoch| -> Rejection { Self::epoch_mismatch(e, current_epoch) };
+        // One implementation of the §2.1 authority class, shared with the
+        // §4 settle/park arms — two copies of an authorization check are
+        // two chances to drift apart.
+        let authority_ok = || -> Result<(), Rejection> { self.authority_gate(cmd) };
         // Holder methods carry the authority axis inside the token, but an
         // envelope authority_epoch, when present, must still be current —
         // ADR-002 §5: a prior epoch is fence_rejected on ANY method.
@@ -61,7 +27,7 @@ impl Funnel {
         // I2: a mutation of existing unit state REQUIRES the expectation;
         // a stale one is version_conflict (transient, never persisted).
         let expected_version_ok = |actual: u64| -> Result<(), Rejection> {
-            match cmd.expected_unit_version {
+            match cmd.expected_version {
                 Some(expected) if expected != actual => Err((
                     ErrorKind::VersionConflict,
                     format!("expected version {expected}, actual {actual}"),
@@ -70,29 +36,11 @@ impl Funnel {
                 Some(_) => Ok(()),
                 None => Err((
                     ErrorKind::InvalidRequest,
-                    "mutating method requires expected_unit_version".into(),
+                    "mutating method requires expected_version".into(),
                     true,
                 )),
             }
         };
-        // The token's sealed unit binding: a token for another unit — or a
-        // unit that does not resolve — is an unresolvable token here,
-        // fence_rejected per ADR-002 §10. Permanently deterministic (the
-        // token's unit_id never changes), so it persists.
-        let token_binds = |token: &AttemptTokenClaims, unit_id: &str| -> Result<(), Rejection> {
-            if token.unit_id != unit_id {
-                return Err((
-                    ErrorKind::FenceRejected,
-                    format!(
-                        "token sealed for unit {}, method targets {}",
-                        token.unit_id, unit_id
-                    ),
-                    true,
-                ));
-            }
-            Ok(())
-        };
-
         match &cmd.method {
             Method::WorkItemCreate {
                 work_item_id,
@@ -215,26 +163,7 @@ impl Funnel {
                 })
             }
             Method::ProgressReport { unit_id, note } => {
-                let Some(token) = &cmd.attempt_token else {
-                    return Err((
-                        ErrorKind::InvalidRequest,
-                        "holder method requires an attempt token".into(),
-                        true,
-                    ));
-                };
-                envelope_epoch_ok()?;
-                token_binds(token, unit_id)?;
-                self.store
-                    .check_holder_fence(pre, token)
-                    .map_err(|r| match r {
-                        StoreRejection::FenceRejected { detail } => {
-                            (ErrorKind::FenceRejected, detail, true)
-                        }
-                        StoreRejection::NotFound { aggregate } => {
-                            (ErrorKind::NotFound, aggregate, false)
-                        }
-                        other => (ErrorKind::Internal, format!("{other:?}"), false),
-                    })?;
+                self.holder_gate(cmd, pre, unit_id)?;
                 let unit = pre.unit.as_ref().expect("fence passed implies unit");
                 expected_version_ok(unit.version)?;
                 Ok(Accepted {
@@ -284,7 +213,7 @@ impl Funnel {
                     ));
                 };
                 envelope_epoch_ok()?;
-                token_binds(token, unit_id)?;
+                Self::token_binds(token, unit_id)?;
                 if token.authority_epoch != current_epoch {
                     return Err((
                         ErrorKind::FenceRejected,
@@ -328,6 +257,98 @@ impl Funnel {
                     }),
                 })
             }
+            Method::EffectPrepare { .. }
+            | Method::EffectDispatch { .. }
+            | Method::EffectRecordDispatched { .. }
+            | Method::EffectSettle { .. }
+            | Method::EffectParkReconciling { .. } => self.validate_effect(cmd, pre),
         }
+    }
+
+    /// Epoch-mismatch classification, shared by both authorization classes:
+    /// behind is permanently stale (epochs are monotonic), so the rejection
+    /// persists; ahead is a split-brain signature that a later lawful
+    /// takeover could make current, so it must not.
+    pub(super) fn epoch_mismatch(e: AuthorityEpoch, current: AuthorityEpoch) -> Rejection {
+        if e.0 < current.0 {
+            (
+                ErrorKind::FenceRejected,
+                format!("authority epoch {} behind current {}", e.0, current.0),
+                true,
+            )
+        } else {
+            (
+                ErrorKind::FenceRejected,
+                format!(
+                    "authority epoch {} ahead of current {} (split-brain suspect)",
+                    e.0, current.0
+                ),
+                false,
+            )
+        }
+    }
+
+    /// The token's sealed unit binding: a token for another unit — or a
+    /// unit that does not resolve — is an unresolvable token here,
+    /// fence_rejected per ADR-002 §10. Permanently deterministic (the
+    /// token's unit_id never changes), so it persists.
+    pub(super) fn token_binds(token: &AttemptTokenClaims, unit_id: &str) -> Result<(), Rejection> {
+        if token.unit_id != unit_id {
+            return Err((
+                ErrorKind::FenceRejected,
+                format!(
+                    "token sealed for unit {}, method targets {}",
+                    token.unit_id, unit_id
+                ),
+                true,
+            ));
+        }
+        Ok(())
+    }
+
+    /// The full holder-class gate every holder method (except the
+    /// stamp-forgiving `token.reissue`) runs: token presence, envelope
+    /// epoch currency when declared, the sealed unit binding, and the §3.3
+    /// five-axis fence. Returns the token so callers can stamp its claims.
+    pub(super) fn holder_gate<'c>(
+        &self,
+        cmd: &'c Command,
+        pre: &PreRead,
+        unit_id: &str,
+    ) -> Result<&'c AttemptTokenClaims, Rejection> {
+        if cmd.principal_kind != PrincipalKind::Agent {
+            return Err((
+                ErrorKind::InvalidRequest,
+                format!(
+                    "holder method requires principal_kind agent, got {:?}",
+                    cmd.principal_kind
+                ),
+                true,
+            ));
+        }
+        let Some(token) = &cmd.attempt_token else {
+            return Err((
+                ErrorKind::InvalidRequest,
+                "holder method requires an attempt token".into(),
+                true,
+            ));
+        };
+        let current = self.store.authority_epoch();
+        if let Some(e) = cmd.authority_epoch
+            && e != current
+        {
+            return Err(Self::epoch_mismatch(e, current));
+        }
+        Self::token_binds(token, unit_id)?;
+        self.store
+            .check_holder_fence(pre, token)
+            .map_err(|r| match r {
+                StoreRejection::FenceRejected { detail } => {
+                    (ErrorKind::FenceRejected, detail, true)
+                }
+                StoreRejection::NotFound { aggregate } => (ErrorKind::NotFound, aggregate, false),
+                other => (ErrorKind::Internal, format!("{other:?}"), false),
+            })?;
+        Ok(token)
     }
 }

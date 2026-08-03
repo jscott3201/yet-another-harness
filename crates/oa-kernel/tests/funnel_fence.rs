@@ -7,7 +7,7 @@ mod common;
 
 use common::*;
 use oa_kernel::error::ErrorKind;
-use oa_kernel::funnel::{Command, Funnel, Method, ScopeKind, token_from_result};
+use oa_kernel::funnel::{Command, Funnel, Method, PrincipalKind, ScopeKind, token_from_result};
 use oa_kernel::ids::{AuthorityEpoch, Digest, Uuid7};
 use oa_kernel::store::{AttemptTokenClaims, Store};
 
@@ -329,7 +329,8 @@ fn recover_replays_receipts_and_fences_out_the_prior_lifetime() {
         scope_kind: ScopeKind::Global,
         scope_id: "g".into(),
         request_digest: Digest::of_bytes(b"create wi-2 stale"),
-        expected_unit_version: None,
+        principal_kind: PrincipalKind::Daemon,
+        expected_version: None,
         authority_epoch: Some(old_epoch),
         attempt_token: None,
         method: Method::WorkItemCreate {
@@ -350,7 +351,8 @@ fn recover_replays_receipts_and_fences_out_the_prior_lifetime() {
         scope_kind: ScopeKind::Unit,
         scope_id: "g".into(),
         request_digest: Digest::of_bytes(b"progress stale lifetime"),
-        expected_unit_version: Some(2),
+        principal_kind: PrincipalKind::Agent,
+        expected_version: Some(2),
         authority_epoch: None,
         attempt_token: Some(old_token.clone()),
         method: Method::ProgressReport {
@@ -367,7 +369,8 @@ fn recover_replays_receipts_and_fences_out_the_prior_lifetime() {
         scope_kind: ScopeKind::Unit,
         scope_id: "g".into(),
         request_digest: Digest::of_bytes(b"reissue stale lifetime"),
-        expected_unit_version: None,
+        principal_kind: PrincipalKind::Agent,
+        expected_version: None,
         authority_epoch: None,
         attempt_token: Some(old_token),
         method: Method::TokenReissue {
@@ -385,7 +388,8 @@ fn recover_replays_receipts_and_fences_out_the_prior_lifetime() {
         scope_kind: ScopeKind::Global,
         scope_id: "g".into(),
         request_digest: Digest::of_bytes(b"dispatch after recover"),
-        expected_unit_version: Some(2),
+        principal_kind: PrincipalKind::Daemon,
+        expected_version: Some(2),
         authority_epoch: Some(new_epoch),
         attempt_token: None,
         method: Method::UnitDispatch {
@@ -408,7 +412,8 @@ fn recover_replays_receipts_and_fences_out_the_prior_lifetime() {
         scope_kind: ScopeKind::Unit,
         scope_id: "g".into(),
         request_digest: Digest::of_bytes(b"progress new lifetime"),
-        expected_unit_version: Some(3),
+        principal_kind: PrincipalKind::Agent,
+        expected_version: Some(3),
         authority_epoch: None,
         attempt_token: Some(token),
         method: Method::ProgressReport {

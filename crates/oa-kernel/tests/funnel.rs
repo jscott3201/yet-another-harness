@@ -53,7 +53,7 @@ fn version_conflict_is_transient_and_never_persisted() {
     // no rejected receipt was written for the conflict.
     let mut corrected = stale.clone();
     corrected.request_digest = Digest::of_bytes(b"progress corrected");
-    corrected.expected_unit_version = Some(2);
+    corrected.expected_version = Some(2);
     assert_eq!(completed(ctx.funnel.submit(&corrected))["version"], 3);
 }
 
