@@ -101,6 +101,12 @@ pub fn graph_type() -> GraphTypeDef {
                     prop_def("stamp", Uint, true, false, false),
                     prop_def("status", PStr, true, false, false),
                     prop_def("work_item_id", PStr, true, true, false),
+                    // §1.2's ExecutionUnit.run_id. Required, not optional:
+                    // §5.2 rule 4 resolves a member up to its run to find an
+                    // applicable ancestor cancellation, and a unit with no
+                    // run would make that walk answer "none applicable" —
+                    // silently admitting work under a cancelled run.
+                    prop_def("run_id", PStr, true, true, false),
                     prop_def("record", PStr, true, false, false),
                 ],
             ),
@@ -110,6 +116,10 @@ pub fn graph_type() -> GraphTypeDef {
                 vec![
                     // UNIQUE(unit_id, attempt_epoch) as a derived key.
                     prop_def("attempt_key", PStr, true, true, true),
+                    // §1.2's Attempt.attempt_id. The derived key addresses a
+                    // row; this is the identity a CancelRequest roots at,
+                    // since §5.1 roots are ids and not composite keys.
+                    prop_def("attempt_id", PStr, true, true, true),
                     prop_def("unit_id", PStr, true, true, false),
                     prop_def("attempt_epoch", Uint, true, true, false),
                     prop_def("holder_id", PStr, true, true, false),
@@ -192,6 +202,57 @@ pub fn graph_type() -> GraphTypeDef {
                     // Absent = unset; write-once is funnel-enforced (settle).
                     prop_def("terminal", PStr, false, false, false),
                     prop_def("record", PStr, true, false, false),
+                ],
+            ),
+            // §1.2 cancellation-ownership root. Present so I11's close
+            // predicate has an aggregate to guard: obligation 4 requires
+            // that the enclosing run cannot close success while a member is
+            // still reconciling.
+            node_type(
+                "oa.run",
+                "Run",
+                vec![
+                    prop_def("run_id", PStr, true, true, true),
+                    prop_def("version", Uint, true, false, false),
+                    prop_def("status", PStr, true, false, false),
+                    prop_def("goal_work_item_id", PStr, true, true, false),
+                    prop_def("record", PStr, true, false, false),
+                ],
+            ),
+            // §5.1. `scope` is its own IMMUTABLE property rather than a
+            // field inside the mutable `record`: rule 2's freeze then holds
+            // by construction, so no funnel path can widen a committed
+            // scope even by mistake. `status` stays mutable — the request
+            // walks requested -> delivering -> observed_partial -> settled.
+            node_type(
+                "oa.cancel_request",
+                "CancelRequest",
+                vec![
+                    prop_def("cancel_request_id", PStr, true, true, true),
+                    prop_def("version", Uint, true, false, false),
+                    prop_def("root_kind", PStr, true, true, false),
+                    prop_def("root_id", PStr, true, true, false),
+                    prop_def("policy", PStr, true, true, false),
+                    prop_def("reason", PStr, true, true, false),
+                    prop_def("scope", PStr, true, true, false),
+                    prop_def("status", PStr, true, false, false),
+                    prop_def("record", PStr, true, false, false),
+                ],
+            ),
+            // §5.1 UNIQUE(cancel_request_id, member_id) as a derived key.
+            // Write-once in every property: a delivery row records what was
+            // observed for one member, and rewriting an observation is how
+            // an `unresponsive` member would silently become `stopped`.
+            node_type(
+                "oa.cancel_delivery",
+                "CancelDelivery",
+                vec![
+                    prop_def("delivery_key", PStr, true, true, true),
+                    prop_def("cancel_request_id", PStr, true, true, false),
+                    prop_def("member_id", PStr, true, true, false),
+                    prop_def("member_kind", PStr, true, true, false),
+                    prop_def("outcome", PStr, true, true, false),
+                    prop_def("record", PStr, true, true, false),
                 ],
             ),
             // §8.1: immutable once sealed — every property immutable.

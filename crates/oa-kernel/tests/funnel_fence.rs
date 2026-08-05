@@ -176,6 +176,9 @@ fn healable_not_found_is_not_persisted() {
     // not_found depends on state a later command can create, so persisting
     // it would poison the byte-identical retry forever (P6.3).
     let mut ctx = Ctx::new();
+    // Open the run first so the not_found under test is the work item's.
+    let run = ctx.open_run(Ctx::RUN);
+    completed(ctx.funnel.submit(&run));
     let admit = ctx.admit("u-1", "wi-1");
     assert_eq!(
         rejected(ctx.funnel.submit(&admit)),
@@ -198,6 +201,8 @@ fn deterministic_rejections_persist_and_replay() {
     let mut ctx = Ctx::new();
 
     // Authority method carrying a token is malformed — shape-deterministic.
+    let run = ctx.open_run(Ctx::RUN);
+    completed(ctx.funnel.submit(&run));
     let mut with_token = ctx.create_work_item("wi-x");
     with_token.attempt_token = Some(AttemptTokenClaims {
         unit_id: "u".into(),
@@ -253,6 +258,7 @@ fn deterministic_rejections_persist_and_replay() {
         Method::UnitAdmit {
             unit_id: "u-1".into(),
             work_item_id: "wi-1".into(),
+            run_id: Ctx::RUN.into(),
         },
     );
     assert_eq!(
@@ -301,6 +307,8 @@ fn recover_replays_receipts_and_fences_out_the_prior_lifetime() {
     // → stable answers, no duplicate transitions. Obligation A10
     // (in-process half): both authority-epoch fence directions.
     let mut ctx = Ctx::new();
+    let run = ctx.open_run(Ctx::RUN);
+    completed(ctx.funnel.submit(&run));
     let wi = ctx.create_work_item("wi-1");
     let first = completed(ctx.funnel.submit(&wi));
     let admit = ctx.admit("u-1", "wi-1");

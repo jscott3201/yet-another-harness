@@ -7,7 +7,9 @@
 //! - `provider` — normalized events, two wire dialects, deterministic fake
 //!   provider (Component 1; the 13-row fixture catalog)
 //! - `effect` — external-effect ledger + fake-effect backend (Component 2;
-//!   rows 5, A5, A6, A13, A14, A16)
+//!   rows 5, A5, A13, A16)
+//! - `cancel` — §5 cancellation records and the scope rules that are pure
+//!   functions of a frozen scope (obligation 4; rows A6, A14)
 //! - `funnel`, `state` — single mutation funnel over Selene (rows 1, 2, 7, 8,
 //!   A8–A11, I16, V1)
 //! - `adapter` — in-process serialization-round-trip adapter + ADR-002 §17
@@ -16,6 +18,7 @@
 //! Modules land in dependency order; a module absent from the tree is not
 //! built yet, not implied.
 
+pub mod cancel;
 pub mod effect;
 pub mod error;
 pub mod funnel;

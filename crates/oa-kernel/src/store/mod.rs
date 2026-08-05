@@ -26,7 +26,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use selene_core::{GraphId, LabelSet, NodeId, PropertyMap, Value};
-use selene_graph::{CommitBatching, GraphError, RowIndex, SharedGraph};
+use selene_graph::{CommitBatching, GraphError, RowIndex, SeleneGraph, SharedGraph};
 use selene_persist::DEFAULT_WAL_FILE_NAME;
 
 use crate::ids::{AttemptEpoch, AuthorityEpoch, Stamp};
@@ -116,6 +116,14 @@ struct Books {
     effects: HashMap<String, NodeId>,
     events: HashMap<String, NodeId>,
     evidence: HashMap<String, NodeId>,
+    runs: HashMap<String, NodeId>,
+    /// Keyed by `cancel_request_id`. §5.2 rule 4 has to answer "is there an
+    /// applicable cancellation" on every admission, so the whole set stays
+    /// addressable rather than being found by scan.
+    cancel_requests: HashMap<String, NodeId>,
+    /// Keyed by the derived `delivery_key` — §5.1's
+    /// UNIQUE(cancel_request_id, member_id).
+    cancel_deliveries: HashMap<String, NodeId>,
 }
 
 pub struct Store {
@@ -238,6 +246,18 @@ impl Store {
             } else if labels.contains(&db("Effect")) {
                 if let Some(k) = get_str("operation_key") {
                     books.effects.insert(k, id);
+                }
+            } else if labels.contains(&db("Run")) {
+                if let Some(k) = get_str("run_id") {
+                    books.runs.insert(k, id);
+                }
+            } else if labels.contains(&db("CancelRequest")) {
+                if let Some(k) = get_str("cancel_request_id") {
+                    books.cancel_requests.insert(k, id);
+                }
+            } else if labels.contains(&db("CancelDelivery")) {
+                if let Some(k) = get_str("delivery_key") {
+                    books.cancel_deliveries.insert(k, id);
                 }
             } else if labels.contains(&db("Event")) {
                 if let Some(c) = props.get(&db("cursor")).and_then(value_u64) {
@@ -378,6 +398,136 @@ impl Store {
             .copied()
     }
 
+    // The four seams below address the §5 rows. They land here rather than
+    // with the funnel methods that consume them because `rebuild_books_and_cursor`
+    // already repopulates all three books on recover — the addressing and its
+    // recovery path are one decision, and splitting them across increments is
+    // how a book gets a writer but no rebuild arm.
+    #[allow(dead_code)]
+    pub(crate) fn run_node(&self, run_id: &str) -> Option<NodeId> {
+        self.books.lock().expect("books").runs.get(run_id).copied()
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn cancel_request_node(&self, cancel_request_id: &str) -> Option<NodeId> {
+        self.books
+            .lock()
+            .expect("books")
+            .cancel_requests
+            .get(cancel_request_id)
+            .copied()
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn cancel_delivery_node(&self, delivery_key: &str) -> Option<NodeId> {
+        self.books
+            .lock()
+            .expect("books")
+            .cancel_deliveries
+            .get(delivery_key)
+            .copied()
+    }
+
+    /// Every committed cancel-request node. §5.2 rule 4 asks "does an
+    /// applicable cancellation cover this member" on every admission, and
+    /// the answer has to come from committed state — so this returns the
+    /// node set and the caller reads it through the open write transaction,
+    /// never the published snapshot.
+    /// Every (unit_id, node) pair. I11's close predicate has to find the
+    /// units belonging to a run, and `run_id` lives on the unit row rather
+    /// than in an edge — the control graph declares no edge types.
+    pub(crate) fn unit_entries(&self) -> Vec<(String, NodeId)> {
+        self.books
+            .lock()
+            .expect("books")
+            .units
+            .iter()
+            .map(|(k, v)| (k.clone(), *v))
+            .collect()
+    }
+
+    /// Every (operation_key, node) pair, for the same walk.
+    pub(crate) fn effect_entries(&self) -> Vec<(String, NodeId)> {
+        self.books
+            .lock()
+            .expect("books")
+            .effects
+            .iter()
+            .map(|(k, v)| (k.clone(), *v))
+            .collect()
+    }
+
+    /// Every (attempt_key, node) pair. §5.2 rule 4's lineage scan resolves
+    /// an `attempt_id` (the identity a CancelRequest roots at) by walking
+    /// these against the live graph.
+    pub(crate) fn attempt_entries(&self) -> Vec<(String, NodeId)> {
+        self.books
+            .lock()
+            .expect("books")
+            .attempts
+            .iter()
+            .map(|(k, v)| (k.clone(), *v))
+            .collect()
+    }
+
+    /// Every (delivery_key, node) pair. §5 settlement reads the delivered
+    /// set for a request, and I11's close predicate needs the same walk per
+    /// run — provided live, like every §5 read, through the working graph.
+    pub(crate) fn cancel_delivery_entries(&self) -> Vec<(String, NodeId)> {
+        self.books
+            .lock()
+            .expect("books")
+            .cancel_deliveries
+            .iter()
+            .map(|(k, v)| (k.clone(), *v))
+            .collect()
+    }
+
+    /// Resolve an `attempt_id` (§1.2 root identity, unique by schema) to
+    /// its node. Scanned live rather than book-indexed: the attempt book is
+    /// keyed by the derived `attempt_key`, and the id axis is the one §5
+    /// roots cancellations at, so the two cannot share a key.
+    pub(crate) fn attempt_id_node(&self, read: &SeleneGraph, attempt_id: &str) -> Option<NodeId> {
+        for (_, node) in self.attempt_entries() {
+            let props = read.node_properties(node)?;
+            if props.get(&db("attempt_id")).and_then(value_str).as_deref() == Some(attempt_id) {
+                return Some(node);
+            }
+        }
+        None
+    }
+
+    /// Resolve an `effect_intent_id` to its node, by the same live scan.
+    pub(crate) fn effect_intent_id_node(
+        &self,
+        read: &SeleneGraph,
+        effect_intent_id: &str,
+    ) -> Option<NodeId> {
+        for (_, node) in self.effect_entries() {
+            let props = read.node_properties(node)?;
+            if props
+                .get(&db("effect_intent_id"))
+                .and_then(value_str)
+                .as_deref()
+                == Some(effect_intent_id)
+            {
+                return Some(node);
+            }
+        }
+        None
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn cancel_request_nodes(&self) -> Vec<NodeId> {
+        self.books
+            .lock()
+            .expect("books")
+            .cancel_requests
+            .values()
+            .copied()
+            .collect()
+    }
+
     pub(crate) fn book_insert(&self, kind: BookKind, key: String, node: NodeId) {
         let mut books = self.books.lock().expect("books");
         match kind {
@@ -389,6 +539,9 @@ impl Store {
             BookKind::Effect => books.effects.insert(key, node),
             BookKind::Event => books.events.insert(key, node),
             BookKind::Evidence => books.evidence.insert(key, node),
+            BookKind::Run => books.runs.insert(key, node),
+            BookKind::CancelRequest => books.cancel_requests.insert(key, node),
+            BookKind::CancelDelivery => books.cancel_deliveries.insert(key, node),
         };
     }
 
@@ -486,7 +639,57 @@ impl Store {
         row
     }
 
-    /// The committed journal in cursor order. Reads the write-side working
+    /// Cancel-request read-back (audit/test seam, like
+    /// [`Store::effect_record`]): the indexed columns plus the frozen scope
+    /// and the full serialized record, so tests assert durable state.
+    pub fn cancel_request_row(&self, cancel_request_id: &str) -> Option<CancelRequestRow> {
+        let node = self.cancel_request_node(cancel_request_id)?;
+        let txn = self.shared.begin_write();
+        let row = txn.read().node_properties(node).map(|p| CancelRequestRow {
+            version: p.get(&db("version")).and_then(value_u64).unwrap_or(0),
+            status: p.get(&db("status")).and_then(value_str).unwrap_or_default(),
+            root_kind: p
+                .get(&db("root_kind"))
+                .and_then(value_str)
+                .unwrap_or_default(),
+            root_id: p
+                .get(&db("root_id"))
+                .and_then(value_str)
+                .unwrap_or_default(),
+            scope: p.get(&db("scope")).and_then(value_str).unwrap_or_default(),
+            record: p.get(&db("record")).and_then(value_str).unwrap_or_default(),
+        });
+        txn.rollback();
+        row
+    }
+
+    /// Delivery-row read-back (audit/test seam, like
+    /// [`Store::effect_record`]). The delivery row is immutable in every
+    /// property, so each row is one observation that can never be rewritten.
+    pub fn cancel_delivery_rows(&self) -> Vec<CancelDeliveryRow> {
+        let txn = self.shared.begin_write();
+        let mut out = Vec::new();
+        {
+            let read = txn.read();
+            for (_, node) in self.cancel_delivery_entries() {
+                let Some(p) = read.node_properties(node) else {
+                    continue;
+                };
+                let get_s = |k: &str| p.get(&db(k)).and_then(value_str).unwrap_or_default();
+                out.push(CancelDeliveryRow {
+                    delivery_key: get_s("delivery_key"),
+                    cancel_request_id: get_s("cancel_request_id"),
+                    member_id: get_s("member_id"),
+                    member_kind: get_s("member_kind"),
+                    outcome: get_s("outcome"),
+                });
+            }
+        }
+        txn.rollback();
+        out
+    }
+
+    /// The journal in index order. Reads the write-side working
     /// graph (briefly taking the writer lock), so it reflects every commit
     /// that has returned — an audit/test seam for the obligation-2 "exactly
     /// one set of appended events" half and the V1 replay comparison, not a
@@ -539,6 +742,30 @@ pub struct EffectRecordRow {
     pub record: String,
 }
 
+/// One cancel-request row as read back through [`Store::cancel_request_row`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CancelRequestRow {
+    pub version: u64,
+    pub status: String,
+    pub root_kind: String,
+    pub root_id: String,
+    /// The frozen scope (rule-2 snapshot), serialized.
+    pub scope: String,
+    /// The full serialized `CancelRequest`, status included.
+    pub record: String,
+}
+
+/// One cancel-delivery row as read back through
+/// [`Store::cancel_delivery_rows`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CancelDeliveryRow {
+    pub delivery_key: String,
+    pub cancel_request_id: String,
+    pub member_id: String,
+    pub member_kind: String,
+    pub outcome: String,
+}
+
 /// One committed journal row as read back through [`Store::journal`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EventRecord {
@@ -563,8 +790,14 @@ pub(crate) enum BookKind {
     #[allow(dead_code)] // effect-over-store layer (task 5c) inserts these
     Effect,
     Event,
-    #[allow(dead_code)] // evidence rows land with the cancellation layer (5d)
+    #[allow(dead_code)] // evidence rows land with the §8 gateway layer
     Evidence,
+    #[allow(dead_code)] // the §5 funnel methods construct these
+    Run,
+    #[allow(dead_code)]
+    CancelRequest,
+    #[allow(dead_code)]
+    CancelDelivery,
 }
 
 /// Fence-relevant fields of a unit row.

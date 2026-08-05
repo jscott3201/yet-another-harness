@@ -1,16 +1,25 @@
 #!/usr/bin/env bash
-# Per-increment gate: a FROM-SCRATCH verification, run before a commit lands
-# on main (the analog of open-control's development -> main release gate).
+# Per-increment gate: a FROM-SCRATCH verification. Run it at every boundary
+# where work leaves the fast loop — before a commit lands on main, and
+# between PRs (the analog of open-control's development -> main release
+# gate). Owner instruction 2026-08-03: the clean is not optional at a PR
+# boundary, so consecutive PRs never share build state.
 #
 # Why the clean: the per-commit hooks build incrementally, and incremental
 # artifacts can keep a build green that would not reproduce — a deleted
 # module whose object file lingers, a stale proc-macro expansion, a fixture
 # no longer generated. Anything that only passes because of cached state is
-# a defect the next clone would hit first.
+# a defect the next clone would hit first. Between PRs the same trap has a
+# second form: PR N's artifacts can mask a break PR N+1 introduces, and the
+# two only diverge once someone builds from a clean tree.
 #
 # Cost: this rebuilds the whole workspace including the selene-db path
 # dependency, so it is minutes, not seconds. Use the hooks for the fast loop
 # and this before a PR/commit that lands.
+#
+# Invoke the script — do not reconstruct its steps as an inline shell chain.
+# A gate command piped into anything reports the pipe's exit status, not its
+# own, which is how a broken build once got past this gate (OA Defects).
 #
 # Usage: bash scripts/full-gate.sh
 

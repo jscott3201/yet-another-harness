@@ -41,7 +41,107 @@ impl Funnel {
                 )),
             }
         };
+        // §5.2 rule 4: a committed ancestor cancellation bars the admission
+        // of a new child. The blockers are precomputed in the same
+        // transaction (cancel_pre_read); a non-empty set is a shape
+        // rejection — the committed cancellation cannot be un-committed, so
+        // the retry gets the same answer (persist=true).
+        let admission_gate = || -> Result<(), Rejection> {
+            let blockers: &[super::cancel_rules::Blocker] = pre
+                .cancel
+                .as_ref()
+                .map(|c| c.admission_blockers.as_slice())
+                .unwrap_or(&[]);
+            if blockers.is_empty() {
+                return Ok(());
+            }
+            let named = blockers
+                .iter()
+                .map(|b| format!("{} ({})", b.member, b.reason))
+                .collect::<Vec<_>>()
+                .join("; ");
+            Err((
+                ErrorKind::InvalidRequest,
+                format!("admission barred by committed cancellation: {named}"),
+                true,
+            ))
+        };
         match &cmd.method {
+            Method::RunOpen {
+                run_id,
+                goal_work_item_id,
+            } => {
+                authority_ok()?;
+                if pre.run.is_some() {
+                    return Err((
+                        ErrorKind::InvalidRequest,
+                        format!("run {run_id} already exists"),
+                        true,
+                    ));
+                }
+                Ok(Accepted {
+                    plan: Plan::CreateRun {
+                        run_id: run_id.clone(),
+                        goal_work_item_id: goal_work_item_id.clone(),
+                    },
+                    events: vec![EventDraft {
+                        aggregate_kind: "run",
+                        aggregate_id: run_id.clone(),
+                        aggregate_version: 1,
+                        event_kind: "run.opened",
+                        payload: json!({ "goal_work_item_id": goal_work_item_id }),
+                    }],
+                    result: json!({ "run_id": run_id }),
+                })
+            }
+            Method::RunClose { run_id, outcome } => {
+                authority_ok()?;
+                let Some(run) = &pre.run else {
+                    return Err((ErrorKind::NotFound, format!("run {run_id}"), false));
+                };
+                expected_version_ok(run.version)?;
+                if run.status != "open" && run.status != "active" {
+                    return Err((
+                        ErrorKind::InvalidRequest,
+                        format!("run {run_id} is already {}", run.status),
+                        true,
+                    ));
+                }
+                // I11 (§5.2 rule 7). Only a success close is barred: failure
+                // and cancelled are honest terminals for a run with
+                // unresolved members, and barring them too would leave a run
+                // whose effects never resolve with no lawful close at all.
+                if !pre.run_blockers.is_empty() {
+                    let named = pre
+                        .run_blockers
+                        .iter()
+                        .map(|b| format!("{} ({})", b.member, b.reason))
+                        .collect::<Vec<_>>()
+                        .join("; ");
+                    return Err((
+                        ErrorKind::InvalidRequest,
+                        format!(
+                            "run {run_id} cannot close success while members are unresolved: {named}"
+                        ),
+                        true,
+                    ));
+                }
+                Ok(Accepted {
+                    plan: Plan::CloseRun {
+                        run_node: run.node,
+                        new_version: run.version + 1,
+                        status: outcome.wire(),
+                    },
+                    events: vec![EventDraft {
+                        aggregate_kind: "run",
+                        aggregate_id: run_id.clone(),
+                        aggregate_version: run.version + 1,
+                        event_kind: "run.closed",
+                        payload: json!({ "outcome": outcome.wire() }),
+                    }],
+                    result: json!({ "run_id": run_id, "status": outcome.wire() }),
+                })
+            }
             Method::WorkItemCreate {
                 work_item_id,
                 acceptance_contract_digest,
@@ -78,8 +178,15 @@ impl Funnel {
             Method::UnitAdmit {
                 unit_id,
                 work_item_id,
+                run_id,
             } => {
                 authority_ok()?;
+                if self.store.run_node(run_id).is_none() {
+                    // Same not-persisted shape as the work-item check: the
+                    // run may be opened later and a byte-identical retry
+                    // must then succeed.
+                    return Err((ErrorKind::NotFound, format!("run {run_id}"), false));
+                }
                 if self.store.work_item_node(work_item_id).is_none() {
                     // Not persisted: the work item may be created later,
                     // and a byte-identical retry must then succeed.
@@ -96,17 +203,19 @@ impl Funnel {
                         true,
                     ));
                 }
+                admission_gate()?;
                 Ok(Accepted {
                     plan: Plan::CreateUnit {
                         unit_id: unit_id.clone(),
                         work_item_id: work_item_id.clone(),
+                        run_id: run_id.clone(),
                     },
                     events: vec![EventDraft {
                         aggregate_kind: "unit",
                         aggregate_id: unit_id.clone(),
                         aggregate_version: 1,
                         event_kind: "unit.admitted",
-                        payload: json!({ "work_item_id": work_item_id }),
+                        payload: json!({ "work_item_id": work_item_id, "run_id": run_id }),
                     }],
                     result: json!({ "unit_id": unit_id }),
                 })
@@ -117,6 +226,7 @@ impl Funnel {
                     return Err((ErrorKind::NotFound, format!("unit {unit_id}"), false));
                 };
                 expected_version_ok(unit.version)?;
+                admission_gate()?;
                 let prior_attempt = if unit.epoch > 0 {
                     let key = format!("{unit_id}/{}", unit.epoch);
                     match self.store.attempt_node(&key) {
@@ -133,6 +243,7 @@ impl Funnel {
                     None
                 };
                 let new_epoch = unit.epoch + 1;
+                let attempt_id = self.mint_id().to_string();
                 Ok(Accepted {
                     plan: Plan::Dispatch {
                         unit_node: unit.node,
@@ -140,6 +251,7 @@ impl Funnel {
                         new_version: unit.version + 1,
                         new_epoch,
                         holder_id: holder_id.clone(),
+                        attempt_id: attempt_id.clone(),
                         existing_lease: pre.lease.as_ref().map(|l| (l.node, l.version)),
                         prior_attempt,
                     },
@@ -150,12 +262,19 @@ impl Funnel {
                         event_kind: "unit.dispatched",
                         payload: json!({
                             "attempt_epoch": new_epoch,
+                            "attempt_id": attempt_id,
                             "holder_id": holder_id,
                         }),
                     }],
+                    // `attempt_id` rides the result because §5.1 roots a
+                    // CancelRequest at an id, not at the (unit_id, epoch)
+                    // composite the store addresses attempt rows by — with
+                    // no way to learn it, an attempt-rooted cancellation
+                    // would be unrepresentable by any caller.
                     result: json!({
                         "unit_id": unit_id,
                         "attempt_epoch": new_epoch,
+                        "attempt_id": attempt_id,
                         "stamp": unit.stamp,
                         "authority_epoch": current_epoch.0,
                         "holder_id": holder_id,
@@ -262,6 +381,9 @@ impl Funnel {
             | Method::EffectRecordDispatched { .. }
             | Method::EffectSettle { .. }
             | Method::EffectParkReconciling { .. } => self.validate_effect(cmd, pre),
+            Method::CancelRequest { .. } | Method::CancelRecordDelivery { .. } => {
+                self.validate_cancel(cmd, pre)
+            }
         }
     }
 

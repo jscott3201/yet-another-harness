@@ -8,7 +8,10 @@
 //! legality decision is computed here from the prepare-time declaration.
 
 use super::*;
-use crate::effect::{EffectState, ReversibilityClass, TargetEnumeration, TargetState};
+use crate::effect::{
+    EffectIntent, EffectState, EffectTerminal, ReversibilityClass, TargetEnumeration,
+    TargetObservation, TargetState,
+};
 use std::collections::{BTreeMap, BTreeSet};
 
 /// Evidence the settling authority carries from outside the graph. Kept
