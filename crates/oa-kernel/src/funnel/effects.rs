@@ -22,7 +22,10 @@ use super::effect_rules::{
     terminal_wire,
 };
 use super::*;
-use crate::effect::{EffectError, EffectState, RetryClass, ReversibilityClass, TargetEnumeration};
+use crate::effect::{
+    EffectError, EffectState, EffectTerminal, RetryClass, ReversibilityClass, TargetEnumeration,
+    TargetObservation,
+};
 
 /// Caller-declared §4.1 fields of an intent — everything the funnel does not
 /// derive (the key), mint (the intent id), or stamp from the fence (the
@@ -377,10 +380,10 @@ impl Funnel {
         // R20: an irreversible intent MUST NOT reach `dispatching` without a
         // committed approval. Persisted: nothing in this milestone's method
         // registry can attach an approval to an existing intent (that is
-        // ADR-002 §15's separate RespondToServerRequest command, which no
-        // holder may pre-answer under P15.5), so for THIS intent the answer
-        // can never change. The lawful path is a new logical operation once
-        // the approval is committed — safe precisely because this gate
+        // ADR-002's separate ApprovalResponse command, which no holder may
+        // pre-answer under P15.5), so for THIS intent the answer can never
+        // change. The lawful path is a new logical operation once the
+        // approval is committed — safe precisely because this gate
         // guarantees nothing was dispatched.
         if intent.reversibility_class == ReversibilityClass::Irreversible
             && intent.approval_ref.is_none()
@@ -390,6 +393,35 @@ impl Funnel {
                 format!("irreversible effect {operation_key} has no committed approval_ref"),
                 true,
             ));
+        }
+        // §5.2 rule 4's second disjunct (A14): an intent whose
+        // `prepared -> dispatching` transition did NOT commit before an
+        // applicable cancellation committed settles `cancelled` instead of
+        // dispatching — the adapter that read a prepared intent cannot
+        // lawfully perform the operation. `prepared` is §5.3 disjunct 1
+        // (proved never dispatched), so the settle legality path admits it.
+        if intent.state == EffectState::Prepared
+            && pre
+                .cancel
+                .as_ref()
+                .is_some_and(|c| !c.admission_blockers.is_empty())
+        {
+            let settled_at = *self.clock_ms.lock().expect("clock");
+            let terminal = EffectTerminal::Cancelled;
+            intent.settle(terminal).expect("prepared settles cancelled");
+            intent.settled_at = Some(settled_at);
+            intent.version = row.version + 1;
+            return update_accepted(
+                row,
+                intent,
+                Some(terminal_wire(terminal)),
+                "effect.settled",
+                json!({
+                    "terminal": "cancelled",
+                    "settled_at": settled_at,
+                    "rule_4": true,
+                }),
+            );
         }
         intent.state = EffectState::Dispatching;
         intent.version = row.version + 1;
@@ -410,6 +442,30 @@ impl Funnel {
         spec: &EffectSpec,
     ) -> Result<Accepted, Rejection> {
         let token = self.holder_gate(cmd, pre, unit_id)?;
+        // §5.2 rule 4: a committed ancestor cancellation bars a NEW intent
+        // under that lineage — the freeze snapshot governs existing members;
+        // later-created members are blocked, not retroactively added (rule 2).
+        if pre
+            .cancel
+            .as_ref()
+            .is_some_and(|c| !c.admission_blockers.is_empty())
+        {
+            return Err((
+                ErrorKind::InvalidRequest,
+                format!(
+                    "prepare barred by committed cancellation: {}",
+                    pre.cancel
+                        .as_ref()
+                        .expect("checked")
+                        .admission_blockers
+                        .iter()
+                        .map(|b| format!("{} ({})", b.member, b.reason))
+                        .collect::<Vec<_>>()
+                        .join("; ")
+                ),
+                true,
+            ));
+        }
         check_target_list(&spec.declared_targets)?;
         // §4.3: the enumeration mode is declared, and the declaration must
         // match the payload — otherwise "declared with nothing enumerated"

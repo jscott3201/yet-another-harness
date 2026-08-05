@@ -41,6 +41,31 @@ impl Funnel {
                 )),
             }
         };
+        // §5.2 rule 4: a committed ancestor cancellation bars the admission
+        // of a new child. The blockers are precomputed in the same
+        // transaction (cancel_pre_read); a non-empty set is a shape
+        // rejection — the committed cancellation cannot be un-committed, so
+        // the retry gets the same answer (persist=true).
+        let admission_gate = || -> Result<(), Rejection> {
+            let blockers: &[super::cancel_rules::Blocker] = pre
+                .cancel
+                .as_ref()
+                .map(|c| c.admission_blockers.as_slice())
+                .unwrap_or(&[]);
+            if blockers.is_empty() {
+                return Ok(());
+            }
+            let named = blockers
+                .iter()
+                .map(|b| format!("{} ({})", b.member, b.reason))
+                .collect::<Vec<_>>()
+                .join("; ");
+            Err((
+                ErrorKind::InvalidRequest,
+                format!("admission barred by committed cancellation: {named}"),
+                true,
+            ))
+        };
         match &cmd.method {
             Method::RunOpen {
                 run_id,
@@ -178,6 +203,7 @@ impl Funnel {
                         true,
                     ));
                 }
+                admission_gate()?;
                 Ok(Accepted {
                     plan: Plan::CreateUnit {
                         unit_id: unit_id.clone(),
@@ -200,6 +226,7 @@ impl Funnel {
                     return Err((ErrorKind::NotFound, format!("unit {unit_id}"), false));
                 };
                 expected_version_ok(unit.version)?;
+                admission_gate()?;
                 let prior_attempt = if unit.epoch > 0 {
                     let key = format!("{unit_id}/{}", unit.epoch);
                     match self.store.attempt_node(&key) {
@@ -354,6 +381,9 @@ impl Funnel {
             | Method::EffectRecordDispatched { .. }
             | Method::EffectSettle { .. }
             | Method::EffectParkReconciling { .. } => self.validate_effect(cmd, pre),
+            Method::CancelRequest { .. } | Method::CancelRecordDelivery { .. } => {
+                self.validate_cancel(cmd, pre)
+            }
         }
     }
 

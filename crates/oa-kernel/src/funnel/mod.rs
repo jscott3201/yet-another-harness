@@ -30,7 +30,7 @@
 //! across recover; the unique `event_id` constraint remains the backstop
 //! beyond 4096 takeovers, where the 12-bit rand_a field wraps).
 
-use crate::effect::{EffectIntent, EffectTerminal, TargetObservation};
+use crate::effect::EffectIntent;
 use crate::error::ErrorKind;
 use crate::ids::{AttemptEpoch, AuthorityEpoch, Digest, Stamp, Uuid7};
 use crate::store::{
@@ -41,15 +41,20 @@ use selene_core::{LabelSet, NodeId, PropertyMap, Value};
 use serde_json::json;
 use std::sync::Mutex;
 
+mod cancel;
+mod cancel_rules;
 mod command;
 mod effect_rules;
 mod effects;
+mod plan;
 mod replay;
 mod run_rules;
 #[cfg(test)]
 #[path = "unit_tests.rs"]
 mod tests;
 mod validate;
+
+use plan::{EventDraft, Plan};
 
 pub use command::{Command, Method, PrincipalKind, RunOutcome, ScopeKind, Submission};
 pub use effect_rules::SettleEvidence;
@@ -102,6 +107,11 @@ struct PreRead {
     /// blockers read in the same transaction as the CAS that would close it.
     run: Option<RunRow>,
     run_blockers: Vec<run_rules::Blocker>,
+    /// §5 pre-read data: the rule-4 admission gate for a child this command
+    /// would create, and the frozen-scope/delivery state a cancellation
+    /// command reads. Computed in the same transaction as every other fence
+    /// input, from the same write-side working graph.
+    cancel: Option<cancel::CancelPreRead>,
 }
 
 struct RunRow {
@@ -137,71 +147,6 @@ struct Accepted {
     plan: Plan,
     events: Vec<EventDraft>,
     result: serde_json::Value,
-}
-
-enum Plan {
-    CreateRun {
-        run_id: String,
-        goal_work_item_id: String,
-    },
-    CloseRun {
-        run_node: NodeId,
-        new_version: u64,
-        status: &'static str,
-    },
-    CreateWorkItem {
-        work_item_id: String,
-        acceptance_contract_digest: String,
-        declared_write_scope: String,
-    },
-    CreateUnit {
-        unit_id: String,
-        work_item_id: String,
-        run_id: String,
-    },
-    Dispatch {
-        unit_node: NodeId,
-        unit_id: String,
-        new_version: u64,
-        new_epoch: u64,
-        holder_id: String,
-        /// Minted in the plan step, not the apply step: the apply closure
-        /// runs inside the Selene mutator and must stay a pure writer.
-        attempt_id: String,
-        existing_lease: Option<(NodeId, u64)>,
-        /// §1.2: at most one active attempt per unit — the prior epoch's
-        /// row flips to `superseded` in this same transaction (§3.1).
-        prior_attempt: Option<NodeId>,
-    },
-    BumpUnit {
-        unit_node: NodeId,
-        new_version: u64,
-        new_stamp: Option<u64>,
-    },
-    CreateEffect {
-        operation_key: String,
-        effect_intent_id: String,
-        unit_id: String,
-        record: String,
-    },
-    UpdateEffect {
-        effect_node: NodeId,
-        new_version: u64,
-        state: &'static str,
-        /// Set exactly once, at settle — the store column mirrors the
-        /// record's write-once terminal.
-        terminal: Option<&'static str>,
-        record: String,
-    },
-    Nothing,
-}
-
-struct EventDraft {
-    aggregate_kind: &'static str,
-    aggregate_id: String,
-    aggregate_version: u64,
-    event_kind: &'static str,
-    payload: serde_json::Value,
 }
 
 type Rejection = (ErrorKind, String, /* persist receipt */ bool);
@@ -354,6 +299,10 @@ impl Funnel {
                 } => run_rules::success_blockers(read, &self.store, run_id),
                 _ => Vec::new(),
             };
+            // §5 pre-read from the same working graph: the rule-4 admission
+            // gate for a child this command would create, and the frozen
+            // scope / delivery state a cancellation command reads.
+            let cancel = self.cancel_pre_read(cmd, read, &unit, &effect);
             PreRead {
                 for_unit: cmd.method.unit_id().map(str::to_owned),
                 unit,
@@ -362,6 +311,7 @@ impl Funnel {
                 effect,
                 run,
                 run_blockers,
+                cancel,
             }
         };
 
@@ -632,6 +582,12 @@ impl Funnel {
                     }
                     m.update_node(*effect_node, no_labels(), props_set(set))
                         .map_err(|e| format!("{e:?}"))?;
+                }
+                Plan::CreateCancelRequest(p) => {
+                    new_books.extend(cancel::apply_create_request(&mut m, p)?);
+                }
+                Plan::CancelRecordDelivery(p) => {
+                    new_books.extend(cancel::apply_record_delivery(&mut m, p)?);
                 }
                 Plan::Nothing => {}
             }

@@ -26,7 +26,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use selene_core::{GraphId, LabelSet, NodeId, PropertyMap, Value};
-use selene_graph::{CommitBatching, GraphError, RowIndex, SharedGraph};
+use selene_graph::{CommitBatching, GraphError, RowIndex, SeleneGraph, SharedGraph};
 use selene_persist::DEFAULT_WAL_FILE_NAME;
 
 use crate::ids::{AttemptEpoch, AuthorityEpoch, Stamp};
@@ -457,6 +457,66 @@ impl Store {
             .collect()
     }
 
+    /// Every (attempt_key, node) pair. §5.2 rule 4's lineage scan resolves
+    /// an `attempt_id` (the identity a CancelRequest roots at) by walking
+    /// these against the live graph.
+    pub(crate) fn attempt_entries(&self) -> Vec<(String, NodeId)> {
+        self.books
+            .lock()
+            .expect("books")
+            .attempts
+            .iter()
+            .map(|(k, v)| (k.clone(), *v))
+            .collect()
+    }
+
+    /// Every (delivery_key, node) pair. §5 settlement reads the delivered
+    /// set for a request, and I11's close predicate needs the same walk per
+    /// run — provided live, like every §5 read, through the working graph.
+    pub(crate) fn cancel_delivery_entries(&self) -> Vec<(String, NodeId)> {
+        self.books
+            .lock()
+            .expect("books")
+            .cancel_deliveries
+            .iter()
+            .map(|(k, v)| (k.clone(), *v))
+            .collect()
+    }
+
+    /// Resolve an `attempt_id` (§1.2 root identity, unique by schema) to
+    /// its node. Scanned live rather than book-indexed: the attempt book is
+    /// keyed by the derived `attempt_key`, and the id axis is the one §5
+    /// roots cancellations at, so the two cannot share a key.
+    pub(crate) fn attempt_id_node(&self, read: &SeleneGraph, attempt_id: &str) -> Option<NodeId> {
+        for (_, node) in self.attempt_entries() {
+            let props = read.node_properties(node)?;
+            if props.get(&db("attempt_id")).and_then(value_str).as_deref() == Some(attempt_id) {
+                return Some(node);
+            }
+        }
+        None
+    }
+
+    /// Resolve an `effect_intent_id` to its node, by the same live scan.
+    pub(crate) fn effect_intent_id_node(
+        &self,
+        read: &SeleneGraph,
+        effect_intent_id: &str,
+    ) -> Option<NodeId> {
+        for (_, node) in self.effect_entries() {
+            let props = read.node_properties(node)?;
+            if props
+                .get(&db("effect_intent_id"))
+                .and_then(value_str)
+                .as_deref()
+                == Some(effect_intent_id)
+            {
+                return Some(node);
+            }
+        }
+        None
+    }
+
     #[allow(dead_code)]
     pub(crate) fn cancel_request_nodes(&self) -> Vec<NodeId> {
         self.books
@@ -579,7 +639,57 @@ impl Store {
         row
     }
 
-    /// The committed journal in cursor order. Reads the write-side working
+    /// Cancel-request read-back (audit/test seam, like
+    /// [`Store::effect_record`]): the indexed columns plus the frozen scope
+    /// and the full serialized record, so tests assert durable state.
+    pub fn cancel_request_row(&self, cancel_request_id: &str) -> Option<CancelRequestRow> {
+        let node = self.cancel_request_node(cancel_request_id)?;
+        let txn = self.shared.begin_write();
+        let row = txn.read().node_properties(node).map(|p| CancelRequestRow {
+            version: p.get(&db("version")).and_then(value_u64).unwrap_or(0),
+            status: p.get(&db("status")).and_then(value_str).unwrap_or_default(),
+            root_kind: p
+                .get(&db("root_kind"))
+                .and_then(value_str)
+                .unwrap_or_default(),
+            root_id: p
+                .get(&db("root_id"))
+                .and_then(value_str)
+                .unwrap_or_default(),
+            scope: p.get(&db("scope")).and_then(value_str).unwrap_or_default(),
+            record: p.get(&db("record")).and_then(value_str).unwrap_or_default(),
+        });
+        txn.rollback();
+        row
+    }
+
+    /// Delivery-row read-back (audit/test seam, like
+    /// [`Store::effect_record`]). The delivery row is immutable in every
+    /// property, so each row is one observation that can never be rewritten.
+    pub fn cancel_delivery_rows(&self) -> Vec<CancelDeliveryRow> {
+        let txn = self.shared.begin_write();
+        let mut out = Vec::new();
+        {
+            let read = txn.read();
+            for (_, node) in self.cancel_delivery_entries() {
+                let Some(p) = read.node_properties(node) else {
+                    continue;
+                };
+                let get_s = |k: &str| p.get(&db(k)).and_then(value_str).unwrap_or_default();
+                out.push(CancelDeliveryRow {
+                    delivery_key: get_s("delivery_key"),
+                    cancel_request_id: get_s("cancel_request_id"),
+                    member_id: get_s("member_id"),
+                    member_kind: get_s("member_kind"),
+                    outcome: get_s("outcome"),
+                });
+            }
+        }
+        txn.rollback();
+        out
+    }
+
+    /// The journal in index order. Reads the write-side working
     /// graph (briefly taking the writer lock), so it reflects every commit
     /// that has returned — an audit/test seam for the obligation-2 "exactly
     /// one set of appended events" half and the V1 replay comparison, not a
@@ -630,6 +740,30 @@ pub struct EffectRecordRow {
     pub terminal: Option<String>,
     /// The serialized `EffectIntent` JSON.
     pub record: String,
+}
+
+/// One cancel-request row as read back through [`Store::cancel_request_row`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CancelRequestRow {
+    pub version: u64,
+    pub status: String,
+    pub root_kind: String,
+    pub root_id: String,
+    /// The frozen scope (rule-2 snapshot), serialized.
+    pub scope: String,
+    /// The full serialized `CancelRequest`, status included.
+    pub record: String,
+}
+
+/// One cancel-delivery row as read back through
+/// [`Store::cancel_delivery_rows`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CancelDeliveryRow {
+    pub delivery_key: String,
+    pub cancel_request_id: String,
+    pub member_id: String,
+    pub member_kind: String,
+    pub outcome: String,
 }
 
 /// One committed journal row as read back through [`Store::journal`].

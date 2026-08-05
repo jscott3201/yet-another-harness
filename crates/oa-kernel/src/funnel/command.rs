@@ -182,6 +182,31 @@ pub enum Method {
         operation_key: String,
         next_reconcile_at: u64,
     },
+    /// AUTHORITY (§3.3 row 6): §5 `cancel.request` — commit the frozen
+    /// scope BEFORE any signal (I10). The scope is snapshotted at commit;
+    /// later-created members are governed by rule 4, never retroactively
+    /// added (§5.2 rule 2).
+    CancelRequest {
+        root_kind: crate::cancel::CancelKind,
+        root_id: String,
+        reason: crate::cancel::CancelReason,
+        policy: crate::cancel::CancelPolicy,
+        /// The members to freeze, leaf-first order imposed by
+        /// `CancelScope::freeze`, UNIQUE by member_id enforced there.
+        proposed: Vec<crate::cancel::MemberInput>,
+    },
+    /// AUTHORITY (§3.3 row 6): §5 `cancelRecordDelivery` — the write-once
+    /// delivery + observation for one scope member. One row carries
+    /// `delivered_at` + `observed_at` (Option) + `outcome`;
+    /// `observed_at = None` means outcome=Unresponsive (terminal but
+    /// unsettled, never a placeholder filled later).
+    CancelRecordDelivery {
+        cancel_request_id: String,
+        member_id: String,
+        delivered_at: u64,
+        observed_at: Option<u64>,
+        outcome: crate::cancel::DeliveryOutcome,
+    },
 }
 
 impl Method {
@@ -199,6 +224,7 @@ impl Method {
             | Method::EffectRecordDispatched { unit_id, .. }
             | Method::EffectSettle { unit_id, .. }
             | Method::EffectParkReconciling { unit_id, .. } => Some(unit_id),
+            Method::CancelRequest { .. } | Method::CancelRecordDelivery { .. } => None,
         }
     }
 

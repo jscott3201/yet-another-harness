@@ -13,11 +13,12 @@
 //! read here would let a run close success over an effect that had just
 //! been dispatched.
 
+use crate::cancel::{CancelKind, CancelScope, DeliveryOutcome};
 use crate::effect::{EffectState, EffectTerminal};
 use crate::store::{Store, db, value_str};
 use selene_graph::SeleneGraph;
 
-/// Why one member forbids a `closed_success`.
+/// Why one member forbids a closed_success.
 pub(super) struct Blocker {
     pub member: String,
     pub reason: String,
@@ -56,11 +57,153 @@ pub(super) fn success_blockers(graph: &SeleneGraph, store: &Store, run_id: &str)
             });
         }
     }
+    // §5.2 rule 7 / I11 (finding 3): a committed cancellation rooted in
+    // this run forbids a success close while ANY scope member has no
+    // discharged delivery row. The obligation-4 shape: a run whose effects
+    // reconcile under a cancel must stay open until the request settles.
+    blockers.extend(cancel_blocks(graph, store, run_id));
     blockers
 }
 
-/// The per-effect half of I11, split out so its truth table is testable
-/// without a store. `None` means this effect does not block a success close.
+/// The cancellation-rooted half of I11. A request rooted at `run_id` — or
+/// at a unit/attempt/effect inside it — resolves upward to this run, and a
+/// request status other than `settled` means at least one member is not
+/// discharged.
+fn cancel_blocks(graph: &SeleneGraph, store: &Store, run_id: &str) -> Vec<Blocker> {
+    // Delivered member rows per request, from the SAME working graph the
+    // close is validated against (no snapshot lag — the run and the
+    // delivery advance in one command stream behind the funnel gate).
+    let delivered_by_request: std::collections::HashMap<String, Vec<(String, bool)>> = store
+        .cancel_delivery_entries()
+        .into_iter()
+        .filter_map(|(_, node)| {
+            let props = graph.node_properties(node)?;
+            let request_id = props.get(&db("cancel_request_id")).and_then(value_str)?;
+            let member_id = props.get(&db("member_id")).and_then(value_str)?;
+            let outcome = props.get(&db("outcome")).and_then(value_str)?;
+            let discharged = outcome_from_wire(&outcome).is_some_and(|o| o.is_discharged());
+            Some((request_id, (member_id, discharged)))
+        })
+        .fold(std::collections::HashMap::new(), |mut acc, (req, row)| {
+            acc.entry(req).or_default().push(row);
+            acc
+        });
+
+    let mut blockers = Vec::new();
+    for node in store.cancel_request_nodes() {
+        let Some(props) = graph.node_properties(node) else {
+            continue;
+        };
+        let Some(request_id) = props.get(&db("cancel_request_id")).and_then(value_str) else {
+            continue;
+        };
+        let Some(root_kind) = props.get(&db("root_kind")).and_then(value_str) else {
+            continue;
+        };
+        let Some(root_id) = props.get(&db("root_id")).and_then(value_str) else {
+            continue;
+        };
+        let Some(scope_json) = props.get(&db("scope")).and_then(value_str) else {
+            continue;
+        };
+        let Some(status) = props.get(&db("status")).and_then(value_str) else {
+            continue;
+        };
+        if status == "settled" {
+            continue;
+        }
+        let Some(root) = kind_from_wire(&root_kind) else {
+            continue;
+        };
+        let Some(my_run) = root_run(graph, store, root, &root_id) else {
+            continue;
+        };
+        if my_run != run_id {
+            continue;
+        }
+        let Ok(scope) = serde_json::from_str::<CancelScope>(&scope_json) else {
+            continue;
+        };
+        let Some(missing) = scope.members().iter().find(|m| {
+            !delivered_by_request.get(&request_id).is_some_and(|v| {
+                v.iter()
+                    .any(|(member, discharged)| member == &m.member_id && *discharged)
+            })
+        }) else {
+            continue;
+        };
+        blockers.push(Blocker {
+            member: format!("cancel_request {request_id} member {}", missing.member_id),
+            reason: format!(
+                "committed cancellation of {root_kind}:{root_id} not settled (status {status})"
+            ),
+        });
+    }
+    blockers
+}
+
+/// `(root_kind, root_id)` -> the run that owns the root. Runs own
+/// themselves; every other kind resolves up through its unit — finding 3's
+/// "rooted run-or-self" lineage.
+fn root_run(
+    graph: &SeleneGraph,
+    store: &Store,
+    root_kind: CancelKind,
+    root_id: &str,
+) -> Option<String> {
+    match root_kind {
+        CancelKind::Run => Some(root_id.to_owned()),
+        CancelKind::ExecutionUnit => {
+            let node = store.unit_node(root_id)?;
+            graph
+                .node_properties(node)
+                .and_then(|p| p.get(&db("run_id")).and_then(value_str))
+        }
+        CancelKind::Attempt => {
+            let node = store.attempt_id_node(graph, root_id)?;
+            let unit = graph
+                .node_properties(node)
+                .and_then(|p| p.get(&db("unit_id")).and_then(value_str))?;
+            let unit_node = store.unit_node(&unit)?;
+            graph
+                .node_properties(unit_node)
+                .and_then(|p| p.get(&db("run_id")).and_then(value_str))
+        }
+        CancelKind::EffectIntent => {
+            let node = store.effect_intent_id_node(graph, root_id)?;
+            let unit = graph
+                .node_properties(node)
+                .and_then(|p| p.get(&db("unit_id")).and_then(value_str))?;
+            let unit_node = store.unit_node(&unit)?;
+            graph
+                .node_properties(unit_node)
+                .and_then(|p| p.get(&db("run_id")).and_then(value_str))
+        }
+    }
+}
+
+fn kind_from_wire(wire: &str) -> Option<CancelKind> {
+    match wire {
+        "run" => Some(CancelKind::Run),
+        "execution_unit" => Some(CancelKind::ExecutionUnit),
+        "attempt" => Some(CancelKind::Attempt),
+        "effect_intent" => Some(CancelKind::EffectIntent),
+        _ => None,
+    }
+}
+
+fn outcome_from_wire(wire: &str) -> Option<DeliveryOutcome> {
+    match wire {
+        "observed_stopped" => Some(DeliveryOutcome::ObservedStopped),
+        "unresponsive" => Some(DeliveryOutcome::Unresponsive),
+        "already_terminal" => Some(DeliveryOutcome::AlreadyTerminal),
+        "detached_declined" => Some(DeliveryOutcome::DetachedDeclined),
+        _ => None,
+    }
+}
+
+/// The per-effect half of I11, mirroring the effect state truth table.
+/// `None` means this effect does not block a success close.
 ///
 /// An unreadable state blocks: I11 is a safety bar, and a member whose state
 /// cannot be determined is exactly the "unknown" case the rule names.
