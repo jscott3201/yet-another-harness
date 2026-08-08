@@ -4,6 +4,9 @@ use crate::effect::{EffectIntent, EffectState};
 use selene_graph::SeleneGraph;
 
 impl Store {
+    /// `true` only when recovery can reconstruct durable terminal proof for
+    /// an empty root-only cancellation; known roots without such proof are
+    /// present but ineligible.
     pub(crate) fn cancel_root_terminal(
         &self,
         read: &SeleneGraph,
@@ -25,15 +28,17 @@ impl Store {
                 | "dispatched"
                 | "running"
                 | "awaiting_review"
-                | "awaiting_integration" => Some(false),
-                "settled_accepted" | "settled_rejected" | "cancelled" | "failed" | "abandoned" => {
-                    Some(true)
-                }
+                | "awaiting_integration"
+                | "settled_accepted"
+                | "settled_rejected"
+                | "cancelled"
+                | "failed"
+                | "abandoned" => Some(false),
                 _ => None,
             },
             CancelKind::Attempt => match status(self.attempt_id_node(root_id)?)?.as_str() {
-                "active" => Some(false),
-                "superseded" | "completed" | "cancelled" | "failed" | "unknown" => Some(true),
+                "superseded" => Some(true),
+                "active" | "completed" | "cancelled" | "failed" | "unknown" => Some(false),
                 _ => None,
             },
             CancelKind::EffectIntent => {
