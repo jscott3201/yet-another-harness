@@ -54,13 +54,21 @@ checks, locked workspace Clippy, and locked workspace tests.
   requires a token resolvable in the current adapter lifetime; after restart,
   an unresolvable holder failure is unkeyed because Adapter 1 cannot bind it to
   a verified holder.
+- Forced-JSON `GetReceipt` lookup by project routing and the scoped
+  `(scope_kind, scope_id, command_id)` key. Lookup returns physically retained
+  completed or rejected receipts for Adapter 1's public commands, reports
+  ordinary `not_found` for absent or internal receipts, and performs no durable
+  mutation or event publication.
 - `authority_epoch` is envelope state rather than digest input. Adapter 1 checks
-  it before receipt lookup, so a caller must refresh the epoch after takeover
-  before replaying the same command ID.
+  it before command receipt replay, so a caller must refresh the epoch after
+  takeover before resubmitting the same command ID. Read-only `GetReceipt` does
+  not carry an authority epoch.
 - Opaque wire holder tokens kept one per active unit. Authority takeover drops
-  the in-memory index and fences every token from the prior lifetime. Replaying
-  a stale dispatch receipt can reproduce its token value but does not reactivate
-  that token. The Adapter 1 control graph is not a credential vault.
+  the in-memory index and fences every token from the prior lifetime.
+  `GetReceipt` never returns or activates an attempt token or its durable claims.
+  Same-lifetime byte-identical dispatch replay can recover a current token;
+  takeover requires later reauthorization or redispatch. The Adapter 1 control
+  graph is not a credential vault.
 - Cursor resume in responses bounded to 1024 events and 1 MiB plus 4 KiB of
   serialized JSON. Larger catch-up requires an in-memory subscription over the
   durable event journal. Adapter 1 returns typed expiry below the durable floor
@@ -70,8 +78,9 @@ checks, locked workspace Clippy, and locked workspace tests.
   open subscriptions per project, and cursor-based reconnect after restart.
 - Durable actor, timestamp, causation, and correlation event metadata.
 - Fail-closed startup when retained event or receipt records cannot be decoded,
-  bounded, or linked by their durable ownership fields. Stream reads repeat
-  event projection validation; dispatch-result claims are checked when replayed.
+  bounded, projected under their durable command type/version, or linked by
+  their ownership fields. Stream reads repeat event projection validation;
+  dispatch-result claims are checked for replay and lookup projection.
 
 ## Current Command Methods
 
@@ -95,7 +104,9 @@ through the first public protocol registry yet.
   marker. Adapter 1 advertises the planned 256-entry capacity but does not
   deliver progress events yet.
 - Durable server requests for approvals and restart re-presentation.
-- Receipt lookup queries and current-state views.
+- Current-state views. Receipt lookup implements P6.3 for physically retained
+  public-command rows; P6.4 logical receipt expiry remains part of retention
+  work.
 - Content-addressed artifact storage and `ArtifactRef` substitution for results
   or semantic event payloads that exceed inline limits.
 - Authority-issued token reauthorization after policy and approval validation;

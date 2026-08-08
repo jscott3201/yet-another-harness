@@ -17,6 +17,7 @@
 
 use crate::ids::Uuid7;
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 
 /// §5.1's cap on a frozen scope. A cancellation spanning more members than
 /// this is a decomposition failure upstream, not a scope to truncate:
@@ -193,14 +194,38 @@ pub struct CancelScope {
 }
 
 impl CancelScope {
+    pub(crate) fn validate(&self) -> bool {
+        if self.members.len() > MAX_SCOPE_MEMBERS
+            || !crate::ids::valid_wire_identifier(&self.root_id)
+        {
+            return false;
+        }
+        let mut seen = HashSet::with_capacity(self.members.len());
+        for (index, member) in self.members.iter().enumerate() {
+            let is_root = member.member_id == self.root_id && member.member_kind == self.root_kind;
+            if (!is_root && !self.root_kind.contains(member.member_kind))
+                || !crate::ids::valid_wire_identifier(&member.member_id)
+                || member.order_index != index as u32
+                || !seen.insert(member.member_id.as_str())
+            {
+                return false;
+            }
+        }
+        self.members.windows(2).all(|members| {
+            members[0].member_kind.depth() > members[1].member_kind.depth()
+                || (members[0].member_kind == members[1].member_kind
+                    && members[0].member_id < members[1].member_id)
+        })
+    }
+
     /// Freeze a proposed scope (§5.2 rule 2). Members are ordered leaf-first
     /// — deepest kind first, ties broken by `member_id` so the order is
     /// deterministic across processes and replayable from the journal — and
     /// `order_index` is assigned densely from 0.
     ///
     /// The root itself is a member when named in `proposed`; it is not
-    /// synthesized, because a `root_only` request against an already-terminal
-    /// root is a lawful no-op scope and inventing a member would forge work.
+    /// synthesized. The funnel accepts an empty no-op scope only after it
+    /// verifies that the root already exists and is terminal.
     pub fn freeze(
         root_kind: CancelKind,
         root_id: impl Into<String>,
@@ -221,14 +246,13 @@ impl CancelScope {
                 });
             }
         }
-        let mut seen: Vec<&str> = Vec::with_capacity(proposed.len());
+        let mut seen = HashSet::with_capacity(proposed.len());
         for m in &proposed {
-            if seen.contains(&m.member_id.as_str()) {
+            if !seen.insert(m.member_id.as_str()) {
                 return Err(ScopeError::DuplicateMember {
                     member_id: m.member_id.clone(),
                 });
             }
-            seen.push(m.member_id.as_str());
         }
 
         let mut ordered = proposed;
@@ -270,7 +294,23 @@ impl CancelScope {
 
     /// The member row for `member_id`, if the freeze captured it.
     pub fn member(&self, member_id: &str) -> Option<&ScopeMember> {
-        self.members.iter().find(|m| m.member_id == member_id)
+        [
+            CancelKind::EffectIntent,
+            CancelKind::Attempt,
+            CancelKind::ExecutionUnit,
+            CancelKind::Run,
+        ]
+        .into_iter()
+        .find_map(|kind| {
+            self.members
+                .binary_search_by(|member| {
+                    kind.depth()
+                        .cmp(&member.member_kind.depth())
+                        .then_with(|| member.member_id.as_str().cmp(member_id))
+                })
+                .ok()
+                .map(|index| &self.members[index])
+        })
     }
 
     /// Members in the order delivery must follow (§5.2 rule 3).

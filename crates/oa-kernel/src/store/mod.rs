@@ -27,7 +27,7 @@ use std::sync::Mutex;
 
 use rand::RngCore;
 use selene_core::{GraphId, LabelSet, NodeId, PropertyMap, Value};
-use selene_graph::{CommitBatching, GraphError, RowIndex, SeleneGraph, SharedGraph};
+use selene_graph::{CommitBatching, GraphError, RowIndex, SharedGraph};
 use selene_persist::DEFAULT_WAL_FILE_NAME;
 
 use crate::ids::{AttemptEpoch, AuthorityEpoch, Stamp};
@@ -37,7 +37,14 @@ pub use selene_persist::PersistError;
 
 pub const GRAPH_ID: u64 = 7;
 
+mod cancel_recovery;
+#[cfg(test)]
+mod cancel_recovery_tests;
 mod read;
+mod receipt;
+mod receipt_event;
+#[cfg(test)]
+mod receipt_tests;
 mod recovery;
 #[cfg(test)]
 mod review_tests;
@@ -122,10 +129,12 @@ struct Books {
     /// Keyed by `attempt_key` (`unit_id/epoch`) — §9 step 4 and §6.1 rework
     /// both need the current attempt addressable after recovery.
     attempts: HashMap<String, NodeId>,
+    attempt_ids: HashMap<String, NodeId>,
     leases: HashMap<String, NodeId>,
     work_items: HashMap<String, NodeId>,
     receipts: HashMap<String, NodeId>,
     effects: HashMap<String, NodeId>,
+    effect_intent_ids: HashMap<String, NodeId>,
     events: BTreeMap<u64, NodeId>,
     evidence: HashMap<String, NodeId>,
     runs: HashMap<String, NodeId>,
@@ -133,9 +142,11 @@ struct Books {
     /// applicable cancellation" on every admission, so the whole set stays
     /// addressable rather than being found by scan.
     cancel_requests: HashMap<String, NodeId>,
+    cancel_roots: HashMap<String, NodeId>,
     /// Keyed by the derived `delivery_key` — §5.1's
     /// UNIQUE(cancel_request_id, member_id).
     cancel_deliveries: HashMap<String, NodeId>,
+    cancel_deliveries_by_request: HashMap<String, Vec<NodeId>>,
 }
 
 pub struct Store {
@@ -171,6 +182,9 @@ impl Store {
     ) -> Result<Store, StoreError> {
         if Self::wal_path(dir).exists() {
             return Err(StoreError::AlreadyInitialized(dir.to_path_buf()));
+        }
+        if !crate::ids::valid_wire_identifier(project_id) {
+            return Err(StoreError::Internal("project_id is invalid".into()));
         }
         let shared = SharedGraph::builder(GraphId::new(GRAPH_ID))
             .bound_to(graph_type())?
@@ -239,6 +253,21 @@ impl Store {
             token_key,
             ..store
         };
+        store.validate_all_cancellation_lifecycles()?;
+        let mut cursor = 0;
+        loop {
+            let events = store.events_after_limit(cursor, crate::protocol::MAX_RESUME_EVENTS)?;
+            if events.is_empty() {
+                break;
+            }
+            for event in events {
+                cursor = event.cursor;
+                crate::protocol::event::project(event).map_err(|detail| {
+                    StoreError::Internal(format!("durable event is not wire-safe: {detail}"))
+                })?;
+            }
+        }
+        store.validate_all_receipt_semantics()?;
         store.claim_authority(instance_id)?;
         Ok(store)
     }
@@ -283,6 +312,9 @@ impl Store {
                 if let Some(k) = get_str("attempt_key") {
                     books.attempts.insert(k, id);
                 }
+                if let Some(k) = get_str("attempt_id") {
+                    books.attempt_ids.insert(k, id);
+                }
             } else if labels.contains(&db("Evidence")) {
                 if let Some(k) = get_str("evidence_key") {
                     books.evidence.insert(k, id);
@@ -305,6 +337,9 @@ impl Store {
                 if let Some(k) = get_str("operation_key") {
                     books.effects.insert(k, id);
                 }
+                if let Some(k) = get_str("effect_intent_id") {
+                    books.effect_intent_ids.insert(k, id);
+                }
             } else if labels.contains(&db("Run")) {
                 if let Some(k) = get_str("run_id") {
                     books.runs.insert(k, id);
@@ -314,10 +349,20 @@ impl Store {
                 if let Some(k) = get_str("cancel_request_id") {
                     books.cancel_requests.insert(k, id);
                 }
+                if let (Some(kind), Some(root_id)) = (get_str("root_kind"), get_str("root_id")) {
+                    books.cancel_roots.insert(format!("{kind}/{root_id}"), id);
+                }
             } else if labels.contains(&db("CancelDelivery")) {
                 recovery::validate_cancel_delivery(props)?;
                 if let Some(k) = get_str("delivery_key") {
                     books.cancel_deliveries.insert(k, id);
+                }
+                if let Some(k) = get_str("cancel_request_id") {
+                    books
+                        .cancel_deliveries_by_request
+                        .entry(k)
+                        .or_default()
+                        .push(id);
                 }
             } else if labels.contains(&db("Event")) {
                 let c = props
@@ -337,7 +382,7 @@ impl Store {
             .checked_add(1)
             .ok_or_else(|| StoreError::Internal("event cursor space exhausted".into()))?;
         let project_id = project_id
-            .filter(|project_id| !project_id.is_empty())
+            .filter(|project_id| crate::ids::valid_wire_identifier(project_id))
             .ok_or_else(|| StoreError::Internal("Authority project_id is invalid".into()))?;
         let min_retained_cursor = min_retained_cursor.ok_or_else(|| {
             StoreError::Internal("Authority min_retained_cursor is invalid".into())
@@ -611,19 +656,6 @@ impl Store {
             .collect()
     }
 
-    /// Every (attempt_key, node) pair. §5.2 rule 4's lineage scan resolves
-    /// an `attempt_id` (the identity a CancelRequest roots at) by walking
-    /// these against the live graph.
-    pub(crate) fn attempt_entries(&self) -> Vec<(String, NodeId)> {
-        self.books
-            .lock()
-            .expect("books")
-            .attempts
-            .iter()
-            .map(|(k, v)| (k.clone(), *v))
-            .collect()
-    }
-
     /// Every (delivery_key, node) pair. §5 settlement reads the delivered
     /// set for a request, and I11's close predicate needs the same walk per
     /// run — provided live, like every §5 read, through the working graph.
@@ -637,68 +669,58 @@ impl Store {
             .collect()
     }
 
-    /// Resolve an `attempt_id` (§1.2 root identity, unique by schema) to
-    /// its node. Scanned live rather than book-indexed: the attempt book is
-    /// keyed by the derived `attempt_key`, and the id axis is the one §5
-    /// roots cancellations at, so the two cannot share a key.
-    pub(crate) fn attempt_id_node(&self, read: &SeleneGraph, attempt_id: &str) -> Option<NodeId> {
-        for (_, node) in self.attempt_entries() {
-            let props = read.node_properties(node)?;
-            if props.get(&db("attempt_id")).and_then(value_str).as_deref() == Some(attempt_id) {
-                return Some(node);
-            }
-        }
-        None
-    }
-
-    /// Resolve an `effect_intent_id` to its node, by the same live scan.
-    pub(crate) fn effect_intent_id_node(
-        &self,
-        read: &SeleneGraph,
-        effect_intent_id: &str,
-    ) -> Option<NodeId> {
-        for (_, node) in self.effect_entries() {
-            let props = read.node_properties(node)?;
-            if props
-                .get(&db("effect_intent_id"))
-                .and_then(value_str)
-                .as_deref()
-                == Some(effect_intent_id)
-            {
-                return Some(node);
-            }
-        }
-        None
-    }
-
-    #[allow(dead_code)]
-    pub(crate) fn cancel_request_nodes(&self) -> Vec<NodeId> {
+    pub(crate) fn attempt_id_node(&self, attempt_id: &str) -> Option<NodeId> {
         self.books
             .lock()
             .expect("books")
-            .cancel_requests
-            .values()
+            .attempt_ids
+            .get(attempt_id)
             .copied()
-            .collect()
+    }
+
+    /// Resolve an `effect_intent_id` to its node, by the same live scan.
+    pub(crate) fn effect_intent_id_node(&self, effect_intent_id: &str) -> Option<NodeId> {
+        self.books
+            .lock()
+            .expect("books")
+            .effect_intent_ids
+            .get(effect_intent_id)
+            .copied()
     }
 
     pub(crate) fn book_insert(&self, kind: BookKind, key: String, node: NodeId) {
         let mut books = self.books.lock().expect("books");
         match kind {
             BookKind::Unit => books.units.insert(key, node),
-            BookKind::Attempt => books.attempts.insert(key, node),
+            BookKind::Attempt { attempt_id } => {
+                books.attempt_ids.insert(attempt_id, node);
+                books.attempts.insert(key, node)
+            }
             BookKind::Lease => books.leases.insert(key, node),
             BookKind::WorkItem => books.work_items.insert(key, node),
             BookKind::Receipt => books.receipts.insert(key, node),
-            BookKind::Effect => books.effects.insert(key, node),
+            BookKind::Effect { effect_intent_id } => {
+                books.effect_intent_ids.insert(effect_intent_id, node);
+                books.effects.insert(key, node)
+            }
             BookKind::Event => books.events.insert(
                 key.parse().expect("event book key is the decimal cursor"),
                 node,
             ),
             BookKind::Evidence => books.evidence.insert(key, node),
             BookKind::Run => books.runs.insert(key, node),
-            BookKind::CancelRequest => books.cancel_requests.insert(key, node),
-            BookKind::CancelDelivery => books.cancel_deliveries.insert(key, node),
+            BookKind::CancelRequest { root_key } => {
+                books.cancel_roots.insert(root_key, node);
+                books.cancel_requests.insert(key, node)
+            }
+            BookKind::CancelDelivery { request_id } => {
+                books
+                    .cancel_deliveries_by_request
+                    .entry(request_id)
+                    .or_default()
+                    .push(node);
+                books.cancel_deliveries.insert(key, node)
+            }
         };
     }
 
@@ -767,24 +789,32 @@ impl Store {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub(crate) enum BookKind {
     Unit,
-    Attempt,
+    Attempt {
+        attempt_id: String,
+    },
     Lease,
     WorkItem,
     Receipt,
     #[allow(dead_code)] // effect-over-store layer (task 5c) inserts these
-    Effect,
+    Effect {
+        effect_intent_id: String,
+    },
     Event,
     #[allow(dead_code)] // evidence rows land with the §8 gateway layer
     Evidence,
     #[allow(dead_code)] // the §5 funnel methods construct these
     Run,
     #[allow(dead_code)]
-    CancelRequest,
+    CancelRequest {
+        root_key: String,
+    },
     #[allow(dead_code)]
-    CancelDelivery,
+    CancelDelivery {
+        request_id: String,
+    },
 }
 
 /// Fence-relevant fields of a unit row.

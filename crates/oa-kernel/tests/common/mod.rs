@@ -84,10 +84,18 @@ impl Ctx {
         expected: Option<u64>,
         method: Method,
     ) -> Command {
+        let scope_id = match &method {
+            Method::ProgressReport { unit_id }
+            | Method::TokenReissue { unit_id }
+            | Method::EffectPrepare { unit_id, .. }
+            | Method::EffectDispatch { unit_id, .. }
+            | Method::EffectRecordDispatched { unit_id, .. } => unit_id.clone(),
+            _ => "g".into(),
+        };
         Command {
             command_id: self.next_id().to_string(),
             scope_kind: ScopeKind::Unit,
-            scope_id: "g".into(),
+            scope_id,
             request_digest: Digest::of_bytes(digest_src.as_bytes()),
             expected_version: expected,
             principal_kind: PrincipalKind::Agent,

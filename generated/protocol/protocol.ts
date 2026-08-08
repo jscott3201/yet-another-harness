@@ -64,7 +64,7 @@ export type SlowConsumer = { min_retained_cursor: DecimalU64, last_delivered_cur
 
 export type SubscriptionClosed = { subscription_id: string, };
 
-export type ClientMessage = { "kind": "command", "message": Command } | { "kind": "resume", "message": { project_id: string, after_cursor: DecimalU64, } } | { "kind": "subscribe", "message": { project_id: string, after_cursor: DecimalU64, } } | { "kind": "subscription_poll", "message": { subscription_id: string, } } | { "kind": "subscription_close", "message": { subscription_id: string, } };
+export type ClientMessage = { "kind": "command", "message": Command } | { "kind": "get_receipt", "message": { project_id: string, scope: Scope, command_id: string, } } | { "kind": "resume", "message": { project_id: string, after_cursor: DecimalU64, } } | { "kind": "subscribe", "message": { project_id: string, after_cursor: DecimalU64, } } | { "kind": "subscription_poll", "message": { subscription_id: string, } } | { "kind": "subscription_close", "message": { subscription_id: string, } };
 
 export type ServerMessage = { "kind": "receipt", "message": Receipt } | { "kind": "events", "message": Array<Event> } | { "kind": "event", "message": Event } | { "kind": "cursor_expired", "message": CursorExpired } | { "kind": "subscription_opened", "message": SubscriptionOpened } | { "kind": "subscription_pending", "message": SubscriptionPending } | { "kind": "slow_consumer", "message": SlowConsumer } | { "kind": "subscription_closed", "message": SubscriptionClosed } | { "kind": "error", "message": Error };
 

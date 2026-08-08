@@ -7,7 +7,7 @@ mod common;
 use common::*;
 use oa_kernel::error::ErrorKind;
 use oa_kernel::funnel::{Method, Submission, token_from_result};
-use oa_kernel::ids::Digest;
+use oa_kernel::ids::{Digest, Uuid7};
 
 #[test]
 fn work_item_create_completes_replays_and_guards_the_digest() {
@@ -47,6 +47,27 @@ fn credential_bearing_receipt_replay_is_bound_to_the_original_principal() {
         (ErrorKind::Unauthorized, false)
     );
     assert_eq!(replayed(ctx.funnel.submit(&dispatch)), first);
+}
+
+#[test]
+fn receipt_replay_is_bound_to_the_original_command_type() {
+    let mut ctx = Ctx::new();
+    ctx.seed_unit();
+    let token = ctx.dispatch("u-1", "h1", 1);
+    let prepare = ctx.prepare_cmd(
+        "shared request",
+        "u-1",
+        token.clone(),
+        effect_spec(Uuid7::mint(7, 90), "req"),
+    );
+    completed(ctx.funnel.submit(&prepare));
+
+    let mut progress = ctx.progress_cmd("shared request", "u-1", token, Some(2), "n");
+    progress.command_id = prepare.command_id;
+    assert_eq!(
+        rejected(ctx.funnel.submit(&progress)),
+        (ErrorKind::IdempotencyConflict, false)
+    );
 }
 
 #[test]
@@ -106,6 +127,71 @@ fn mutation_without_expected_version_is_invalid_request() {
         rejected(ctx.funnel.submit(&blind_progress)),
         (ErrorKind::InvalidRequest, false)
     );
+}
+
+#[test]
+fn funnel_rejects_a_receipt_scope_that_disagrees_with_the_method() {
+    let mut ctx = Ctx::new();
+    let mut open = ctx.open_run("run-1");
+    open.scope_kind = oa_kernel::funnel::ScopeKind::Run;
+    open.scope_id = "other-run".into();
+    assert_eq!(
+        rejected(ctx.funnel.submit(&open)),
+        (ErrorKind::InvalidRequest, false)
+    );
+    assert!(ctx.funnel.store().journal().unwrap().is_empty());
+}
+
+#[test]
+fn funnel_never_persists_a_foreign_project_receipt() {
+    let mut ctx = Ctx::new();
+    let mut work_item = ctx.create_work_item("wi-foreign");
+    work_item.scope_kind = oa_kernel::funnel::ScopeKind::Project;
+    work_item.scope_id = "other-project".into();
+    assert_eq!(
+        rejected(ctx.funnel.submit(&work_item)),
+        (ErrorKind::InvalidRequest, false)
+    );
+    assert!(ctx.funnel.store().journal().unwrap().is_empty());
+
+    let dir = ctx.dir;
+    drop(ctx.funnel);
+    let recovered = oa_kernel::store::Store::recover(dir.path(), "kernel-b").unwrap();
+    assert_eq!(recovered.project_id(), "default");
+}
+
+#[test]
+fn funnel_never_persists_a_holder_receipt_outside_its_unit_scope() {
+    let mut ctx = Ctx::new();
+    ctx.seed_unit();
+    let token = ctx.dispatch("u-1", "h1", 1);
+    let mut progress = ctx.progress_cmd("progress", "u-1", token, Some(2), "n");
+    progress.scope_kind = oa_kernel::funnel::ScopeKind::Global;
+    progress.scope_id = "g".into();
+    assert_eq!(
+        rejected(ctx.funnel.submit(&progress)),
+        (ErrorKind::InvalidRequest, false)
+    );
+
+    let dir = ctx.dir;
+    drop(ctx.funnel);
+    oa_kernel::store::Store::recover(dir.path(), "kernel-b").unwrap();
+}
+
+#[test]
+fn funnel_rejects_invalid_method_identifiers_before_persistence() {
+    let mut ctx = Ctx::new();
+    let mut work_item = ctx.create_work_item("bad/id");
+    work_item.scope_kind = oa_kernel::funnel::ScopeKind::Global;
+    assert_eq!(
+        rejected(ctx.funnel.submit(&work_item)),
+        (ErrorKind::InvalidRequest, false)
+    );
+    assert!(ctx.funnel.store().journal().unwrap().is_empty());
+
+    let dir = ctx.dir;
+    drop(ctx.funnel);
+    oa_kernel::store::Store::recover(dir.path(), "kernel-b").unwrap();
 }
 
 #[test]

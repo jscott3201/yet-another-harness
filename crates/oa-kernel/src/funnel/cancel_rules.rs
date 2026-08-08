@@ -10,9 +10,10 @@
 //! scope), so [`admission_blockers`] scans the committed requests' root
 //! lineage instead.
 
-use crate::cancel::{CancelKind, CancelScope, CancelStatus, DeliveryOutcome, ScopeMember};
+use crate::cancel::{CancelKind, CancelScope, CancelStatus, DeliveryOutcome};
 use crate::store::{Store, db, value_str};
 use selene_graph::SeleneGraph;
+use std::collections::HashMap;
 
 /// Why one committed cancellation forbids an admission or dispatch. Same
 /// shape as [`super::run_rules::Blocker`], so I11-style join formatting is
@@ -27,34 +28,9 @@ pub(super) struct Blocker {
 /// and `observed_at` do not affect lifecycle advance — a row exists or it
 /// does not — so they are omitted; the outcome is what decides discharge.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(super) struct DeliverySummary {
+pub(crate) struct DeliverySummary {
     pub member_id: String,
     pub outcome: DeliveryOutcome,
-}
-
-/// The scope member that must next receive a delivery row, under §5.2
-/// rule 3: the undelivered member with the smallest `order_index` (leaf
-/// first). `None` once every member has a row.
-pub(super) fn next_undelivered<'s>(
-    scope: &'s CancelScope,
-    deliveries: &[DeliverySummary],
-) -> Option<&'s ScopeMember> {
-    scope
-        .members()
-        .iter()
-        .filter(|m| !deliveries.iter().any(|d| d.member_id == m.member_id))
-        .min_by_key(|m| m.order_index)
-}
-
-/// §5.2 rule 3's leaf-first gate, as a filter matter of fact: `member_id`
-/// may receive its delivery now only when it is the next undelivered member.
-/// The write-once pair is checked by the caller.
-pub(super) fn delivery_leaf_first(
-    scope: &CancelScope,
-    deliveries: &[DeliverySummary],
-    member_id: &str,
-) -> bool {
-    next_undelivered(scope, deliveries).is_some_and(|next| next.member_id == member_id)
 }
 
 /// §5.1 status advance, a pure function of the frozen scope and the rows so
@@ -70,46 +46,36 @@ pub(super) fn delivery_leaf_first(
 ///   request's policy and its members' attachments play NO role in
 ///   settlement — the frozen scope is the record of what the tree looked
 ///   like, and rule 7 settles only what was frozen.
-pub(super) fn request_status_after(
+pub(crate) fn request_status_after(
     scope: &CancelScope,
     deliveries: &[DeliverySummary],
 ) -> CancelStatus {
+    if scope.members().is_empty() {
+        return CancelStatus::Settled;
+    }
     if deliveries.is_empty() {
         return CancelStatus::Requested;
     }
-    let every_discharged = scope.members().iter().all(|m| {
-        deliveries
-            .iter()
-            .any(|d| d.member_id == m.member_id && d.outcome.is_discharged())
+    let outcomes: HashMap<&str, DeliveryOutcome> = deliveries
+        .iter()
+        .map(|delivery| (delivery.member_id.as_str(), delivery.outcome))
+        .collect();
+    let every_discharged = scope.members().iter().all(|member| {
+        outcomes
+            .get(member.member_id.as_str())
+            .is_some_and(|outcome| outcome.is_discharged())
     });
     if every_discharged {
         CancelStatus::Settled
     } else if scope
         .members()
         .iter()
-        .all(|m| deliveries.iter().any(|d| d.member_id == m.member_id))
+        .all(|member| outcomes.contains_key(member.member_id.as_str()))
     {
         CancelStatus::ObservedPartial
     } else {
         CancelStatus::Delivering
     }
-}
-
-/// Whether the pair (request, member) already has a delivery row — the
-/// write-once half of §5.1's `UNIQUE(cancel_request_id, member_id)`.
-pub(super) fn already_delivered(deliveries: &[DeliverySummary], member_id: &str) -> bool {
-    deliveries.iter().any(|d| d.member_id == member_id)
-}
-
-/// Whether a committed cancel request rooted at `run_id` matters for a
-/// child being admitted under that run. Every committed request whose root
-/// sits in the child's ancestor lineage bars admission, under BOTH policies
-/// (owner's literal rule-4 ruling; a `root_only` cancel of an ancestor no
-/// less closes the tree to new children).
-fn root_in_lineage(root_kind: CancelKind, root_id: &str, lineage: &[(CancelKind, String)]) -> bool {
-    lineage
-        .iter()
-        .any(|(kind, id)| *kind == root_kind && id == root_id)
 }
 
 /// §5.2 rule 4's admission gate: every committed cancellation request whose
@@ -127,40 +93,22 @@ pub(super) fn admission_blockers(
     child_kind: CancelKind,
     child_lineage: &[(CancelKind, String)],
 ) -> Vec<Blocker> {
-    let mut blockers = Vec::new();
-    for node in store.cancel_request_nodes() {
-        let Some(props) = graph.node_properties(node) else {
-            continue;
-        };
-        let Some(root_kind) = props.get(&db("root_kind")).and_then(value_str) else {
-            continue;
-        };
-        let Some(root_id) = props.get(&db("root_id")).and_then(value_str) else {
-            continue;
-        };
-        let Some(kind) = kind_from_wire(&root_kind) else {
-            continue;
-        };
-        if root_in_lineage(kind, &root_id, child_lineage) {
-            blockers.push(Blocker {
-                member: format!("{root_kind}:{root_id}"),
-                reason: format!(
-                    "rule-4: committed cancellation of {root_kind}:{root_id} bars admitting {child_kind:?} below it"
-                ),
-            });
-        }
-    }
-    blockers
-}
-
-pub(super) fn kind_from_wire(wire: &str) -> Option<CancelKind> {
-    match wire {
-        "run" => Some(CancelKind::Run),
-        "execution_unit" => Some(CancelKind::ExecutionUnit),
-        "attempt" => Some(CancelKind::Attempt),
-        "effect_intent" => Some(CancelKind::EffectIntent),
-        _ => None,
-    }
+    child_lineage
+        .iter()
+        .filter_map(|(kind, root_id)| {
+        let root_kind = kind.wire();
+        let node = store.cancel_root_node(root_kind, root_id)?;
+        let props = graph.node_properties(node)?;
+        let stored_kind = props.get(&db("root_kind")).and_then(value_str)?;
+        let stored_id = props.get(&db("root_id")).and_then(value_str)?;
+        (stored_kind == root_kind && stored_id == *root_id).then(|| Blocker {
+            member: format!("{root_kind}:{root_id}"),
+            reason: format!(
+                "rule-4: committed cancellation of {root_kind}:{root_id} bars admitting {child_kind:?} below it"
+            ),
+        })
+    })
+    .collect()
 }
 
 #[cfg(test)]
@@ -218,6 +166,12 @@ mod tests {
     }
 
     #[test]
+    fn an_empty_no_op_scope_is_already_settled() {
+        let s = scope(vec![]);
+        assert_eq!(request_status_after(&s, &[]), CancelStatus::Settled);
+    }
+
+    #[test]
     fn unresponsive_is_terminal_but_never_settles() {
         // §5.1: an unresponsive member is a recorded observation, not a
         // placeholder — but it does NOT discharge (validation/07:95-96).
@@ -264,61 +218,5 @@ mod tests {
             ),
             CancelStatus::Settled
         );
-    }
-
-    #[test]
-    fn leaf_first_picks_the_undelivered_minimum() {
-        let s = scope(vec![
-            member(CancelKind::EffectIntent, 40),
-            member(CancelKind::Attempt, 30),
-        ]);
-        // EffectIntent (order 0) must deliver before Attempt (order 1).
-        assert!(delivery_leaf_first(&s, &[], &id(40)));
-        assert!(!delivery_leaf_first(&s, &[], &id(30)));
-        // Once the leaf is delivered, the attempt is next.
-        assert!(delivery_leaf_first(
-            &s,
-            &[summary(&id(40), DeliveryOutcome::ObservedStopped)],
-            &id(30)
-        ));
-        assert!(!delivery_leaf_first(
-            &s,
-            &[summary(&id(40), DeliveryOutcome::ObservedStopped)],
-            &id(40)
-        ));
-    }
-
-    #[test]
-    fn the_write_once_pair_identity_is_member_scoped() {
-        assert!(!already_delivered(&[], &id(1)));
-        let rows = vec![summary(&id(1), DeliveryOutcome::ObservedStopped)];
-        assert!(already_delivered(&rows, &id(1)));
-        assert!(!already_delivered(&rows, &id(2)));
-    }
-
-    #[test]
-    fn root_lineage_matching_ignores_policy_axis() {
-        // The lineage matcher is policy-blind by construction: both a
-        // root_only and an attached_cascade request at the same root block
-        // the SAME new-child admission (owner's literal rule-4 ruling).
-        let lineage = vec![
-            (CancelKind::Run, id(1).clone()),
-            (CancelKind::ExecutionUnit, id(20).clone()),
-        ];
-        assert!(root_in_lineage(CancelKind::Run, &id(1), &lineage));
-        assert!(root_in_lineage(
-            CancelKind::ExecutionUnit,
-            &id(20),
-            &lineage
-        ));
-        // A sibling run does not match.
-        assert!(!root_in_lineage(CancelKind::Run, &id(2), &lineage));
-        // A request rooted at the child itself (a unit not yet existing) is
-        // not an ancestor of the child and does not match.
-        assert!(!root_in_lineage(
-            CancelKind::ExecutionUnit,
-            &id(99),
-            &lineage
-        ));
     }
 }

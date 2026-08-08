@@ -74,6 +74,36 @@ fn freeze_is_order_independent() {
 }
 
 #[test]
+fn canonical_member_lookup_crosses_kind_partitions() {
+    let root = id(1);
+    let scope = CancelScope::freeze(
+        CancelKind::Run,
+        root.clone(),
+        vec![
+            member(CancelKind::EffectIntent, 40),
+            member(CancelKind::Attempt, 30),
+            member(CancelKind::ExecutionUnit, 20),
+            MemberInput {
+                member_kind: CancelKind::Run,
+                member_id: root.clone(),
+                attachment: Attachment::Attached,
+            },
+        ],
+    )
+    .expect("scope freezes");
+
+    for (member_id, kind) in [
+        (id(40), CancelKind::EffectIntent),
+        (id(30), CancelKind::Attempt),
+        (id(20), CancelKind::ExecutionUnit),
+        (root, CancelKind::Run),
+    ] {
+        assert_eq!(scope.member(&member_id).unwrap().member_kind, kind);
+    }
+    assert!(scope.member(&id(99)).is_none());
+}
+
+#[test]
 fn freeze_rejects_a_duplicate_member() {
     let root = id(1);
     let dup = member(CancelKind::Attempt, 30);

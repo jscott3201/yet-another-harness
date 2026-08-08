@@ -15,8 +15,9 @@ use oa_kernel::cancel::{
 };
 use oa_kernel::effect::EffectTerminal;
 use oa_kernel::error::ErrorKind;
-use oa_kernel::funnel::{RunOutcome, SettleEvidence, Submission, token_from_result};
+use oa_kernel::funnel::{Funnel, RunOutcome, SettleEvidence, Submission, token_from_result};
 use oa_kernel::ids::Uuid7;
+use oa_kernel::store::Store;
 
 fn prepare(
     ctx: &mut Ctx,
@@ -437,6 +438,45 @@ fn a14_prepared_settles_cancelled_and_dispatching_follows_5_3() {
     assert_eq!(
         (d_row.state.as_str(), d_row.terminal.as_deref()),
         ("reconciling", None)
+    );
+    let d_events: Vec<_> = ctx
+        .funnel
+        .store()
+        .journal()
+        .unwrap()
+        .into_iter()
+        .filter(|event| event.aggregate_kind == "effect" && event.aggregate_id == d_key)
+        .map(|event| (event.event_kind, event.aggregate_version, event.ordinal))
+        .collect();
+    assert_eq!(
+        d_events,
+        [
+            ("effect.prepared".into(), 1, 0),
+            ("effect.dispatching".into(), 2, 0),
+            ("effect.reconciling".into(), 3, 1),
+        ]
+    );
+
+    let dir = ctx.dir;
+    drop(ctx.funnel);
+    let store = Store::recover(dir.path(), "kernel-b").expect("recover internal receipts");
+    let funnel = Funnel::new(store, 1_000).unwrap();
+    assert_eq!(
+        funnel
+            .store()
+            .effect_record(&p_key)
+            .expect("prepared branch")
+            .terminal
+            .as_deref(),
+        Some("cancelled")
+    );
+    assert_eq!(
+        funnel
+            .store()
+            .effect_record(&d_key)
+            .expect("dispatching branch")
+            .state,
+        "reconciling"
     );
 }
 

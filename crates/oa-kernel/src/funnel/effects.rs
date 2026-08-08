@@ -538,6 +538,7 @@ impl Funnel {
                 result: json!({
                     "operation_key": key,
                     "effect_intent_id": intent.effect_intent_id.to_string(),
+                    "version": intent.version,
                     "existing": true,
                 }),
             });
@@ -576,6 +577,7 @@ impl Funnel {
                 operation_key: key.clone(),
                 effect_intent_id: effect_intent_id.clone(),
                 unit_id: unit_id.to_owned(),
+                attempt_epoch: token.attempt_epoch.0,
                 record,
             },
             events: vec![EventDraft {
@@ -594,6 +596,7 @@ impl Funnel {
             result: json!({
                 "operation_key": key,
                 "effect_intent_id": effect_intent_id,
+                "version": 1,
                 "existing": false,
             }),
         })

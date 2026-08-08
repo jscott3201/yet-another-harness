@@ -1,12 +1,29 @@
 use super::*;
 
 impl Funnel {
-    pub(crate) fn reject_keyed(&self, cmd: &Command, kind: ErrorKind, detail: &str) -> Submission {
+    pub(crate) fn reject_keyed(
+        &self,
+        cmd: &Command,
+        command_type: &str,
+        kind: ErrorKind,
+        detail: &str,
+    ) -> Submission {
         let mut gate = self.gate.lock().expect("funnel gate");
         if let Some(poison) = gate.as_ref() {
             return Submission::Rejected {
                 kind: ErrorKind::Unavailable,
                 detail: format!("funnel poisoned by uncertain commit: {poison}"),
+                replayed: false,
+            };
+        }
+        if !receipt::identifiers_are_valid(cmd)
+            || !receipt::project_scope_is_valid(cmd, self.store.project_id())
+        {
+            return Submission::Rejected {
+                kind: ErrorKind::InvalidRequest,
+                detail:
+                    "receipt scope and command identifiers must use the wire identifier grammar"
+                        .into(),
                 replayed: false,
             };
         }
@@ -20,6 +37,8 @@ impl Funnel {
         if let Some(node) = self.store.receipt_node(&receipt_key) {
             let stored = txn.read().node_properties(node).map(|properties| {
                 (
+                    properties.get(&db("command_type")).and_then(value_str),
+                    properties.get(&db("receipt_version")).and_then(value_u64),
                     properties.get(&db("request_digest")).and_then(value_str),
                     properties.get(&db("principal_kind")).and_then(value_str),
                     properties.get(&db("principal_id")).and_then(value_str),
@@ -28,27 +47,13 @@ impl Funnel {
                 )
             });
             txn.rollback();
-            return Self::replay_stored(cmd, stored);
+            return Self::replay_stored(cmd, command_type, stored);
         }
         let detail = wire::bounded_detail(detail);
         let result = json!({ "error_kind": kind, "detail": detail });
         let node = txn.mutator().create_node(
             LabelSet::single(db("Receipt")),
-            PropertyMap::from_pairs([
-                (db("receipt_key"), Value::String(db(&receipt_key))),
-                (
-                    db("request_digest"),
-                    Value::String(db(cmd.request_digest.as_str())),
-                ),
-                (
-                    db("principal_kind"),
-                    Value::String(db(cmd.principal_kind.wire())),
-                ),
-                (db("principal_id"), Value::String(db(&cmd.principal_id))),
-                (db("status"), Value::String(db("rejected"))),
-                (db("result"), Value::String(db(&result.to_string()))),
-            ])
-            .expect("protocol rejection receipt property map"),
+            receipt::properties(cmd, command_type, &receipt_key, "rejected", &result, None),
         );
         let persistence_error = match node {
             Ok(node) => match txn.commit() {

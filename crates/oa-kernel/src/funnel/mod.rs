@@ -42,12 +42,14 @@ use serde_json::json;
 use std::sync::Mutex;
 
 mod cancel;
-mod cancel_rules;
+mod cancel_resolution;
+pub(crate) mod cancel_rules;
 mod command;
 mod effect_rules;
 mod effects;
 mod lifecycle;
 mod plan;
+mod receipt;
 mod reject;
 mod replay;
 mod run_rules;
@@ -174,6 +176,15 @@ impl Funnel {
                 replayed: false,
             };
         }
+        if !receipt::address_is_valid(cmd, self.store.project_id()) {
+            return Submission::Rejected {
+                kind: ErrorKind::InvalidRequest,
+                detail:
+                    "receipt scope and command identifiers must use the wire identifier grammar"
+                        .into(),
+                replayed: false,
+            };
+        }
 
         let receipt_key = format!(
             "{}/{}/{}",
@@ -190,6 +201,8 @@ impl Funnel {
         if let Some(node) = self.store.receipt_node(&receipt_key) {
             let stored = txn.read().node_properties(node).map(|p| {
                 (
+                    p.get(&db("command_type")).and_then(value_str),
+                    p.get(&db("receipt_version")).and_then(value_u64),
                     p.get(&db("request_digest")).and_then(value_str),
                     p.get(&db("principal_kind")).and_then(value_str),
                     p.get(&db("principal_id")).and_then(value_str),
@@ -198,7 +211,7 @@ impl Funnel {
                 )
             });
             txn.rollback();
-            return Self::replay_stored(cmd, stored);
+            return Self::replay_stored(cmd, cmd.method.wire(), stored);
         }
 
         // §2.2 steps 1 + 3: pre-read fence state from the WRITE-side working
@@ -309,21 +322,14 @@ impl Funnel {
                     let mut m = txn.mutator();
                     m.create_node(
                         LabelSet::single(db("Receipt")),
-                        PropertyMap::from_pairs([
-                            (db("receipt_key"), Value::String(db(&receipt_key))),
-                            (
-                                db("request_digest"),
-                                Value::String(db(cmd.request_digest.as_str())),
-                            ),
-                            (
-                                db("principal_kind"),
-                                Value::String(db(cmd.principal_kind.wire())),
-                            ),
-                            (db("principal_id"), Value::String(db(&cmd.principal_id))),
-                            (db("status"), Value::String(db("rejected"))),
-                            (db("result"), Value::String(db(&result.to_string()))),
-                        ])
-                        .expect("rejection receipt property map"),
+                        receipt::properties(
+                            cmd,
+                            cmd.method.wire(),
+                            &receipt_key,
+                            "rejected",
+                            &result,
+                            None,
+                        ),
                     )
                 };
                 let persistence_error = match node {
@@ -378,21 +384,14 @@ impl Funnel {
                 let mut m = txn.mutator();
                 m.create_node(
                     LabelSet::single(db("Receipt")),
-                    PropertyMap::from_pairs([
-                        (db("receipt_key"), Value::String(db(&receipt_key))),
-                        (
-                            db("request_digest"),
-                            Value::String(db(cmd.request_digest.as_str())),
-                        ),
-                        (
-                            db("principal_kind"),
-                            Value::String(db(cmd.principal_kind.wire())),
-                        ),
-                        (db("principal_id"), Value::String(db(&cmd.principal_id))),
-                        (db("status"), Value::String(db("rejected"))),
-                        (db("result"), Value::String(db(&result.to_string()))),
-                    ])
-                    .expect("oversize rejection receipt property map"),
+                    receipt::properties(
+                        cmd,
+                        cmd.method.wire(),
+                        &receipt_key,
+                        "rejected",
+                        &result,
+                        None,
+                    ),
                 )
             };
             let persistence_error = match node {
@@ -568,7 +567,13 @@ impl Funnel {
                             .expect("attempt property map"),
                         )
                         .map_err(|e| format!("{e:?}"))?;
-                    new_books.push((BookKind::Attempt, attempt_key, a));
+                    new_books.push((
+                        BookKind::Attempt {
+                            attempt_id: attempt_id.clone(),
+                        },
+                        attempt_key,
+                        a,
+                    ));
                     match existing_lease {
                         Some((lease_node, lease_version)) => {
                             m.update_node(
@@ -622,6 +627,7 @@ impl Funnel {
                     operation_key,
                     effect_intent_id,
                     unit_id,
+                    attempt_epoch,
                     record,
                 } => {
                     let n = m
@@ -631,6 +637,7 @@ impl Funnel {
                                 (db("operation_key"), s(operation_key)),
                                 (db("effect_intent_id"), s(effect_intent_id)),
                                 (db("unit_id"), s(unit_id)),
+                                (db("attempt_epoch"), Value::Uint(*attempt_epoch)),
                                 (db("version"), Value::Uint(1)),
                                 (db("state"), s("prepared")),
                                 (db("record"), s(record)),
@@ -638,7 +645,13 @@ impl Funnel {
                             .expect("effect property map"),
                         )
                         .map_err(|e| format!("{e:?}"))?;
-                    new_books.push((BookKind::Effect, operation_key.clone(), n));
+                    new_books.push((
+                        BookKind::Effect {
+                            effect_intent_id: effect_intent_id.clone(),
+                        },
+                        operation_key.clone(),
+                        n,
+                    ));
                 }
                 Plan::UpdateEffect {
                     effect_node,
@@ -667,7 +680,9 @@ impl Funnel {
                 Plan::Nothing => {}
             }
 
-            for draft in &accepted.events {
+            for (ordinal, draft) in accepted.events.iter().enumerate() {
+                let ordinal = u64::try_from(ordinal)
+                    .map_err(|_| "semantic event ordinal is out of range".to_owned())?;
                 // Cursor allocation under the open write txn — the
                 // allocate_cursor ordering contract.
                 let cursor = self
@@ -687,10 +702,11 @@ impl Funnel {
                                 // collide the derived composite.
                                 db("agg_ver_ord"),
                                 s(&format!(
-                                    "{}/{}/{}/0",
+                                    "{}/{}/{}/{}",
                                     draft.aggregate_kind,
                                     draft.aggregate_id,
-                                    draft.aggregate_version
+                                    draft.aggregate_version,
+                                    ordinal,
                                 )),
                             ),
                             (db("aggregate_kind"), s(draft.aggregate_kind)),
@@ -699,7 +715,7 @@ impl Funnel {
                                 db("aggregate_version"),
                                 Value::Uint(draft.aggregate_version),
                             ),
-                            (db("ordinal"), Value::Uint(0)),
+                            (db("ordinal"), Value::Uint(ordinal)),
                             (db("event_kind"), s(draft.event_kind)),
                             (db("payload"), s(&draft.payload.to_string())),
                             (db("receipt_key"), s(&receipt_key)),
@@ -734,22 +750,17 @@ impl Funnel {
                 cursors.push(cursor);
             }
 
-            let mut receipt_pairs = vec![
-                (db("receipt_key"), s(&receipt_key)),
-                (db("request_digest"), s(cmd.request_digest.as_str())),
-                (db("principal_kind"), s(cmd.principal_kind.wire())),
-                (db("principal_id"), s(&cmd.principal_id)),
-                (db("status"), s("completed")),
-                (db("result"), s(&accepted.result.to_string())),
-            ];
-            if let (Some(first), Some(last)) = (cursors.first(), cursors.last()) {
-                receipt_pairs.push((db("first_cursor"), Value::Uint(*first)));
-                receipt_pairs.push((db("last_cursor"), Value::Uint(*last)));
-            }
             let r = m
                 .create_node(
                     LabelSet::single(db("Receipt")),
-                    PropertyMap::from_pairs(receipt_pairs).expect("receipt property map"),
+                    receipt::properties(
+                        cmd,
+                        cmd.method.wire(),
+                        &receipt_key,
+                        "completed",
+                        &accepted.result,
+                        cursors.first().copied().zip(cursors.last().copied()),
+                    ),
                 )
                 .map_err(|e| format!("{e:?}"))?;
             new_books.push((BookKind::Receipt, receipt_key.clone(), r));

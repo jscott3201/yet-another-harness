@@ -3,9 +3,40 @@
 use super::*;
 
 impl Store {
+    pub(crate) fn cancel_delivery_nodes(&self, cancel_request_id: &str) -> Vec<NodeId> {
+        self.books
+            .lock()
+            .expect("books")
+            .cancel_deliveries_by_request
+            .get(cancel_request_id)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    pub(crate) fn cancel_root_node(&self, root_kind: &str, root_id: &str) -> Option<NodeId> {
+        self.books
+            .lock()
+            .expect("books")
+            .cancel_roots
+            .get(&format!("{root_kind}/{root_id}"))
+            .copied()
+    }
+
+    pub(crate) fn cancel_request_nodes(&self) -> Vec<NodeId> {
+        self.books
+            .lock()
+            .expect("books")
+            .cancel_requests
+            .values()
+            .copied()
+            .collect()
+    }
+
     pub(crate) fn validate_dispatch_claims(
         &self,
         claims: &AttemptTokenClaims,
+        attempt_id: &str,
+        unit_version: u64,
     ) -> Result<bool, StoreError> {
         let attempt = self
             .attempt_node(&format!("{}/{}", claims.unit_id, claims.attempt_epoch.0))
@@ -33,7 +64,8 @@ impl Store {
                 .and_then(value_str)
                 .ok_or_else(|| StoreError::Internal(format!("Attempt row has invalid {field}")))
         };
-        if attempt_string("unit_id")? != claims.unit_id
+        if attempt_string("attempt_id")? != attempt_id
+            || attempt_string("unit_id")? != claims.unit_id
             || attempt_u64("attempt_epoch")? != claims.attempt_epoch.0
             || attempt_u64("stamp")? != claims.stamp.0
             || attempt_u64("authority_epoch")? != claims.authority_epoch.0
@@ -50,6 +82,12 @@ impl Store {
         let lease_props = read
             .node_properties(lease)
             .ok_or_else(|| StoreError::Internal("dispatch Lease row is unreadable".into()))?;
+        let stored_unit_version = unit_props.get(&db("version")).and_then(value_u64);
+        if stored_unit_version.is_none_or(|version| version < unit_version) {
+            return Err(StoreError::Internal(
+                "dispatch receipt version exceeds its Unit row".into(),
+            ));
+        }
         let current = self.authority_epoch() == claims.authority_epoch
             && unit_props
                 .get(&db("current_attempt_epoch"))
@@ -115,6 +153,42 @@ impl Store {
             .unwrap();
         txn.commit().unwrap();
         self.book_insert(BookKind::Event, event.cursor.to_string(), node);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn insert_test_receipt(&self, key: &str, receipt: &ReceiptRecord) {
+        let mut txn = self.shared.begin_write();
+        let mut pairs = vec![
+            (db("receipt_key"), Value::String(db(key))),
+            (db("command_type"), Value::String(db(&receipt.command_type))),
+            (db("receipt_version"), Value::Uint(receipt.receipt_version)),
+            (
+                db("request_digest"),
+                Value::String(db(&receipt.request_digest)),
+            ),
+            (
+                db("principal_kind"),
+                Value::String(db(&receipt.principal_kind)),
+            ),
+            (db("principal_id"), Value::String(db(&receipt.principal_id))),
+            (db("status"), Value::String(db(&receipt.status))),
+            (db("result"), Value::String(db(&receipt.result))),
+        ];
+        if let Some(first) = receipt.first_cursor {
+            pairs.push((db("first_cursor"), Value::Uint(first)));
+        }
+        if let Some(last) = receipt.last_cursor {
+            pairs.push((db("last_cursor"), Value::Uint(last)));
+        }
+        let node = txn
+            .mutator()
+            .create_node(
+                LabelSet::single(db("Receipt")),
+                PropertyMap::from_pairs(pairs).unwrap(),
+            )
+            .unwrap();
+        txn.commit().unwrap();
+        self.book_insert(BookKind::Receipt, key.to_owned(), node);
     }
 
     pub fn attempt_status(&self, unit_id: &str, epoch: u64) -> Option<String> {
@@ -313,28 +387,35 @@ impl Store {
     }
 
     pub(crate) fn validate_event_receipts(&self) -> Result<(), StoreError> {
-        for event in self.events_after(0)? {
-            let receipt = self.receipt(&event.receipt_key)?.ok_or_else(|| {
-                StoreError::Internal(format!(
-                    "event at cursor {} has no owning receipt",
-                    event.cursor
-                ))
-            })?;
-            if receipt.status != "completed"
-                || !receipt
-                    .first_cursor
-                    .zip(receipt.last_cursor)
-                    .is_some_and(|(first, last)| (first..=last).contains(&event.cursor))
-                || event.actor_kind != receipt.principal_kind
-                || event.actor_id != receipt.principal_id
-            {
-                return Err(StoreError::Internal(format!(
-                    "event at cursor {} is outside its owning receipt",
-                    event.cursor
-                )));
+        let mut cursor = 0;
+        loop {
+            let events = self.events_after_limit(cursor, crate::protocol::MAX_RESUME_EVENTS)?;
+            if events.is_empty() {
+                return Ok(());
+            }
+            for event in events {
+                cursor = event.cursor;
+                let receipt = self.receipt(&event.receipt_key)?.ok_or_else(|| {
+                    StoreError::Internal(format!(
+                        "event at cursor {} has no owning receipt",
+                        event.cursor
+                    ))
+                })?;
+                if receipt.status != "completed"
+                    || !receipt
+                        .first_cursor
+                        .zip(receipt.last_cursor)
+                        .is_some_and(|(first, last)| (first..=last).contains(&event.cursor))
+                    || event.actor_kind != receipt.principal_kind
+                    || event.actor_id != receipt.principal_id
+                {
+                    return Err(StoreError::Internal(format!(
+                        "event at cursor {} is outside its owning receipt",
+                        event.cursor
+                    )));
+                }
             }
         }
-        Ok(())
     }
 
     fn validate_receipt_events(
@@ -416,7 +497,21 @@ pub(super) fn receipt_record(p: &PropertyMap) -> Result<ReceiptRecord, StoreErro
             "receipt event cursor range starts at zero".into(),
         ));
     }
+    let command_type = string("command_type")?;
+    let receipt_version = p
+        .get(&db("receipt_version"))
+        .and_then(value_u64)
+        .ok_or_else(|| StoreError::Internal("receipt has invalid receipt_version".into()))?;
+    if !super::receipt::valid_command_type(&command_type)
+        || receipt_version != u64::from(crate::protocol::RECEIPT_VERSION.get())
+    {
+        return Err(StoreError::Internal(
+            "receipt has unsupported command_type or receipt_version".into(),
+        ));
+    }
     Ok(ReceiptRecord {
+        command_type,
+        receipt_version,
         request_digest: string("request_digest")?,
         principal_kind: string("principal_kind")?,
         principal_id: string("principal_id")?,
@@ -475,6 +570,8 @@ pub struct EventRecord {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ReceiptRecord {
+    pub command_type: String,
+    pub receipt_version: u64,
     pub request_digest: String,
     pub principal_kind: String,
     pub principal_id: String,

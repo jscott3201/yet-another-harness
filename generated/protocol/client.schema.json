@@ -457,6 +457,44 @@
     {
       "properties": {
         "kind": {
+          "const": "get_receipt",
+          "type": "string"
+        },
+        "message": {
+          "properties": {
+            "command_id": {
+              "maxLength": 64,
+              "minLength": 1,
+              "pattern": "^[A-Za-z0-9_.:-]+$",
+              "type": "string"
+            },
+            "project_id": {
+              "maxLength": 64,
+              "minLength": 1,
+              "pattern": "^[A-Za-z0-9_.:-]+$",
+              "type": "string"
+            },
+            "scope": {
+              "$ref": "#/$defs/Scope"
+            }
+          },
+          "required": [
+            "project_id",
+            "scope",
+            "command_id"
+          ],
+          "type": "object"
+        }
+      },
+      "required": [
+        "kind",
+        "message"
+      ],
+      "type": "object"
+    },
+    {
+      "properties": {
+        "kind": {
           "const": "resume",
           "type": "string"
         },

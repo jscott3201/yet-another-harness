@@ -8,6 +8,8 @@ use oa_kernel::protocol::{
 use oa_kernel::store::Store;
 use serde_json::{Value, json};
 
+#[path = "protocol_adapter/receipt.rs"]
+mod receipt;
 #[path = "protocol_adapter/subscription.rs"]
 mod subscription;
 #[path = "protocol_adapter/token.rs"]
@@ -415,7 +417,7 @@ fn command_scope_must_match_the_control_graph_project() {
 
 #[test]
 fn work_item_create_rejects_a_non_project_receipt_scope() {
-    let (_dir, adapter) = adapter();
+    let (dir, adapter) = adapter();
     let mut work_item = command(
         1,
         CommandType::WorkItemCreate,
@@ -434,6 +436,24 @@ fn work_item_create_rejects_a_non_project_receipt_scope() {
     };
     let receipt = adapter.submit(&work_item).unwrap();
     assert_eq!(receipt.outcome, ReceiptOutcome::Rejected);
+    assert_eq!(
+        adapter
+            .get_receipt(work_item.scope.clone(), work_item.command_id.clone())
+            .unwrap()
+            .outcome,
+        ReceiptOutcome::Rejected
+    );
+    drop(adapter);
+
+    let recovered = Store::recover(dir.path(), "adapter-b").unwrap();
+    let adapter = InProcessAdapter::new(Funnel::new(recovered, 2_000).unwrap(), "p-1").unwrap();
+    assert_eq!(
+        adapter
+            .get_receipt(work_item.scope, work_item.command_id)
+            .unwrap()
+            .outcome,
+        ReceiptOutcome::Rejected
+    );
 }
 
 #[test]
