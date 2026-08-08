@@ -3,6 +3,21 @@ use chrono::{DateTime, Utc};
 
 pub(crate) fn project(record: crate::store::EventRecord) -> Result<Event, String> {
     let event_id = record.event_id.clone();
+    if [
+        Some(record.event_id.as_str()),
+        Some(record.command_id.as_str()),
+        Some(record.actor_id.as_str()),
+        record.causation_id.as_deref(),
+        record.correlation_id.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    .any(|identifier| !crate::ids::valid_wire_identifier(identifier))
+    {
+        return Err(format!(
+            "durable event {event_id} contains an invalid wire identifier"
+        ));
+    }
     let mut payload: JsonObject = serde_json::from_str(&record.payload)
         .map_err(|error| format!("durable event {event_id} has invalid JSON: {error}"))?;
     payload.values_mut().for_each(stringify_integers);

@@ -279,6 +279,30 @@ fn recovery_rejects_extra_rejection_result_fields() {
 }
 
 #[test]
+fn recovery_rejects_non_durable_rejection_kinds() {
+    for kind in ["outcome_unknown", "internal"] {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::create(dir.path(), "inst-1").unwrap();
+        let mut receipt = receipt_pairs("run.open", 1);
+        receipt
+            .set(db("status"), Value::String(db("rejected")))
+            .unwrap();
+        receipt
+            .set(
+                db("result"),
+                Value::String(db(&format!(r#"{{"error_kind":"{kind}","detail":"bad"}}"#))),
+            )
+            .unwrap();
+        insert_receipt(&store, receipt);
+        drop(store);
+        assert!(matches!(
+            Store::recover(dir.path(), "inst-2"),
+            Err(StoreError::Internal(_))
+        ));
+    }
+}
+
+#[test]
 fn recovery_rejects_unbounded_rejection_detail() {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::create(dir.path(), "inst-1").unwrap();

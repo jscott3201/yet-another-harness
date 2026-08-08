@@ -241,3 +241,37 @@ fn attempt_cancellation_does_not_bar_a_successor_attempt() {
     let successor = ctx.dispatch_cmd("u-1", "h2", 2);
     assert_eq!(completed(ctx.funnel.submit(&successor))["attempt_epoch"], 2);
 }
+
+#[test]
+fn predecessor_cancellation_bars_its_effect_under_a_successor_token() {
+    let mut ctx = Ctx::new();
+    ctx.seed_unit();
+    let dispatch = ctx.dispatch_cmd("u-1", "h1", 1);
+    let first = completed(ctx.funnel.submit(&dispatch));
+    let first_token = oa_kernel::funnel::token_from_result(&first).unwrap();
+    let first_attempt = first["attempt_id"].as_str().unwrap();
+    let (key, intent_id) = prepare(&mut ctx, &first_token, Uuid7::mint(7, 4));
+    let request = ctx.cancel_request_cmd(
+        "cancel first attempt effect",
+        CancelKind::Attempt,
+        first_attempt,
+        CancelReason::OwnerRequest,
+        CancelPolicy::AttachedCascade,
+        vec![member_input(
+            CancelKind::EffectIntent,
+            &intent_id.to_string(),
+        )],
+    );
+    completed(ctx.funnel.submit(&request));
+
+    let successor = ctx.dispatch("u-1", "h2", 2);
+    let dispatch_effect = ctx.dispatch_effect_cmd("dispatch old effect", "u-1", successor, &key, 1);
+    let result = completed(ctx.funnel.submit(&dispatch_effect));
+    assert_eq!(result["state"], "settled");
+    let stored = ctx.funnel.store().effect_record(&key).unwrap();
+    assert_eq!(stored.terminal.as_deref(), Some("cancelled"));
+
+    let dir = ctx.dir;
+    drop(ctx.funnel);
+    Store::recover(dir.path(), "kernel-b").unwrap();
+}

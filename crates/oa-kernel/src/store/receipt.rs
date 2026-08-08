@@ -30,8 +30,19 @@ pub(super) fn validate_rejection_result(result: &str) -> Result<(), StoreError> 
         .get("error_kind")
         .cloned()
         .and_then(|kind| serde_json::from_value::<crate::error::ErrorKind>(kind).ok());
+    let durable_kind = error_kind.is_some_and(|kind| {
+        matches!(
+            kind,
+            crate::error::ErrorKind::InvalidRequest
+                | crate::error::ErrorKind::Unauthorized
+                | crate::error::ErrorKind::FenceRejected
+                | crate::error::ErrorKind::ApprovalRequired
+                | crate::error::ErrorKind::ResourceExhausted
+                | crate::error::ErrorKind::PayloadTooLarge
+        )
+    });
     if object.len() != 2
-        || error_kind.is_none()
+        || !durable_kind
         || object
             .get("detail")
             .and_then(serde_json::Value::as_str)

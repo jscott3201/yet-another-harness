@@ -42,6 +42,22 @@ fn malformed_durable_event_data_fails_projection() {
 }
 
 #[test]
+fn malformed_durable_event_identifiers_fail_projection() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = crate::store::Store::create_project(dir.path(), "adapter-a", "p-1").unwrap();
+    let adapter =
+        InProcessAdapter::new(crate::funnel::Funnel::new(store, 0).unwrap(), "p-1").unwrap();
+    let mut event = test_event(1, 0);
+    event.causation_id = Some("invalid/id".into());
+    assert!(
+        adapter
+            .event(event)
+            .unwrap_err()
+            .contains("invalid wire identifier")
+    );
+}
+
+#[test]
 fn adapter_startup_rejects_malformed_durable_events() {
     let dir = tempfile::tempdir().unwrap();
     let store = crate::store::Store::create_project(dir.path(), "adapter-a", "p-1").unwrap();

@@ -23,6 +23,44 @@ fn update_raw(store: &Store, node: NodeId, field: &str, value: Value) {
     transaction.commit().unwrap();
 }
 
+#[test]
+fn recovery_rejects_wire_invalid_event_identifiers() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::create(dir.path(), "inst-1").unwrap();
+    let mut event = super::tests::event_pairs("e1", 1, "u1", 1);
+    event
+        .set(db("causation_id"), Value::String(db("invalid/id")))
+        .unwrap();
+    create_raw(&store, "Event", event);
+    let mut receipt = super::review_tests::pairs_for("Receipt", "unit/u1/e1");
+    receipt
+        .set(db("command_type"), Value::String(db("unit.admit")))
+        .unwrap();
+    receipt
+        .set(db("principal_kind"), Value::String(db("daemon")))
+        .unwrap();
+    receipt
+        .set(db("principal_id"), Value::String(db("test")))
+        .unwrap();
+    receipt
+        .set(
+            db("result"),
+            Value::String(db(r#"{"unit_id":"u1","version":1}"#)),
+        )
+        .unwrap();
+    receipt.set(db("first_cursor"), Value::Uint(1)).unwrap();
+    receipt.set(db("last_cursor"), Value::Uint(1)).unwrap();
+    create_raw(&store, "Receipt", receipt);
+    drop(store);
+    match Store::recover(dir.path(), "inst-2") {
+        Err(StoreError::Internal(detail)) => {
+            assert!(detail.contains("invalid wire identifier"), "{detail}")
+        }
+        Err(error) => panic!("unexpected recovery error: {error:?}"),
+        Ok(_) => panic!("wire-invalid event identifier recovered"),
+    }
+}
+
 pub(super) fn cancellation_delivery_history(
     request_id: &str,
     aggregate_version: u64,

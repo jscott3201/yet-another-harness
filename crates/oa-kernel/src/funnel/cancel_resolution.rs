@@ -47,6 +47,18 @@ fn effect_to_unit(
     Some((unit_id, run_id, attempt_epoch))
 }
 
+fn attempt_id_for_epoch(
+    read: &SeleneGraph,
+    store: &Store,
+    unit_id: &str,
+    epoch: u64,
+) -> Option<String> {
+    store
+        .attempt_node(&format!("{unit_id}/{epoch}"))
+        .and_then(|node| read.node_properties(node))
+        .and_then(|properties| prop_str(properties, "attempt_id"))
+}
+
 pub(super) fn member_link(read: &SeleneGraph, store: &Store, member: &MemberInput) -> MemberLink {
     let (parent_unit, run_id, attempt_epoch) = match member.member_kind {
         CancelKind::Run => (None, Some(member.member_id.clone()), None),
@@ -91,6 +103,19 @@ pub(super) fn adoption_lineage(
             let mut lineage = unit_lineage(read, store, unit_id, true)?;
             if let Some(row) = effect
                 && let Some(properties) = read.node_properties(row.node)
+                && prop_str(properties, "unit_id").as_deref() == Some(unit_id)
+                && let Some(epoch) = properties
+                    .get(&db("attempt_epoch"))
+                    .and_then(crate::store::value_u64)
+                && let Some(attempt_id) = attempt_id_for_epoch(read, store, unit_id, epoch)
+                && !lineage
+                    .iter()
+                    .any(|member| member == &(CancelKind::Attempt, attempt_id.clone()))
+            {
+                lineage.push((CancelKind::Attempt, attempt_id));
+            }
+            if let Some(row) = effect
+                && let Some(properties) = read.node_properties(row.node)
                 && let Some(intent_id) = prop_str(properties, "effect_intent_id")
             {
                 lineage.push((CancelKind::EffectIntent, intent_id));
@@ -114,10 +139,8 @@ fn unit_lineage(
         .get(&db("current_attempt_epoch"))
         .and_then(crate::store::value_u64)?;
     let current = (epoch > 0)
-        .then(|| store.attempt_node(&format!("{unit_id}/{epoch}")))
-        .flatten()
-        .and_then(|node| read.node_properties(node))
-        .and_then(|properties| prop_str(properties, "attempt_id"));
+        .then(|| attempt_id_for_epoch(read, store, unit_id, epoch))
+        .flatten();
     let mut lineage = vec![
         (CancelKind::Run, run_id),
         (CancelKind::ExecutionUnit, unit_id.to_owned()),
