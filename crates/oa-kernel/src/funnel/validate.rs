@@ -9,21 +9,10 @@ impl Funnel {
     /// §2.2 step 3 as a pure function of the pre-read state.
     pub(super) fn validate(&self, cmd: &Command, pre: &PreRead) -> Result<Accepted, Rejection> {
         let current_epoch = self.store.authority_epoch();
-        let epoch_mismatch =
-            |e: AuthorityEpoch| -> Rejection { Self::epoch_mismatch(e, current_epoch) };
         // One implementation of the §2.1 authority class, shared with the
         // §4 settle/park arms — two copies of an authorization check are
         // two chances to drift apart.
         let authority_ok = || -> Result<(), Rejection> { self.authority_gate(cmd) };
-        // Holder methods carry the authority axis inside the token, but an
-        // envelope authority_epoch, when present, must still be current —
-        // ADR-002 §5: a prior epoch is fence_rejected on ANY method.
-        let envelope_epoch_ok = || -> Result<(), Rejection> {
-            match cmd.authority_epoch {
-                Some(e) if e != current_epoch => Err(epoch_mismatch(e)),
-                _ => Ok(()),
-            }
-        };
         // I2: a mutation of existing unit state REQUIRES the expectation;
         // a stale one is version_conflict (transient, never persisted).
         let expected_version_ok = |actual: u64| -> Result<(), Rejection> {
@@ -91,7 +80,7 @@ impl Funnel {
                         event_kind: "run.opened",
                         payload: json!({ "goal_work_item_id": goal_work_item_id }),
                     }],
-                    result: json!({ "run_id": run_id }),
+                    result: json!({ "run_id": run_id, "version": 1 }),
                 })
             }
             Method::RunClose { run_id, outcome } => {
@@ -126,20 +115,25 @@ impl Funnel {
                         true,
                     ));
                 }
+                let new_version = increment(run.version, "run version")?;
                 Ok(Accepted {
                     plan: Plan::CloseRun {
                         run_node: run.node,
-                        new_version: run.version + 1,
+                        new_version,
                         status: outcome.wire(),
                     },
                     events: vec![EventDraft {
                         aggregate_kind: "run",
                         aggregate_id: run_id.clone(),
-                        aggregate_version: run.version + 1,
+                        aggregate_version: new_version,
                         event_kind: "run.closed",
                         payload: json!({ "outcome": outcome.wire() }),
                     }],
-                    result: json!({ "run_id": run_id, "status": outcome.wire() }),
+                    result: json!({
+                        "run_id": run_id,
+                        "version": new_version,
+                        "status": outcome.wire(),
+                    }),
                 })
             }
             Method::WorkItemCreate {
@@ -172,7 +166,7 @@ impl Funnel {
                             "declared_write_scope": declared_write_scope,
                         }),
                     }],
-                    result: json!({ "work_item_id": work_item_id }),
+                    result: json!({ "work_item_id": work_item_id, "version": 1 }),
                 })
             }
             Method::UnitAdmit {
@@ -217,7 +211,7 @@ impl Funnel {
                         event_kind: "unit.admitted",
                         payload: json!({ "work_item_id": work_item_id, "run_id": run_id }),
                     }],
-                    result: json!({ "unit_id": unit_id }),
+                    result: json!({ "unit_id": unit_id, "version": 1 }),
                 })
             }
             Method::UnitDispatch { unit_id, holder_id } => {
@@ -242,23 +236,28 @@ impl Funnel {
                 } else {
                     None
                 };
-                let new_epoch = unit.epoch + 1;
+                let new_epoch = increment(unit.epoch, "attempt epoch")?;
+                let new_version = increment(unit.version, "unit version")?;
                 let attempt_id = self.mint_id().to_string();
+                let token_nonce = self.mint_id().to_string();
                 Ok(Accepted {
                     plan: Plan::Dispatch {
                         unit_node: unit.node,
                         unit_id: unit_id.clone(),
-                        new_version: unit.version + 1,
+                        new_version,
                         new_epoch,
+                        stamp: unit.stamp,
+                        authority_epoch: current_epoch.0,
                         holder_id: holder_id.clone(),
                         attempt_id: attempt_id.clone(),
+                        token_nonce: token_nonce.clone(),
                         existing_lease: pre.lease.as_ref().map(|l| (l.node, l.version)),
                         prior_attempt,
                     },
                     events: vec![EventDraft {
                         aggregate_kind: "unit",
                         aggregate_id: unit_id.clone(),
-                        aggregate_version: unit.version + 1,
+                        aggregate_version: new_version,
                         event_kind: "unit.dispatched",
                         payload: json!({
                             "attempt_epoch": new_epoch,
@@ -273,32 +272,24 @@ impl Funnel {
                     // would be unrepresentable by any caller.
                     result: json!({
                         "unit_id": unit_id,
+                        "version": new_version,
                         "attempt_epoch": new_epoch,
                         "attempt_id": attempt_id,
                         "stamp": unit.stamp,
                         "authority_epoch": current_epoch.0,
                         "holder_id": holder_id,
+                        "token_nonce": token_nonce,
                     }),
                 })
             }
-            Method::ProgressReport { unit_id, note } => {
+            Method::ProgressReport { unit_id } => {
                 self.holder_gate(cmd, pre, unit_id)?;
                 let unit = pre.unit.as_ref().expect("fence passed implies unit");
                 expected_version_ok(unit.version)?;
                 Ok(Accepted {
-                    plan: Plan::BumpUnit {
-                        unit_node: unit.node,
-                        new_version: unit.version + 1,
-                        new_stamp: None,
-                    },
-                    events: vec![EventDraft {
-                        aggregate_kind: "unit",
-                        aggregate_id: unit_id.clone(),
-                        aggregate_version: unit.version + 1,
-                        event_kind: "unit.progress",
-                        payload: json!({ "note": note }),
-                    }],
-                    result: json!({ "unit_id": unit_id, "version": unit.version + 1 }),
+                    plan: Plan::Nothing,
+                    events: vec![],
+                    result: json!({ "unit_id": unit_id, "version": unit.version }),
                 })
             }
             Method::StampBump { unit_id } => {
@@ -307,75 +298,35 @@ impl Funnel {
                     return Err((ErrorKind::NotFound, format!("unit {unit_id}"), false));
                 };
                 expected_version_ok(unit.version)?;
+                let new_version = increment(unit.version, "unit version")?;
+                let new_stamp = increment(unit.stamp, "unit stamp")?;
                 Ok(Accepted {
                     plan: Plan::BumpUnit {
                         unit_node: unit.node,
-                        new_version: unit.version + 1,
-                        new_stamp: Some(unit.stamp + 1),
+                        new_version,
+                        new_stamp: Some(new_stamp),
                     },
                     events: vec![EventDraft {
                         aggregate_kind: "unit",
                         aggregate_id: unit_id.clone(),
-                        aggregate_version: unit.version + 1,
+                        aggregate_version: new_version,
                         event_kind: "unit.stamp_bumped",
-                        payload: json!({ "stamp": unit.stamp + 1 }),
+                        payload: json!({ "stamp": new_stamp }),
                     }],
-                    result: json!({ "unit_id": unit_id, "stamp": unit.stamp + 1 }),
-                })
-            }
-            Method::TokenReissue { unit_id } => {
-                let Some(token) = &cmd.attempt_token else {
-                    return Err((
-                        ErrorKind::InvalidRequest,
-                        "token.reissue requires the stale token as identity proof".into(),
-                        true,
-                    ));
-                };
-                envelope_epoch_ok()?;
-                Self::token_binds(token, unit_id)?;
-                if token.authority_epoch != current_epoch {
-                    return Err((
-                        ErrorKind::FenceRejected,
-                        "token minted under a prior authority epoch".into(),
-                        true,
-                    ));
-                }
-                let Some(unit) = &pre.unit else {
-                    return Err((ErrorKind::NotFound, format!("unit {unit_id}"), false));
-                };
-                if token.attempt_epoch != AttemptEpoch(unit.epoch) {
-                    return Err((
-                        ErrorKind::FenceRejected,
-                        "token attempt epoch superseded".into(),
-                        true,
-                    ));
-                }
-                let Some(lease) = &pre.lease else {
-                    return Err((
-                        ErrorKind::NotFound,
-                        format!("lease for unit {unit_id}"),
-                        false,
-                    ));
-                };
-                if lease.status != "active" || lease.holder_id != token.holder_id {
-                    return Err((
-                        ErrorKind::FenceRejected,
-                        "holder does not match the active lease".into(),
-                        true,
-                    ));
-                }
-                Ok(Accepted {
-                    plan: Plan::Nothing,
-                    events: vec![],
                     result: json!({
                         "unit_id": unit_id,
-                        "attempt_epoch": unit.epoch,
-                        "stamp": unit.stamp,
-                        "authority_epoch": current_epoch.0,
-                        "holder_id": token.holder_id,
+                        "version": new_version,
+                        "stamp": new_stamp,
                     }),
                 })
             }
+            Method::TokenReissue { unit_id } => Err((
+                ErrorKind::CapabilityUnsupported,
+                format!(
+                    "token reauthorization for unit {unit_id} requires the policy and approval gate"
+                ),
+                false,
+            )),
             Method::EffectPrepare { .. }
             | Method::EffectDispatch { .. }
             | Method::EffectRecordDispatched { .. }
@@ -388,15 +339,14 @@ impl Funnel {
     }
 
     /// Epoch-mismatch classification, shared by both authorization classes:
-    /// behind is permanently stale (epochs are monotonic), so the rejection
-    /// persists; ahead is a split-brain signature that a later lawful
-    /// takeover could make current, so it must not.
+    /// Envelope authority is excluded from the request digest, so neither a
+    /// stale nor an ahead value may reserve the command's idempotency key.
     pub(super) fn epoch_mismatch(e: AuthorityEpoch, current: AuthorityEpoch) -> Rejection {
         if e.0 < current.0 {
             (
                 ErrorKind::FenceRejected,
                 format!("authority epoch {} behind current {}", e.0, current.0),
-                true,
+                false,
             )
         } else {
             (
@@ -412,8 +362,8 @@ impl Funnel {
 
     /// The token's sealed unit binding: a token for another unit — or a
     /// unit that does not resolve — is an unresolvable token here,
-    /// fence_rejected per ADR-002 §10. Permanently deterministic (the
-    /// token's unit_id never changes), so it persists.
+    /// fence_rejected per ADR-002 §10. The foreign holder must not reserve an
+    /// idempotency key in the target unit's namespace.
     pub(super) fn token_binds(token: &AttemptTokenClaims, unit_id: &str) -> Result<(), Rejection> {
         if token.unit_id != unit_id {
             return Err((
@@ -422,16 +372,14 @@ impl Funnel {
                     "token sealed for unit {}, method targets {}",
                     token.unit_id, unit_id
                 ),
-                true,
+                false,
             ));
         }
         Ok(())
     }
 
-    /// The full holder-class gate every holder method (except the
-    /// stamp-forgiving `token.reissue`) runs: token presence, envelope
-    /// epoch currency when declared, the sealed unit binding, and the §3.3
-    /// five-axis fence. Returns the token so callers can stamp its claims.
+    /// The full holder-class gate: token presence, envelope epoch currency
+    /// when declared, the sealed unit binding, and the §3.3 five-axis fence.
     pub(super) fn holder_gate<'c>(
         &self,
         cmd: &'c Command,
@@ -462,6 +410,13 @@ impl Funnel {
             return Err(Self::epoch_mismatch(e, current));
         }
         Self::token_binds(token, unit_id)?;
+        if cmd.principal_id != token.holder_id {
+            return Err((
+                ErrorKind::Unauthorized,
+                "holder principal does not match the sealed token".into(),
+                true,
+            ));
+        }
         self.store
             .check_holder_fence(pre, token)
             .map_err(|r| match r {
@@ -473,4 +428,14 @@ impl Funnel {
             })?;
         Ok(token)
     }
+}
+
+fn increment(value: u64, axis: &str) -> Result<u64, Rejection> {
+    value.checked_add(1).ok_or_else(|| {
+        (
+            ErrorKind::ResourceExhausted,
+            format!("{axis} space exhausted"),
+            true,
+        )
+    })
 }

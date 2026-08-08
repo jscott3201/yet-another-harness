@@ -28,7 +28,7 @@ impl Ctx {
         let store = Store::create(dir.path(), "kernel-a").expect("create store");
         Ctx {
             dir,
-            funnel: Funnel::new(store, 1_000),
+            funnel: Funnel::new(store, 1_000).unwrap(),
             seq: 0,
         }
     }
@@ -60,14 +60,17 @@ impl Ctx {
         method: Method,
     ) -> Command {
         Command {
-            command_id: self.next_id(),
+            command_id: self.next_id().to_string(),
             scope_kind: ScopeKind::Global,
             scope_id: "g".into(),
             request_digest: Digest::of_bytes(digest_src.as_bytes()),
             expected_version: expected,
             principal_kind: PrincipalKind::Daemon,
+            principal_id: "daemon-local".into(),
             authority_epoch: Some(self.authority()),
             attempt_token: None,
+            causation_id: None,
+            correlation_id: None,
             method,
         }
     }
@@ -82,14 +85,17 @@ impl Ctx {
         method: Method,
     ) -> Command {
         Command {
-            command_id: self.next_id(),
+            command_id: self.next_id().to_string(),
             scope_kind: ScopeKind::Unit,
             scope_id: "g".into(),
             request_digest: Digest::of_bytes(digest_src.as_bytes()),
             expected_version: expected,
             principal_kind: PrincipalKind::Agent,
+            principal_id: token.holder_id.clone(),
             authority_epoch: None,
             attempt_token: Some(token),
+            causation_id: None,
+            correlation_id: None,
             method,
         }
     }
@@ -177,13 +183,13 @@ impl Ctx {
         expected: Option<u64>,
         note: &str,
     ) -> Command {
+        let _ = note;
         self.holder_cmd(
             digest_src,
             token,
             expected,
             Method::ProgressReport {
                 unit_id: unit.into(),
-                note: note.into(),
             },
         )
     }

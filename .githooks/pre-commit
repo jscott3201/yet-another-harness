@@ -12,6 +12,24 @@ esac
 
 cd "$(git rev-parse --show-toplevel)"
 
+untracked=$(git ls-files --others --exclude-standard)
+if [ -n "$untracked" ]; then
+  echo "pre-commit: nonignored untracked files would be absent from the commit:"
+  printf '%s\n' "$untracked"
+  exit 1
+fi
+
+# Working-tree checks are safe only when every tracked change is staged. An
+# unstaged dependency in another file can otherwise make staged code compile.
+if ! git diff --quiet --; then
+  echo "pre-commit: unstaged tracked changes would be absent from the commit:"
+  git diff --name-only
+  exit 1
+fi
+
 cargo fmt --all --check
-bash .github/scripts/check-file-size.sh
+cargo fmt --manifest-path tools/protocol-codegen/Cargo.toml -- --check
+cargo clippy --locked --manifest-path tools/protocol-codegen/Cargo.toml -- -D warnings
+cargo run --locked -p oa-kernel --bin generate-protocol -- --check
+bash .github/scripts/check-file-size.sh --cached
 bash .github/scripts/check-no-secrets.sh

@@ -1,15 +1,7 @@
 # CI for open-agent — runs on pushes and PRs to `main`.
 #
-# This is the TEXT gate: rustfmt, the 700-LOC file-size cap, and the
-# no-secret scan — everything that runs without resolving the workspace. The
-# compile gates (clippy -D warnings --all-targets, the full test suite)
-# CANNOT run on a hosted runner yet: the workspace pins selene-db as a path
-# dependency (`../selene-db`, a private sibling repo) that does not exist
-# here, and even `cargo fmt`/`cargo metadata` refuse a workspace with a
-# missing path dep — hence direct `rustfmt` below. Until selene-db is
-# vendored, published, or wired in via a deploy key, the compile gates run
-# locally in the tracked pre-push hook (.githooks/pre-push;
-# `bash scripts/install-hooks.sh` installs it once per clone).
+# Selene is an exact public Git dependency, so hosted CI runs the same locked
+# compile and test gates as local development.
 #
 # Security: no `${{ github.event.* }}` in any `run:` (confined to if:/with:/env:).
 
@@ -34,22 +26,48 @@ jobs:
     name: fmt
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.97.1
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772
         with:
+          toolchain: 1.97.1
           components: rustfmt
-      - run: git ls-files '*.rs' | xargs rustfmt --check --edition 2024
+      - run: cargo fmt --all --check
 
   file-size-cap:
-    name: file-size cap (700 LOC)
+    name: source-file cap (700 LOC)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - run: bash .github/scripts/check-file-size.sh
+
+  generated-protocol:
+    name: generated protocol artifacts
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772
+        with:
+          toolchain: 1.97.1
+          components: rustfmt, clippy
+      - run: cargo fmt --manifest-path tools/protocol-codegen/Cargo.toml -- --check
+      - run: cargo clippy --locked --manifest-path tools/protocol-codegen/Cargo.toml -- -D warnings
+      - run: cargo run --locked --manifest-path tools/protocol-codegen/Cargo.toml -- --check
+
+  workspace:
+    name: workspace clippy and tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772
+        with:
+          toolchain: 1.97.1
+          components: clippy
+      - run: cargo clippy --locked --workspace --all-targets -- -D warnings
+      - run: cargo test --locked --workspace
 
   no-secret-scan:
     name: no-secret scan
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - run: bash .github/scripts/check-no-secrets.sh

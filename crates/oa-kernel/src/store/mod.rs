@@ -21,10 +21,11 @@
 //! layer (`funnel`, next); this layer owns open/claim, the cursor allocator,
 //! and raw record transactions.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
+use rand::RngCore;
 use selene_core::{GraphId, LabelSet, NodeId, PropertyMap, Value};
 use selene_graph::{CommitBatching, GraphError, RowIndex, SeleneGraph, SharedGraph};
 use selene_persist::DEFAULT_WAL_FILE_NAME;
@@ -36,12 +37,16 @@ pub use selene_persist::PersistError;
 
 pub const GRAPH_ID: u64 = 7;
 
+mod read;
+mod recovery;
 #[cfg(test)]
 mod review_tests;
 mod schema;
 #[cfg(test)]
 mod tests;
 
+pub use read::{CancelDeliveryRow, CancelRequestRow, EffectRecordRow, EventRecord, ReceiptRecord};
+pub(crate) use recovery::commit_error;
 pub use schema::graph_type;
 pub(crate) use schema::{db, no_labels, props_set, value_str, value_u64};
 
@@ -50,6 +55,9 @@ pub(crate) use schema::{db, no_labels, props_set, value_str, value_u64};
 /// branch on the kind, never the axis.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StoreRejection {
+    InvalidRequest {
+        detail: String,
+    },
     FenceRejected {
         detail: String,
     },
@@ -79,6 +87,9 @@ pub enum StoreError {
     /// leave the WAL permanently unreplayable — recover is the only lawful
     /// reopen (§9 steps 1–2).
     AlreadyInitialized(PathBuf),
+    /// The engine returned an error after commit began, so recovery must
+    /// determine whether the write became durable.
+    CommitUnknown(String),
     /// Kernel-internal incoherence — fail loudly, never a domain rejection.
     Internal(String),
 }
@@ -99,6 +110,7 @@ pub struct AttemptTokenClaims {
     pub stamp: Stamp,
     pub authority_epoch: AuthorityEpoch,
     pub holder_id: String,
+    pub nonce: String,
 }
 
 /// Address book: id → node cache. Never truth — every transaction re-reads
@@ -114,7 +126,7 @@ struct Books {
     work_items: HashMap<String, NodeId>,
     receipts: HashMap<String, NodeId>,
     effects: HashMap<String, NodeId>,
-    events: HashMap<String, NodeId>,
+    events: BTreeMap<u64, NodeId>,
     evidence: HashMap<String, NodeId>,
     runs: HashMap<String, NodeId>,
     /// Keyed by `cancel_request_id`. §5.2 rule 4 has to answer "is there an
@@ -135,6 +147,9 @@ pub struct Store {
     /// open it is restored strictly above the maximum committed cursor.
     next_cursor: Mutex<u64>,
     authority_epoch: Mutex<AuthorityEpoch>,
+    project_id: String,
+    min_retained_cursor: Mutex<u64>,
+    token_key: [u8; 32],
 }
 
 impl Store {
@@ -146,6 +161,14 @@ impl Store {
     /// directory that already holds one — see
     /// [`StoreError::AlreadyInitialized`].
     pub fn create(dir: &Path, instance_id: &str) -> Result<Store, StoreError> {
+        Self::create_project(dir, instance_id, "default")
+    }
+
+    pub fn create_project(
+        dir: &Path,
+        instance_id: &str,
+        project_id: &str,
+    ) -> Result<Store, StoreError> {
         if Self::wal_path(dir).exists() {
             return Err(StoreError::AlreadyInitialized(dir.to_path_buf()));
         }
@@ -154,12 +177,17 @@ impl Store {
             .with_wal(Self::wal_path(dir), selene_persist::WalConfig::default())?
             .with_commit_batching(CommitBatching::Off)
             .build()?;
+        let mut token_key = [0_u8; 32];
+        rand::rng().fill_bytes(&mut token_key);
         let store = Store {
             shared,
             dir: dir.to_path_buf(),
             books: Mutex::new(Books::default()),
             next_cursor: Mutex::new(1),
             authority_epoch: Mutex::new(AuthorityEpoch(1)),
+            project_id: project_id.to_owned(),
+            min_retained_cursor: Mutex::new(1),
+            token_key,
         };
         let mut txn = store.shared.begin_write();
         let node = {
@@ -170,12 +198,18 @@ impl Store {
                     (db("authority_key"), Value::String(db("control"))),
                     (db("authority_epoch"), Value::Uint(1)),
                     (db("holder_instance_id"), Value::String(db(instance_id))),
+                    (db("project_id"), Value::String(db(project_id))),
+                    (
+                        db("token_key"),
+                        Value::String(db(&encode_token_key(&token_key))),
+                    ),
+                    (db("min_retained_cursor"), Value::Uint(1)),
                     (db("status"), Value::String(db("active"))),
                 ])
                 .expect("authority property map"),
             )?
         };
-        txn.commit()?;
+        txn.commit().map_err(recovery::commit_error)?;
         store.books.lock().expect("books").authority = Some(node);
         Ok(store)
     }
@@ -194,16 +228,28 @@ impl Store {
             books: Mutex::new(Books::default()),
             next_cursor: Mutex::new(1),
             authority_epoch: Mutex::new(AuthorityEpoch(0)),
+            project_id: String::new(),
+            min_retained_cursor: Mutex::new(1),
+            token_key: [0; 32],
         };
-        store.rebuild_books_and_cursor();
+        let (project_id, min_retained_cursor, token_key) = store.rebuild_books_and_cursor()?;
+        let store = Store {
+            project_id,
+            min_retained_cursor: Mutex::new(min_retained_cursor),
+            token_key,
+            ..store
+        };
         store.claim_authority(instance_id)?;
         Ok(store)
     }
 
-    fn rebuild_books_and_cursor(&self) {
+    fn rebuild_books_and_cursor(&self) -> Result<(String, u64, [u8; 32]), StoreError> {
         let g = self.shared.read();
         let mut books = self.books.lock().expect("books");
         let mut max_cursor = 0u64;
+        let mut project_id = None;
+        let mut min_retained_cursor = None;
+        let mut token_key = None;
         for raw in g.live_nodes().iter() {
             // Row indices remap under compaction; node_id_for_row is the
             // sanctioned reverse mapping (G02 auditor trap).
@@ -218,12 +264,22 @@ impl Store {
             };
             let get_str = |name: &str| props.get(&db(name)).and_then(value_str);
             if labels.contains(&db("Authority")) {
+                if books.authority.is_some() {
+                    return Err(StoreError::Internal(
+                        "control graph has multiple Authority rows".into(),
+                    ));
+                }
                 books.authority = Some(id);
+                project_id = get_str("project_id");
+                token_key =
+                    get_str("token_key").and_then(|value| recovery::decode_token_key(&value));
+                min_retained_cursor = props.get(&db("min_retained_cursor")).and_then(value_u64);
             } else if labels.contains(&db("Unit")) {
                 if let Some(k) = get_str("unit_id") {
                     books.units.insert(k, id);
                 }
             } else if labels.contains(&db("Attempt")) {
+                recovery::validate_attempt(props)?;
                 if let Some(k) = get_str("attempt_key") {
                     books.attempts.insert(k, id);
                 }
@@ -240,10 +296,12 @@ impl Store {
                     books.work_items.insert(k, id);
                 }
             } else if labels.contains(&db("Receipt")) {
+                recovery::validate_receipt(props)?;
                 if let Some(k) = get_str("receipt_key") {
                     books.receipts.insert(k, id);
                 }
             } else if labels.contains(&db("Effect")) {
+                recovery::validate_effect(props)?;
                 if let Some(k) = get_str("operation_key") {
                     books.effects.insert(k, id);
                 }
@@ -252,23 +310,53 @@ impl Store {
                     books.runs.insert(k, id);
                 }
             } else if labels.contains(&db("CancelRequest")) {
+                recovery::validate_cancel_request(props)?;
                 if let Some(k) = get_str("cancel_request_id") {
                     books.cancel_requests.insert(k, id);
                 }
             } else if labels.contains(&db("CancelDelivery")) {
+                recovery::validate_cancel_delivery(props)?;
                 if let Some(k) = get_str("delivery_key") {
                     books.cancel_deliveries.insert(k, id);
                 }
             } else if labels.contains(&db("Event")) {
-                if let Some(c) = props.get(&db("cursor")).and_then(value_u64) {
-                    max_cursor = max_cursor.max(c);
+                let c = props
+                    .get(&db("cursor"))
+                    .and_then(value_u64)
+                    .ok_or_else(|| StoreError::Internal("Event row has invalid cursor".into()))?;
+                if c == 0 {
+                    return Err(StoreError::Internal(
+                        "Event row cursor must be greater than zero".into(),
+                    ));
                 }
-                if let Some(k) = get_str("event_id") {
-                    books.events.insert(k, id);
-                }
+                max_cursor = max_cursor.max(c);
+                books.events.insert(c, id);
             }
         }
-        *self.next_cursor.lock().expect("cursor") = max_cursor + 1;
+        *self.next_cursor.lock().expect("cursor") = max_cursor
+            .checked_add(1)
+            .ok_or_else(|| StoreError::Internal("event cursor space exhausted".into()))?;
+        let project_id = project_id
+            .filter(|project_id| !project_id.is_empty())
+            .ok_or_else(|| StoreError::Internal("Authority project_id is invalid".into()))?;
+        let min_retained_cursor = min_retained_cursor.ok_or_else(|| {
+            StoreError::Internal("Authority min_retained_cursor is invalid".into())
+        })?;
+        if min_retained_cursor > max_cursor && !(min_retained_cursor == 1 && max_cursor == 0) {
+            return Err(StoreError::Internal(format!(
+                "retention floor {min_retained_cursor} exceeds latest cursor {max_cursor}"
+            )));
+        }
+        let token_key = token_key
+            .ok_or_else(|| StoreError::Internal("Authority token_key is invalid".into()))?;
+        let receipt_keys = books.receipts.keys().cloned().collect::<Vec<_>>();
+        drop(books);
+        drop(g);
+        for key in receipt_keys {
+            self.receipt(&key)?;
+        }
+        self.validate_event_receipts()?;
+        Ok((project_id, min_retained_cursor, token_key))
     }
 
     fn claim_authority(&self, instance_id: &str) -> Result<(), StoreError> {
@@ -288,33 +376,97 @@ impl Store {
                 props
                     .get(&db("authority_epoch"))
                     .and_then(value_u64)
-                    .unwrap_or(0),
+                    .ok_or_else(|| {
+                        StoreError::Internal("Authority authority_epoch is invalid".into())
+                    })?,
                 props
                     .get(&db("holder_instance_id"))
                     .and_then(value_str)
-                    .unwrap_or_default(),
+                    .ok_or_else(|| {
+                        StoreError::Internal("Authority holder_instance_id is invalid".into())
+                    })?,
             )
         };
+        let next_epoch = epoch
+            .checked_add(1)
+            .ok_or_else(|| StoreError::Internal("authority epoch space exhausted".into()))?;
         {
             let mut m = txn.mutator();
             m.update_node(
                 node,
                 no_labels(),
                 props_set([
-                    (db("authority_epoch"), Value::Uint(epoch + 1)),
+                    (db("authority_epoch"), Value::Uint(next_epoch)),
                     (db("holder_instance_id"), Value::String(db(instance_id))),
                     (db("prior_instance_id"), Value::String(db(&prior))),
                     (db("status"), Value::String(db("active"))),
                 ]),
             )?;
         }
-        txn.commit()?;
-        *self.authority_epoch.lock().expect("epoch") = AuthorityEpoch(epoch + 1);
+        txn.commit().map_err(recovery::commit_error)?;
+        *self.authority_epoch.lock().expect("epoch") = AuthorityEpoch(next_epoch);
         Ok(())
     }
 
     pub fn authority_epoch(&self) -> AuthorityEpoch {
         *self.authority_epoch.lock().expect("epoch")
+    }
+
+    pub fn project_id(&self) -> &str {
+        &self.project_id
+    }
+
+    pub(crate) fn token_key(&self) -> &[u8; 32] {
+        &self.token_key
+    }
+
+    pub fn min_retained_cursor(&self) -> u64 {
+        *self.min_retained_cursor.lock().expect("retention floor")
+    }
+
+    pub fn set_min_retained_cursor(&self, cursor: u64) -> Result<(), StoreError> {
+        let mut floor = self.min_retained_cursor.lock().expect("retention floor");
+        if cursor == *floor {
+            return Ok(());
+        }
+        if cursor < *floor {
+            return Err(StoreError::Rejected(StoreRejection::InvalidRequest {
+                detail: format!(
+                    "retention floor cannot decrease from {} to {cursor}",
+                    *floor
+                ),
+            }));
+        }
+        let latest_cursor = self
+            .books
+            .lock()
+            .expect("books")
+            .events
+            .last_key_value()
+            .map(|(cursor, _)| *cursor)
+            .unwrap_or(0);
+        if cursor > latest_cursor {
+            return Err(StoreError::Rejected(StoreRejection::InvalidRequest {
+                detail: format!(
+                    "retention floor {cursor} exceeds latest committed cursor {latest_cursor}"
+                ),
+            }));
+        }
+        let node = self
+            .books
+            .lock()
+            .expect("books")
+            .authority
+            .ok_or_else(|| StoreError::Internal("control graph has no Authority row".into()))?;
+        let mut txn = self.shared.begin_write();
+        txn.mutator().update_node(
+            node,
+            no_labels(),
+            props_set([(db("min_retained_cursor"), Value::Uint(cursor))]),
+        )?;
+        txn.commit().map_err(recovery::commit_error)?;
+        *floor = cursor;
+        Ok(())
     }
 
     /// Allocate the next store-global cursor. Monotonic and never reused
@@ -327,11 +479,13 @@ impl Store {
     /// `begin_write` would let a later allocation commit first, and a
     /// consumer past the higher cursor must then treat the committed lower
     /// one as an abort gap — a delivered-stream loss (I13).
-    pub(crate) fn allocate_cursor(&self) -> u64 {
+    pub(crate) fn allocate_cursor(&self) -> Result<u64, StoreError> {
         let mut c = self.next_cursor.lock().expect("cursor");
         let v = *c;
-        *c += 1;
-        v
+        *c = c
+            .checked_add(1)
+            .ok_or_else(|| StoreError::Internal("event cursor space exhausted".into()))?;
+        Ok(v)
     }
 
     pub(crate) fn shared(&self) -> &SharedGraph {
@@ -537,7 +691,10 @@ impl Store {
             BookKind::WorkItem => books.work_items.insert(key, node),
             BookKind::Receipt => books.receipts.insert(key, node),
             BookKind::Effect => books.effects.insert(key, node),
-            BookKind::Event => books.events.insert(key, node),
+            BookKind::Event => books.events.insert(
+                key.parse().expect("event book key is the decimal cursor"),
+                node,
+            ),
             BookKind::Evidence => books.evidence.insert(key, node),
             BookKind::Run => books.runs.insert(key, node),
             BookKind::CancelRequest => books.cancel_requests.insert(key, node),
@@ -608,176 +765,6 @@ impl Store {
             detail: format!("delete of committed event {event_id}"),
         }
     }
-
-    /// Attempt-row status read-back — audit/test seam for the §1.2 "at most
-    /// one active attempt per unit" invariant; the §9 recovery scan reads
-    /// the same answer through its own snapshot pass.
-    pub fn attempt_status(&self, unit_id: &str, epoch: u64) -> Option<String> {
-        let node = self.attempt_node(&format!("{unit_id}/{epoch}"))?;
-        let txn = self.shared.begin_write();
-        let status = txn
-            .read()
-            .node_properties(node)
-            .and_then(|p| p.get(&db("status")).and_then(value_str));
-        txn.rollback();
-        status
-    }
-
-    /// Effect-row read-back (audit/test seam, like [`Store::journal`]):
-    /// the indexed columns plus the serialized intent record, so tests can
-    /// assert durable state rather than in-memory results.
-    pub fn effect_record(&self, operation_key: &str) -> Option<EffectRecordRow> {
-        let node = self.effect_node(operation_key)?;
-        let txn = self.shared.begin_write();
-        let row = txn.read().node_properties(node).map(|p| EffectRecordRow {
-            version: p.get(&db("version")).and_then(value_u64).unwrap_or(0),
-            state: p.get(&db("state")).and_then(value_str).unwrap_or_default(),
-            terminal: p.get(&db("terminal")).and_then(value_str),
-            record: p.get(&db("record")).and_then(value_str).unwrap_or_default(),
-        });
-        txn.rollback();
-        row
-    }
-
-    /// Cancel-request read-back (audit/test seam, like
-    /// [`Store::effect_record`]): the indexed columns plus the frozen scope
-    /// and the full serialized record, so tests assert durable state.
-    pub fn cancel_request_row(&self, cancel_request_id: &str) -> Option<CancelRequestRow> {
-        let node = self.cancel_request_node(cancel_request_id)?;
-        let txn = self.shared.begin_write();
-        let row = txn.read().node_properties(node).map(|p| CancelRequestRow {
-            version: p.get(&db("version")).and_then(value_u64).unwrap_or(0),
-            status: p.get(&db("status")).and_then(value_str).unwrap_or_default(),
-            root_kind: p
-                .get(&db("root_kind"))
-                .and_then(value_str)
-                .unwrap_or_default(),
-            root_id: p
-                .get(&db("root_id"))
-                .and_then(value_str)
-                .unwrap_or_default(),
-            scope: p.get(&db("scope")).and_then(value_str).unwrap_or_default(),
-            record: p.get(&db("record")).and_then(value_str).unwrap_or_default(),
-        });
-        txn.rollback();
-        row
-    }
-
-    /// Delivery-row read-back (audit/test seam, like
-    /// [`Store::effect_record`]). The delivery row is immutable in every
-    /// property, so each row is one observation that can never be rewritten.
-    pub fn cancel_delivery_rows(&self) -> Vec<CancelDeliveryRow> {
-        let txn = self.shared.begin_write();
-        let mut out = Vec::new();
-        {
-            let read = txn.read();
-            for (_, node) in self.cancel_delivery_entries() {
-                let Some(p) = read.node_properties(node) else {
-                    continue;
-                };
-                let get_s = |k: &str| p.get(&db(k)).and_then(value_str).unwrap_or_default();
-                out.push(CancelDeliveryRow {
-                    delivery_key: get_s("delivery_key"),
-                    cancel_request_id: get_s("cancel_request_id"),
-                    member_id: get_s("member_id"),
-                    member_kind: get_s("member_kind"),
-                    outcome: get_s("outcome"),
-                });
-            }
-        }
-        txn.rollback();
-        out
-    }
-
-    /// The journal in index order. Reads the write-side working
-    /// graph (briefly taking the writer lock), so it reflects every commit
-    /// that has returned — an audit/test seam for the obligation-2 "exactly
-    /// one set of appended events" half and the V1 replay comparison, not a
-    /// hot path.
-    pub fn journal(&self) -> Vec<EventRecord> {
-        let nodes: Vec<NodeId> = self
-            .books
-            .lock()
-            .expect("books")
-            .events
-            .values()
-            .copied()
-            .collect();
-        let txn = self.shared.begin_write();
-        let mut out = Vec::with_capacity(nodes.len());
-        {
-            let read = txn.read();
-            for node in nodes {
-                let Some(p) = read.node_properties(node) else {
-                    continue;
-                };
-                let get_u = |k: &str| p.get(&db(k)).and_then(value_u64).unwrap_or(0);
-                let get_s = |k: &str| p.get(&db(k)).and_then(value_str).unwrap_or_default();
-                out.push(EventRecord {
-                    cursor: get_u("cursor"),
-                    event_id: get_s("event_id"),
-                    aggregate_kind: get_s("aggregate_kind"),
-                    aggregate_id: get_s("aggregate_id"),
-                    aggregate_version: get_u("aggregate_version"),
-                    ordinal: get_u("ordinal"),
-                    event_kind: get_s("event_kind"),
-                    payload: get_s("payload"),
-                    command_id: get_s("command_id"),
-                });
-            }
-        }
-        txn.rollback();
-        out.sort_by_key(|e| e.cursor);
-        out
-    }
-}
-
-/// One effect row as read back through [`Store::effect_record`].
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct EffectRecordRow {
-    pub version: u64,
-    pub state: String,
-    pub terminal: Option<String>,
-    /// The serialized `EffectIntent` JSON.
-    pub record: String,
-}
-
-/// One cancel-request row as read back through [`Store::cancel_request_row`].
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct CancelRequestRow {
-    pub version: u64,
-    pub status: String,
-    pub root_kind: String,
-    pub root_id: String,
-    /// The frozen scope (rule-2 snapshot), serialized.
-    pub scope: String,
-    /// The full serialized `CancelRequest`, status included.
-    pub record: String,
-}
-
-/// One cancel-delivery row as read back through
-/// [`Store::cancel_delivery_rows`].
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct CancelDeliveryRow {
-    pub delivery_key: String,
-    pub cancel_request_id: String,
-    pub member_id: String,
-    pub member_kind: String,
-    pub outcome: String,
-}
-
-/// One committed journal row as read back through [`Store::journal`].
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct EventRecord {
-    pub cursor: u64,
-    pub event_id: String,
-    pub aggregate_kind: String,
-    pub aggregate_id: String,
-    pub aggregate_version: u64,
-    pub ordinal: u64,
-    pub event_kind: String,
-    pub payload: String,
-    pub command_id: String,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -816,4 +803,8 @@ pub(crate) struct LeaseFence {
 pub(crate) trait UnitFenceRead {
     fn unit_fence(&self, unit_id: &str) -> Option<UnitFence>;
     fn lease_fence(&self, unit_id: &str) -> Option<LeaseFence>;
+}
+
+fn encode_token_key(key: &[u8; 32]) -> String {
+    key.iter().map(|byte| format!("{byte:02x}")).collect()
 }

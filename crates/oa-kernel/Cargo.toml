@@ -3,6 +3,7 @@ name = "oa-kernel"
 version = "0.0.1"
 edition.workspace = true
 rust-version.workspace = true
+license.workspace = true
 publish = false
 description = "MILE-001: model-free kernel — normalized provider events, effect ledger, mutation funnel (G01)"
 
@@ -16,6 +17,11 @@ selene-persist.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 blake3.workspace = true
+schemars.workspace = true
+serde_json_canonicalizer.workspace = true
+ts-rs.workspace = true
+chrono.workspace = true
+rand.workspace = true
 
 [dev-dependencies]
 tempfile = "3"

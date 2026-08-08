@@ -43,16 +43,36 @@ fn dispatch_mints_epoch_attempt_lease_token_and_supersedes() {
 }
 
 #[test]
-fn holder_progress_advances_version_under_the_fence() {
+fn holder_progress_observes_the_fence_without_mutating_semantic_state() {
     let mut ctx = Ctx::new();
     ctx.seed_unit();
     let token = ctx.dispatch("u-1", "h1", 1); // v2
 
     let p1 = ctx.progress_cmd("progress 1", "u-1", token.clone(), Some(2), "one");
-    assert_eq!(completed(ctx.funnel.submit(&p1))["version"], 3);
+    assert_eq!(completed(ctx.funnel.submit(&p1))["version"], 2);
 
-    let p2 = ctx.progress_cmd("progress 2", "u-1", token, Some(3), "two");
-    assert_eq!(completed(ctx.funnel.submit(&p2))["version"], 4);
+    let p2 = ctx.progress_cmd("progress 2", "u-1", token, Some(2), "two");
+    assert_eq!(completed(ctx.funnel.submit(&p2))["version"], 2);
+    assert_eq!(ctx.funnel.store().journal().unwrap().len(), 4);
+}
+
+#[test]
+fn holder_principal_must_match_the_sealed_token() {
+    let mut ctx = Ctx::new();
+    ctx.seed_unit();
+    let token = ctx.dispatch("u-1", "h1", 1);
+    let mut forged = ctx.progress_cmd("forged holder", "u-1", token, Some(2), "ignored");
+    forged.principal_id = "h2".into();
+
+    assert_eq!(
+        rejected(ctx.funnel.submit(&forged)),
+        (ErrorKind::Unauthorized, false)
+    );
+    assert_eq!(
+        rejected(ctx.funnel.submit(&forged)),
+        (ErrorKind::Unauthorized, true)
+    );
+    assert_eq!(ctx.funnel.store().journal().unwrap().len(), 4);
 }
 
 #[test]
@@ -79,9 +99,7 @@ fn superseded_token_is_fence_rejected_and_the_rejection_replays() {
 }
 
 #[test]
-fn stamp_bump_kills_tokens_and_reissue_rearms() {
-    // Row A4: bump invalidates without an epoch change; reissue re-arms the
-    // same attempt without a journal event or version bump.
+fn stamp_bump_kills_tokens_and_reissue_fails_closed() {
     let mut ctx = Ctx::new();
     ctx.seed_unit();
     let t1 = ctx.dispatch("u-1", "h1", 1); // v2
@@ -94,7 +112,7 @@ fn stamp_bump_kills_tokens_and_reissue_rearms() {
         },
     );
     assert_eq!(completed(ctx.funnel.submit(&bump))["stamp"], 1); // v3
-    let journal_len = ctx.funnel.store().journal().len();
+    let journal_len = ctx.funnel.store().journal().unwrap().len();
 
     let dead = ctx.progress_cmd("progress dead token", "u-1", t1.clone(), Some(3), "n");
     assert_eq!(
@@ -110,15 +128,11 @@ fn stamp_bump_kills_tokens_and_reissue_rearms() {
             unit_id: "u-1".into(),
         },
     );
-    let t2 = token_from_result(&completed(ctx.funnel.submit(&reissue)))
-        .expect("reissue result carries token claims");
-    assert_eq!(t2.attempt_epoch.0, 1); // same attempt
-    assert_eq!(t2.stamp.0, 1); // current stamp
-    assert_eq!(ctx.funnel.store().journal().len(), journal_len); // no event
-
-    // expected 3 passing proves reissue bumped nothing.
-    let live = ctx.progress_cmd("progress reissued", "u-1", t2, Some(3), "back");
-    assert_eq!(completed(ctx.funnel.submit(&live))["version"], 4);
+    assert_eq!(
+        rejected(ctx.funnel.submit(&reissue)),
+        (ErrorKind::CapabilityUnsupported, false)
+    );
+    assert_eq!(ctx.funnel.store().journal().unwrap().len(), journal_len);
 }
 
 #[test]
@@ -149,7 +163,7 @@ fn cross_unit_and_ghost_tokens_are_fence_rejected() {
     );
     assert_eq!(
         rejected(ctx.funnel.submit(&cross_reissue)),
-        (ErrorKind::FenceRejected, false)
+        (ErrorKind::CapabilityUnsupported, false)
     );
 
     // A token naming a unit that does not exist resolves nowhere.
@@ -159,6 +173,7 @@ fn cross_unit_and_ghost_tokens_are_fence_rejected() {
         stamp: oa_kernel::ids::Stamp(0),
         authority_epoch: ctx.authority(),
         holder_id: "h1".into(),
+        nonce: "ghost-token".into(),
     };
     let ghost_progress = ctx.progress_cmd("ghost progress", "u-1", ghost, Some(2), "n");
     assert_eq!(
@@ -168,7 +183,7 @@ fn cross_unit_and_ghost_tokens_are_fence_rejected() {
 
     // The properly bound token still works.
     let live = ctx.progress_cmd("real progress", "u-2", t_u2, Some(2), "n");
-    assert_eq!(completed(ctx.funnel.submit(&live))["version"], 3);
+    assert_eq!(completed(ctx.funnel.submit(&live))["version"], 2);
 }
 
 #[test]
@@ -210,6 +225,7 @@ fn deterministic_rejections_persist_and_replay() {
         stamp: oa_kernel::ids::Stamp(0),
         authority_epoch: ctx.authority(),
         holder_id: "h".into(),
+        nonce: "malformed-token".into(),
     });
     assert_eq!(
         rejected(ctx.funnel.submit(&with_token)),
@@ -281,10 +297,11 @@ fn envelope_authority_epoch_is_checked_on_holder_methods() {
         rejected(ctx.funnel.submit(&behind)),
         (ErrorKind::FenceRejected, false)
     );
-    // Behind is permanently stale: persisted.
+    // Envelope authority is outside the request digest, so a corrected retry
+    // with this command id must remain possible.
     assert_eq!(
         rejected(ctx.funnel.submit(&behind)),
-        (ErrorKind::FenceRejected, true)
+        (ErrorKind::FenceRejected, false)
     );
 
     // Ahead is a split-brain signature a lawful takeover could legitimize:
@@ -326,21 +343,24 @@ fn recover_replays_receipts_and_fences_out_the_prior_lifetime() {
     // SAME logical clock as the dead lifetime: minted ids stay unique
     // because the authority epoch rides the entropy — the clock-advance
     // courtesy is for ordering, not correctness.
-    let funnel = Funnel::new(store, 1_000);
+    let funnel = Funnel::new(store, 1_000).unwrap();
 
     // Resubmitted pre-kill command: replayed from the persisted receipt.
     assert_eq!(replayed(funnel.submit(&wi)), first);
 
     // Authority command still carrying the dead epoch: fenced.
     let stale_authority = Command {
-        command_id: Uuid7::mint(2, 1),
+        command_id: Uuid7::mint(2, 1).to_string(),
         scope_kind: ScopeKind::Global,
         scope_id: "g".into(),
         request_digest: Digest::of_bytes(b"create wi-2 stale"),
         principal_kind: PrincipalKind::Daemon,
+        principal_id: "daemon-local".into(),
         expected_version: None,
         authority_epoch: Some(old_epoch),
         attempt_token: None,
+        causation_id: None,
+        correlation_id: None,
         method: Method::WorkItemCreate {
             work_item_id: "wi-2".into(),
             acceptance_contract_digest: Digest::of_bytes(b"contract"),
@@ -355,17 +375,19 @@ fn recover_replays_receipts_and_fences_out_the_prior_lifetime() {
     // Holder token minted under the dead authority epoch: fenced, and not
     // reissuable — reauth cannot cross an authority takeover.
     let stale_progress = Command {
-        command_id: Uuid7::mint(2, 2),
+        command_id: Uuid7::mint(2, 2).to_string(),
         scope_kind: ScopeKind::Unit,
         scope_id: "g".into(),
         request_digest: Digest::of_bytes(b"progress stale lifetime"),
         principal_kind: PrincipalKind::Agent,
+        principal_id: "h1".into(),
         expected_version: Some(2),
         authority_epoch: None,
         attempt_token: Some(old_token.clone()),
+        causation_id: None,
+        correlation_id: None,
         method: Method::ProgressReport {
             unit_id: "u-1".into(),
-            note: "ghost".into(),
         },
     };
     assert_eq!(
@@ -373,33 +395,39 @@ fn recover_replays_receipts_and_fences_out_the_prior_lifetime() {
         (ErrorKind::FenceRejected, false)
     );
     let stale_reissue = Command {
-        command_id: Uuid7::mint(2, 3),
+        command_id: Uuid7::mint(2, 3).to_string(),
         scope_kind: ScopeKind::Unit,
         scope_id: "g".into(),
         request_digest: Digest::of_bytes(b"reissue stale lifetime"),
         principal_kind: PrincipalKind::Agent,
+        principal_id: "h1".into(),
         expected_version: None,
         authority_epoch: None,
         attempt_token: Some(old_token),
+        causation_id: None,
+        correlation_id: None,
         method: Method::TokenReissue {
             unit_id: "u-1".into(),
         },
     };
     assert_eq!(
         rejected(funnel.submit(&stale_reissue)),
-        (ErrorKind::FenceRejected, false)
+        (ErrorKind::CapabilityUnsupported, false)
     );
 
     // The new lifetime proceeds: re-dispatch under the new epoch works.
     let redispatch = Command {
-        command_id: Uuid7::mint(2, 4),
+        command_id: Uuid7::mint(2, 4).to_string(),
         scope_kind: ScopeKind::Global,
         scope_id: "g".into(),
         request_digest: Digest::of_bytes(b"dispatch after recover"),
         principal_kind: PrincipalKind::Daemon,
+        principal_id: "daemon-local".into(),
         expected_version: Some(2),
         authority_epoch: Some(new_epoch),
         attempt_token: None,
+        causation_id: None,
+        correlation_id: None,
         method: Method::UnitDispatch {
             unit_id: "u-1".into(),
             holder_id: "h1".into(),
@@ -416,17 +444,19 @@ fn recover_replays_receipts_and_fences_out_the_prior_lifetime() {
     );
 
     let live = Command {
-        command_id: Uuid7::mint(2, 5),
+        command_id: Uuid7::mint(2, 5).to_string(),
         scope_kind: ScopeKind::Unit,
         scope_id: "g".into(),
         request_digest: Digest::of_bytes(b"progress new lifetime"),
         principal_kind: PrincipalKind::Agent,
+        principal_id: "h1".into(),
         expected_version: Some(3),
         authority_epoch: None,
         attempt_token: Some(token),
+        causation_id: None,
+        correlation_id: None,
         method: Method::ProgressReport {
             unit_id: "u-1".into(),
-            note: "alive".into(),
         },
     };
     completed(funnel.submit(&live));

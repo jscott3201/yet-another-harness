@@ -12,21 +12,27 @@
 use crate::effect::{EffectTerminal, TargetObservation};
 use crate::error::ErrorKind;
 use crate::funnel::{EffectSpec, SettleEvidence};
-use crate::ids::{AuthorityEpoch, Digest, Uuid7};
+use crate::ids::{AuthorityEpoch, Digest};
 use crate::store::AttemptTokenClaims;
 
-/// §2.1's `PrincipalRef.principal_kind`. MILE-001 carries the kind alone —
-/// `principal_id` and `capability_id` belong to the daemon boundary, whose
-/// in-process derivation ADR-002 P14.4 exempts — but the KIND is what the
-/// §2.1/§3.3 authorization classes are stated in terms of, so omitting it
-/// would leave the authority class resting entirely on an epoch integer the
-/// holder is handed in its own dispatch result.
+/// §2.1's `PrincipalRef.principal_kind`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PrincipalKind {
     Owner,
     DelegateHuman,
     Agent,
     Daemon,
+}
+
+impl PrincipalKind {
+    pub(super) fn wire(self) -> &'static str {
+        match self {
+            PrincipalKind::Owner => "owner",
+            PrincipalKind::DelegateHuman => "delegate_human",
+            PrincipalKind::Agent => "agent",
+            PrincipalKind::Daemon => "daemon",
+        }
+    }
 }
 
 /// §1.2 Run terminal statuses reachable by an explicit close. `open` and
@@ -70,7 +76,9 @@ impl ScopeKind {
 
 #[derive(Clone, Debug)]
 pub struct Command {
-    pub command_id: Uuid7,
+    /// Opaque ADR-002 P3.3 wire identifier. The funnel keys and journals the
+    /// bytes but never parses UUID structure out of them.
+    pub command_id: String,
     pub scope_kind: ScopeKind,
     pub scope_id: String,
     /// P3.4's digest over the canonical request; equality decides replay vs
@@ -80,16 +88,19 @@ pub struct Command {
     /// aggregate the method mutates — the unit for unit methods, the effect
     /// for effect methods. REQUIRED on every mutation of existing state
     /// (I2's optimistic-concurrency rule); `None` is lawful only for pure
-    /// creations (including idempotent `effect.prepare`) and for
-    /// `token.reissue` (no transition).
+    /// creations (including idempotent `effect.prepare`) and non-mutating
+    /// fence observations.
     pub expected_version: Option<u64>,
     /// §2.1 principal. Authority-class methods require `Daemon`; holder
     /// methods require `Agent` — without this axis the authority class
     /// would rest entirely on an epoch integer the holder is handed in its
     /// own dispatch result.
     pub principal_kind: PrincipalKind,
+    pub principal_id: String,
     pub authority_epoch: Option<AuthorityEpoch>,
     pub attempt_token: Option<AttemptTokenClaims>,
+    pub causation_id: Option<String>,
+    pub correlation_id: Option<String>,
     pub method: Method,
 }
 
@@ -129,13 +140,14 @@ pub enum Method {
     /// one active attempt per unit), upserts the single lease row to the
     /// new holder, and mints the attempt token (§3.1, §3.2).
     UnitDispatch { unit_id: String, holder_id: String },
-    /// Holder: the fence-exercising state callback (obligation 3's shape).
-    ProgressReport { unit_id: String, note: String },
+    /// Holder: a redacted fence observation. Free-form progress belongs to
+    /// the ephemeral progress plane and never enters the semantic journal.
+    ProgressReport { unit_id: String },
     /// Authority: §3.4's second invalidation axis — kills outstanding
     /// tokens without minting an attempt, lease untouched (row A4).
     StampBump { unit_id: String },
-    /// Holder-reauth: re-arm after a stamp bump. No journal event and no
-    /// version bump — minting a token is not a domain transition.
+    /// Reserved holder-reauth method. It fails closed until the policy and
+    /// approval gate can issue a reauthorization decision.
     TokenReissue { unit_id: String },
     /// Holder: §4.2 step 1 — durably record the intent before any dispatch.
     /// Idempotent on the derived operation key: re-preparing an existing key

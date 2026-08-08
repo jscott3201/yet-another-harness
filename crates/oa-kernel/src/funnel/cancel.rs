@@ -606,24 +606,50 @@ impl Funnel {
 
         // §5.3: a delivered member with dispatch evidence and no
         // authoritative outcome parks at `reconciling`, terminal unset.
-        let park_effect = cpre.effect_row.as_ref().and_then(|row| {
-            let mut intent: EffectIntent = serde_json::from_str(&row.record).ok()?;
-            let has_dispatch_evidence = matches!(
-                intent.state,
-                EffectState::Dispatching | EffectState::Dispatched | EffectState::Observing
-            );
-            if !has_dispatch_evidence || intent.terminal.is_some() {
-                return None;
-            }
-            intent.state = EffectState::Reconciling;
-            intent.version = row.version + 1;
-            let record = serde_json::to_string(&intent).expect("intent serializes");
-            Some(EffectParkPlan {
-                effect_node: row.node,
-                effect_version: intent.version,
-                effect_record: record,
+        let park_effect = cpre
+            .effect_row
+            .as_ref()
+            .map(|row| {
+                let mut intent: EffectIntent =
+                    serde_json::from_str(&row.record).map_err(|error| {
+                        (
+                            ErrorKind::Internal,
+                            format!("effect record unreadable: {error}"),
+                            false,
+                        )
+                    })?;
+                let has_dispatch_evidence = matches!(
+                    intent.state,
+                    EffectState::Dispatching | EffectState::Dispatched | EffectState::Observing
+                );
+                if !has_dispatch_evidence || intent.terminal.is_some() {
+                    return Ok(None);
+                }
+                intent.state = EffectState::Reconciling;
+                intent.version = row.version.checked_add(1).ok_or_else(|| {
+                    (
+                        ErrorKind::ResourceExhausted,
+                        "effect version space exhausted".into(),
+                        true,
+                    )
+                })?;
+                let record = serde_json::to_string(&intent).expect("intent serializes");
+                Ok(Some(EffectParkPlan {
+                    effect_node: row.node,
+                    effect_version: intent.version,
+                    effect_record: record,
+                }))
             })
-        });
+            .transpose()?
+            .flatten();
+
+        let request_version_after = request.version.checked_add(1).ok_or_else(|| {
+            (
+                ErrorKind::ResourceExhausted,
+                "cancel request version space exhausted".into(),
+                true,
+            )
+        })?;
 
         let delivery_record = {
             let request_uuid = Uuid7::try_from(cancel_request_id.clone()).map_err(|_| {
@@ -648,7 +674,7 @@ impl Funnel {
             delivery_key: format!("{cancel_request_id}|{member_id}"),
             request_id: cancel_request_id.clone(),
             request_node: request.node,
-            request_version_after: request.version + 1,
+            request_version_after,
             request_status_after: status_wire.clone(),
             request_record_after: serde_json::to_string(&updated).expect("record serializes"),
             member_id: member_id.clone(),
@@ -662,7 +688,7 @@ impl Funnel {
             events: vec![EventDraft {
                 aggregate_kind: "cancel_request",
                 aggregate_id: cancel_request_id.clone(),
-                aggregate_version: request.version + 1,
+                aggregate_version: request_version_after,
                 event_kind: "cancel_request.delivered",
                 payload: json!({
                     "member_id": member_id,

@@ -1,0 +1,567 @@
+{
+  "$defs": {
+    "Command": {
+      "oneOf": [
+        {
+          "properties": {
+            "command_type": {
+              "const": "run.open",
+              "type": "string"
+            },
+            "payload": {
+              "$ref": "#/$defs/RunOpenPayload"
+            }
+          },
+          "required": [
+            "command_type",
+            "payload"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "command_type": {
+              "const": "run.close",
+              "type": "string"
+            },
+            "payload": {
+              "$ref": "#/$defs/RunClosePayload"
+            }
+          },
+          "required": [
+            "command_type",
+            "payload"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "command_type": {
+              "const": "work_item.create",
+              "type": "string"
+            },
+            "payload": {
+              "$ref": "#/$defs/WorkItemCreatePayload"
+            }
+          },
+          "required": [
+            "command_type",
+            "payload"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "command_type": {
+              "const": "unit.admit",
+              "type": "string"
+            },
+            "payload": {
+              "$ref": "#/$defs/UnitAdmitPayload"
+            }
+          },
+          "required": [
+            "command_type",
+            "payload"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "command_type": {
+              "const": "unit.dispatch",
+              "type": "string"
+            },
+            "payload": {
+              "$ref": "#/$defs/UnitDispatchPayload"
+            }
+          },
+          "required": [
+            "command_type",
+            "payload"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "command_type": {
+              "const": "unit.progress_report",
+              "type": "string"
+            },
+            "payload": {
+              "$ref": "#/$defs/ProgressReportPayload"
+            }
+          },
+          "required": [
+            "command_type",
+            "payload"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "command_type": {
+              "const": "unit.stamp_bump",
+              "type": "string"
+            },
+            "payload": {
+              "$ref": "#/$defs/UnitPayload"
+            }
+          },
+          "required": [
+            "command_type",
+            "payload"
+          ],
+          "type": "object"
+        }
+      ],
+      "properties": {
+        "attempt_token": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "authority_epoch": {
+          "maxLength": 20,
+          "pattern": "^(0|[1-9][0-9]{0,18}|1[0-7][0-9]{18}|18[0-3][0-9]{17}|184[0-3][0-9]{16}|1844[0-5][0-9]{15}|18446[0-6][0-9]{14}|184467[0-3][0-9]{13}|1844674[0-3][0-9]{12}|184467440[0-6][0-9]{10}|1844674407[0-2][0-9]{9}|18446744073[0-6][0-9]{8}|1844674407370[0-8][0-9]{6}|18446744073709[0-4][0-9]{5}|184467440737095[0-4][0-9]{4}|18446744073709550[0-9]{3}|18446744073709551[0-5][0-9]{2}|1844674407370955160[0-9]|1844674407370955161[0-5])$",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "causation_id": {
+          "maxLength": 64,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9_.:-]+$",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "command_id": {
+          "maxLength": 64,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9_.:-]+$",
+          "type": "string"
+        },
+        "correlation_id": {
+          "maxLength": 64,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9_.:-]+$",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "deadline": {
+          "format": "date-time",
+          "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{3}Z$",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "expected_versions": {
+          "items": {
+            "$ref": "#/$defs/ExpectedVersion"
+          },
+          "maxItems": 8,
+          "type": "array"
+        },
+        "payload_schema_version": {
+          "const": 1,
+          "type": "integer"
+        },
+        "protocol_version": {
+          "const": 1,
+          "type": "integer"
+        },
+        "request_digest": {
+          "maxLength": 71,
+          "minLength": 71,
+          "pattern": "^blake3:[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "scope": {
+          "$ref": "#/$defs/Scope"
+        },
+        "target": {
+          "$ref": "#/$defs/Target"
+        },
+        "trace_context": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "protocol_version",
+        "command_id",
+        "scope",
+        "payload_schema_version",
+        "target",
+        "expected_versions",
+        "request_digest"
+      ],
+      "type": "object"
+    },
+    "ExpectedVersion": {
+      "properties": {
+        "aggregate_id": {
+          "maxLength": 64,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9_.:-]+$",
+          "type": "string"
+        },
+        "aggregate_kind": {
+          "type": "string"
+        },
+        "version": {
+          "maxLength": 20,
+          "pattern": "^(0|[1-9][0-9]{0,18}|1[0-7][0-9]{18}|18[0-3][0-9]{17}|184[0-3][0-9]{16}|1844[0-5][0-9]{15}|18446[0-6][0-9]{14}|184467[0-3][0-9]{13}|1844674[0-3][0-9]{12}|184467440[0-6][0-9]{10}|1844674407[0-2][0-9]{9}|18446744073[0-6][0-9]{8}|1844674407370[0-8][0-9]{6}|18446744073709[0-4][0-9]{5}|184467440737095[0-4][0-9]{4}|18446744073709550[0-9]{3}|18446744073709551[0-5][0-9]{2}|1844674407370955160[0-9]|1844674407370955161[0-5])$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "aggregate_kind",
+        "aggregate_id",
+        "version"
+      ],
+      "type": "object"
+    },
+    "ProgressReportPayload": {
+      "additionalProperties": false,
+      "properties": {
+        "unit_id": {
+          "maxLength": 64,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9_.:-]+$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "unit_id"
+      ],
+      "type": "object"
+    },
+    "RunCloseOutcome": {
+      "enum": [
+        "closed_success",
+        "closed_failure",
+        "cancelled"
+      ],
+      "type": "string"
+    },
+    "RunClosePayload": {
+      "additionalProperties": true,
+      "properties": {
+        "outcome": {
+          "$ref": "#/$defs/RunCloseOutcome"
+        },
+        "run_id": {
+          "maxLength": 64,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9_.:-]+$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "run_id",
+        "outcome"
+      ],
+      "type": "object"
+    },
+    "RunOpenPayload": {
+      "additionalProperties": true,
+      "properties": {
+        "goal_work_item_id": {
+          "maxLength": 64,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9_.:-]+$",
+          "type": "string"
+        },
+        "run_id": {
+          "maxLength": 64,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9_.:-]+$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "run_id",
+        "goal_work_item_id"
+      ],
+      "type": "object"
+    },
+    "Scope": {
+      "properties": {
+        "scope_id": {
+          "maxLength": 64,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9_.:-]+$",
+          "type": "string"
+        },
+        "scope_kind": {
+          "$ref": "#/$defs/ScopeKind"
+        }
+      },
+      "required": [
+        "scope_kind",
+        "scope_id"
+      ],
+      "type": "object"
+    },
+    "ScopeKind": {
+      "enum": [
+        "global",
+        "project",
+        "run",
+        "unit"
+      ],
+      "type": "string"
+    },
+    "Target": {
+      "properties": {
+        "aggregate_id": {
+          "maxLength": 64,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9_.:-]+$",
+          "type": "string"
+        },
+        "aggregate_kind": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "aggregate_kind",
+        "aggregate_id"
+      ],
+      "type": "object"
+    },
+    "UnitAdmitPayload": {
+      "additionalProperties": true,
+      "properties": {
+        "run_id": {
+          "maxLength": 64,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9_.:-]+$",
+          "type": "string"
+        },
+        "unit_id": {
+          "maxLength": 64,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9_.:-]+$",
+          "type": "string"
+        },
+        "work_item_id": {
+          "maxLength": 64,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9_.:-]+$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "unit_id",
+        "work_item_id",
+        "run_id"
+      ],
+      "type": "object"
+    },
+    "UnitDispatchPayload": {
+      "additionalProperties": true,
+      "properties": {
+        "holder_id": {
+          "maxLength": 64,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9_.:-]+$",
+          "type": "string"
+        },
+        "unit_id": {
+          "maxLength": 64,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9_.:-]+$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "unit_id",
+        "holder_id"
+      ],
+      "type": "object"
+    },
+    "UnitPayload": {
+      "additionalProperties": true,
+      "properties": {
+        "unit_id": {
+          "maxLength": 64,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9_.:-]+$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "unit_id"
+      ],
+      "type": "object"
+    },
+    "WorkItemCreatePayload": {
+      "additionalProperties": true,
+      "properties": {
+        "acceptance_contract_digest": {
+          "maxLength": 71,
+          "minLength": 71,
+          "pattern": "^blake3:[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "declared_write_scope": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "work_item_id": {
+          "maxLength": 64,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9_.:-]+$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "work_item_id",
+        "acceptance_contract_digest",
+        "declared_write_scope"
+      ],
+      "type": "object"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "oneOf": [
+    {
+      "properties": {
+        "kind": {
+          "const": "command",
+          "type": "string"
+        },
+        "message": {
+          "$ref": "#/$defs/Command"
+        }
+      },
+      "required": [
+        "kind",
+        "message"
+      ],
+      "type": "object"
+    },
+    {
+      "properties": {
+        "kind": {
+          "const": "resume",
+          "type": "string"
+        },
+        "message": {
+          "properties": {
+            "after_cursor": {
+              "maxLength": 20,
+              "pattern": "^(0|[1-9][0-9]{0,18}|1[0-7][0-9]{18}|18[0-3][0-9]{17}|184[0-3][0-9]{16}|1844[0-5][0-9]{15}|18446[0-6][0-9]{14}|184467[0-3][0-9]{13}|1844674[0-3][0-9]{12}|184467440[0-6][0-9]{10}|1844674407[0-2][0-9]{9}|18446744073[0-6][0-9]{8}|1844674407370[0-8][0-9]{6}|18446744073709[0-4][0-9]{5}|184467440737095[0-4][0-9]{4}|18446744073709550[0-9]{3}|18446744073709551[0-5][0-9]{2}|1844674407370955160[0-9]|1844674407370955161[0-5])$",
+              "type": "string"
+            },
+            "project_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "project_id",
+            "after_cursor"
+          ],
+          "type": "object"
+        }
+      },
+      "required": [
+        "kind",
+        "message"
+      ],
+      "type": "object"
+    },
+    {
+      "properties": {
+        "kind": {
+          "const": "subscribe",
+          "type": "string"
+        },
+        "message": {
+          "properties": {
+            "after_cursor": {
+              "maxLength": 20,
+              "pattern": "^(0|[1-9][0-9]{0,18}|1[0-7][0-9]{18}|18[0-3][0-9]{17}|184[0-3][0-9]{16}|1844[0-5][0-9]{15}|18446[0-6][0-9]{14}|184467[0-3][0-9]{13}|1844674[0-3][0-9]{12}|184467440[0-6][0-9]{10}|1844674407[0-2][0-9]{9}|18446744073[0-6][0-9]{8}|1844674407370[0-8][0-9]{6}|18446744073709[0-4][0-9]{5}|184467440737095[0-4][0-9]{4}|18446744073709550[0-9]{3}|18446744073709551[0-5][0-9]{2}|1844674407370955160[0-9]|1844674407370955161[0-5])$",
+              "type": "string"
+            },
+            "project_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "project_id",
+            "after_cursor"
+          ],
+          "type": "object"
+        }
+      },
+      "required": [
+        "kind",
+        "message"
+      ],
+      "type": "object"
+    },
+    {
+      "properties": {
+        "kind": {
+          "const": "subscription_poll",
+          "type": "string"
+        },
+        "message": {
+          "properties": {
+            "subscription_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "subscription_id"
+          ],
+          "type": "object"
+        }
+      },
+      "required": [
+        "kind",
+        "message"
+      ],
+      "type": "object"
+    },
+    {
+      "properties": {
+        "kind": {
+          "const": "subscription_close",
+          "type": "string"
+        },
+        "message": {
+          "properties": {
+            "subscription_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "subscription_id"
+          ],
+          "type": "object"
+        }
+      },
+      "required": [
+        "kind",
+        "message"
+      ],
+      "type": "object"
+    }
+  ],
+  "title": "ClientMessage"
+}

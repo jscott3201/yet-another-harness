@@ -3,12 +3,24 @@
 
 use super::*;
 
+type StoredReceipt = (
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+);
+
 impl Funnel {
-    pub(super) fn replay_stored(
-        cmd: &Command,
-        stored: Option<(Option<String>, Option<String>, Option<String>)>,
-    ) -> Submission {
-        let Some((Some(digest), Some(status), Some(result))) = stored else {
+    pub(super) fn replay_stored(cmd: &Command, stored: Option<StoredReceipt>) -> Submission {
+        let Some((
+            Some(digest),
+            Some(principal_kind),
+            Some(principal_id),
+            Some(status),
+            Some(result),
+        )) = stored
+        else {
             return Submission::Rejected {
                 kind: ErrorKind::Internal,
                 detail: "receipt row unreadable".into(),
@@ -22,8 +34,23 @@ impl Funnel {
                 replayed: false,
             };
         }
-        let result: serde_json::Value =
-            serde_json::from_str(&result).unwrap_or(serde_json::Value::Null);
+        if principal_kind != cmd.principal_kind.wire() || principal_id != cmd.principal_id {
+            return Submission::Rejected {
+                kind: ErrorKind::Unauthorized,
+                detail: "receipt belongs to a different principal".into(),
+                replayed: false,
+            };
+        }
+        let result: serde_json::Value = match serde_json::from_str(&result) {
+            Ok(result) => result,
+            Err(error) => {
+                return Submission::Rejected {
+                    kind: ErrorKind::Internal,
+                    detail: format!("receipt result is invalid JSON: {error}"),
+                    replayed: false,
+                };
+            }
+        };
         if status == "completed" {
             Submission::Replayed { result }
         } else {
@@ -56,5 +83,45 @@ pub fn token_from_result(result: &serde_json::Value) -> Option<AttemptTokenClaim
         stamp: Stamp(result.get("stamp")?.as_u64()?),
         authority_epoch: AuthorityEpoch(result.get("authority_epoch")?.as_u64()?),
         holder_id: result.get("holder_id")?.as_str()?.to_owned(),
+        nonce: result.get("token_nonce")?.as_str()?.to_owned(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn malformed_stored_result_fails_closed() {
+        let command = Command {
+            command_id: "command-1".into(),
+            scope_kind: ScopeKind::Project,
+            scope_id: "project-1".into(),
+            request_digest: Digest::of_bytes(b"request"),
+            expected_version: None,
+            principal_kind: PrincipalKind::Daemon,
+            principal_id: "daemon-local".into(),
+            authority_epoch: None,
+            attempt_token: None,
+            causation_id: None,
+            correlation_id: None,
+            method: Method::ProgressReport {
+                unit_id: "unit-1".into(),
+            },
+        };
+        let stored = Some((
+            Some(command.request_digest.to_string()),
+            Some("daemon".into()),
+            Some("daemon-local".into()),
+            Some("completed".into()),
+            Some("{".into()),
+        ));
+        assert!(matches!(
+            Funnel::replay_stored(&command, stored),
+            Submission::Rejected {
+                kind: ErrorKind::Internal,
+                ..
+            }
+        ));
+    }
 }
