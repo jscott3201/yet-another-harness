@@ -4,6 +4,16 @@ use super::*;
 use crate::ids::Digest;
 
 pub(crate) fn event_pairs(event_id: &str, cursor: u64, agg: &str, ver: u64) -> PropertyMap {
+    let event_kind = if ver == 1 {
+        "unit.admitted"
+    } else {
+        "unit.stamp_bumped"
+    };
+    let payload = if ver == 1 {
+        r#"{"work_item_id":"w1","run_id":"r1"}"#.to_owned()
+    } else {
+        serde_json::json!({ "stamp": ver - 1 }).to_string()
+    };
     PropertyMap::from_pairs([
         (db("event_id"), Value::String(db(event_id))),
         (db("cursor"), Value::Uint(cursor)),
@@ -17,8 +27,8 @@ pub(crate) fn event_pairs(event_id: &str, cursor: u64, agg: &str, ver: u64) -> P
         (db("aggregate_id"), Value::String(db(agg))),
         (db("aggregate_version"), Value::Uint(ver)),
         (db("ordinal"), Value::Uint(0)),
-        (db("event_kind"), Value::String(db("test.evt"))),
-        (db("payload"), Value::String(db("{}"))),
+        (db("event_kind"), Value::String(db(event_kind))),
+        (db("payload"), Value::String(db(&payload))),
         (
             db("receipt_key"),
             Value::String(db(&format!("unit/{agg}/{event_id}"))),
@@ -34,6 +44,41 @@ pub(crate) fn event_pairs(event_id: &str, cursor: u64, agg: &str, ver: u64) -> P
 pub(crate) fn append_event(store: &Store, event_id: &str, agg: &str, ver: u64) -> u64 {
     // Allocation under the open write txn — the allocate_cursor
     // ordering contract.
+    if store.unit_node(agg).is_none() {
+        let mut txn = store.shared.begin_write();
+        let node = txn
+            .mutator()
+            .create_node(
+                LabelSet::single(db("Unit")),
+                PropertyMap::from_pairs([
+                    (db("unit_id"), Value::String(db(agg))),
+                    (db("version"), Value::Uint(ver)),
+                    (db("current_attempt_epoch"), Value::Uint(0)),
+                    (db("stamp"), Value::Uint(0)),
+                    (db("status"), Value::String(db("admitted"))),
+                    (db("work_item_id"), Value::String(db("w1"))),
+                    (db("run_id"), Value::String(db("r1"))),
+                    (db("record"), Value::String(db("{}"))),
+                ])
+                .unwrap(),
+            )
+            .unwrap();
+        txn.commit().unwrap();
+        store.book_insert(BookKind::Unit, agg.to_owned(), node);
+    } else if let Some(node) = store.unit_node(agg) {
+        let mut txn = store.shared.begin_write();
+        txn.mutator()
+            .update_node(
+                node,
+                no_labels(),
+                props_set([
+                    (db("version"), Value::Uint(ver)),
+                    (db("stamp"), Value::Uint(ver - 1)),
+                ]),
+            )
+            .unwrap();
+        txn.commit().unwrap();
+    }
     let mut txn = store.shared.begin_write();
     let cursor = store.allocate_cursor().unwrap();
     let (event_node, receipt_node) = {
@@ -51,13 +96,34 @@ pub(crate) fn append_event(store: &Store, event_id: &str, agg: &str, ver: u64) -
                 PropertyMap::from_pairs([
                     (db("receipt_key"), Value::String(db(&receipt_key))),
                     (
+                        db("command_type"),
+                        Value::String(db(if ver == 1 {
+                            "unit.admit"
+                        } else {
+                            "unit.stamp_bump"
+                        })),
+                    ),
+                    (db("receipt_version"), Value::Uint(1)),
+                    (
                         db("request_digest"),
                         Value::String(db(Digest::of_bytes(event_id.as_bytes()).as_str())),
                     ),
                     (db("principal_kind"), Value::String(db("daemon"))),
                     (db("principal_id"), Value::String(db("test"))),
                     (db("status"), Value::String(db("completed"))),
-                    (db("result"), Value::String(db("{}"))),
+                    (
+                        db("result"),
+                        Value::String(db(&if ver == 1 {
+                            serde_json::json!({ "unit_id": agg, "version": ver }).to_string()
+                        } else {
+                            serde_json::json!({
+                                "unit_id": agg,
+                                "version": ver,
+                                "stamp": ver - 1,
+                            })
+                            .to_string()
+                        })),
+                    ),
                     (db("first_cursor"), Value::Uint(cursor)),
                     (db("last_cursor"), Value::Uint(cursor)),
                 ])
@@ -219,6 +285,23 @@ fn healthy_read() -> FakeFenceRead {
             status: "active".into(),
         }),
     }
+}
+
+#[test]
+fn missing_lease_with_present_unit_is_not_found() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = Store::create(directory.path(), "inst-1").unwrap();
+    let read = FakeFenceRead {
+        unit: Some(UnitFence {
+            attempt_epoch: AttemptEpoch(3),
+            stamp: Stamp(1),
+        }),
+        lease: None,
+    };
+    assert!(matches!(
+        store.check_holder_fence(&read, &claims(&store)),
+        Err(StoreRejection::NotFound { .. })
+    ));
 }
 
 #[test]

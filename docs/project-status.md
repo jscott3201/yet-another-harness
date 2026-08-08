@@ -29,10 +29,12 @@ an installable agent runtime.
   or cancellation commands yet.
 - Adapter 1 foundations: forced JSON round trips, canonical request digests,
   duplicate-name and unsafe-integer rejection, generated JSON Schema and
-  TypeScript, principal-bound receipt projection, opaque holder tokens, durable
-  cursor resume bounded by event count and response bytes, project binding,
-  retained-cursor expiry, strict durable event and receipt reads, and R33
-  retention advertisement.
+  TypeScript, principal-bound receipt projection, scoped read-only receipt
+  lookup, opaque holder tokens, durable cursor resume bounded by event count and
+  response bytes, project binding, retained-cursor expiry, strict durable event
+  and receipt reads, and R33 retention advertisement. Receipt lookup covers
+  physically retained public-command rows and never returns holder credentials;
+  internal effect and cancellation receipts are validated but not exposed.
 - Adapter 1 in-memory subscriptions over durable events: the normative
   1024-event queue, typed `slow_consumer` closure, a 16 MiB aggregate queue
   budget, a 64-subscription project cap, last-delivered cursor, and bounded
@@ -53,7 +55,7 @@ an installable agent runtime.
 - Artifact storage and oversized result/event `ArtifactRef` substitution.
 - Policy- and approval-backed token reauthorization after a stamp bump.
 - Durable server-to-client approval requests.
-- Protocol views and receipt lookup queries.
+- Protocol views and logical receipt expiry under the future retention floor.
 - Retention pruning and verified retention checkpoints.
 - Replay verifier over all implemented aggregates.
 - UDS, Windows named-pipe, HTTP/SSE, remote, or QUIC adapters.

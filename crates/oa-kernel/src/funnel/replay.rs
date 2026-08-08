@@ -5,6 +5,8 @@ use super::*;
 
 type StoredReceipt = (
     Option<String>,
+    Option<u64>,
+    Option<String>,
     Option<String>,
     Option<String>,
     Option<String>,
@@ -12,8 +14,14 @@ type StoredReceipt = (
 );
 
 impl Funnel {
-    pub(super) fn replay_stored(cmd: &Command, stored: Option<StoredReceipt>) -> Submission {
+    pub(super) fn replay_stored(
+        cmd: &Command,
+        command_type: &str,
+        stored: Option<StoredReceipt>,
+    ) -> Submission {
         let Some((
+            Some(stored_command_type),
+            Some(receipt_version),
             Some(digest),
             Some(principal_kind),
             Some(principal_id),
@@ -31,6 +39,20 @@ impl Funnel {
             return Submission::Rejected {
                 kind: ErrorKind::IdempotencyConflict,
                 detail: "same command_id, different request digest".into(),
+                replayed: false,
+            };
+        }
+        if stored_command_type != command_type {
+            return Submission::Rejected {
+                kind: ErrorKind::IdempotencyConflict,
+                detail: "same command_id, different command type".into(),
+                replayed: false,
+            };
+        }
+        if receipt_version != u64::from(crate::protocol::RECEIPT_VERSION.get()) {
+            return Submission::Rejected {
+                kind: ErrorKind::Internal,
+                detail: "stored receipt has an unsupported version".into(),
                 replayed: false,
             };
         }
@@ -110,6 +132,8 @@ mod tests {
             },
         };
         let stored = Some((
+            Some(command.method.wire().into()),
+            Some(u64::from(crate::protocol::RECEIPT_VERSION.get())),
             Some(command.request_digest.to_string()),
             Some("daemon".into()),
             Some("daemon-local".into()),
@@ -117,7 +141,7 @@ mod tests {
             Some("{".into()),
         ));
         assert!(matches!(
-            Funnel::replay_stored(&command, stored),
+            Funnel::replay_stored(&command, command.method.wire(), stored),
             Submission::Rejected {
                 kind: ErrorKind::Internal,
                 ..

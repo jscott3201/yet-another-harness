@@ -13,7 +13,7 @@
 //! read here would let a run close success over an effect that had just
 //! been dispatched.
 
-use crate::cancel::{CancelKind, CancelScope, DeliveryOutcome};
+use crate::cancel::CancelKind;
 use crate::effect::{EffectState, EffectTerminal};
 use crate::store::{Store, db, value_str};
 use selene_graph::SeleneGraph;
@@ -70,25 +70,6 @@ pub(super) fn success_blockers(graph: &SeleneGraph, store: &Store, run_id: &str)
 /// request status other than `settled` means at least one member is not
 /// discharged.
 fn cancel_blocks(graph: &SeleneGraph, store: &Store, run_id: &str) -> Vec<Blocker> {
-    // Delivered member rows per request, from the SAME working graph the
-    // close is validated against (no snapshot lag — the run and the
-    // delivery advance in one command stream behind the funnel gate).
-    let delivered_by_request: std::collections::HashMap<String, Vec<(String, bool)>> = store
-        .cancel_delivery_entries()
-        .into_iter()
-        .filter_map(|(_, node)| {
-            let props = graph.node_properties(node)?;
-            let request_id = props.get(&db("cancel_request_id")).and_then(value_str)?;
-            let member_id = props.get(&db("member_id")).and_then(value_str)?;
-            let outcome = props.get(&db("outcome")).and_then(value_str)?;
-            let discharged = outcome_from_wire(&outcome).is_some_and(|o| o.is_discharged());
-            Some((request_id, (member_id, discharged)))
-        })
-        .fold(std::collections::HashMap::new(), |mut acc, (req, row)| {
-            acc.entry(req).or_default().push(row);
-            acc
-        });
-
     let mut blockers = Vec::new();
     for node in store.cancel_request_nodes() {
         let Some(props) = graph.node_properties(node) else {
@@ -101,9 +82,6 @@ fn cancel_blocks(graph: &SeleneGraph, store: &Store, run_id: &str) -> Vec<Blocke
             continue;
         };
         let Some(root_id) = props.get(&db("root_id")).and_then(value_str) else {
-            continue;
-        };
-        let Some(scope_json) = props.get(&db("scope")).and_then(value_str) else {
             continue;
         };
         let Some(status) = props.get(&db("status")).and_then(value_str) else {
@@ -121,19 +99,8 @@ fn cancel_blocks(graph: &SeleneGraph, store: &Store, run_id: &str) -> Vec<Blocke
         if my_run != run_id {
             continue;
         }
-        let Ok(scope) = serde_json::from_str::<CancelScope>(&scope_json) else {
-            continue;
-        };
-        let Some(missing) = scope.members().iter().find(|m| {
-            !delivered_by_request.get(&request_id).is_some_and(|v| {
-                v.iter()
-                    .any(|(member, discharged)| member == &m.member_id && *discharged)
-            })
-        }) else {
-            continue;
-        };
         blockers.push(Blocker {
-            member: format!("cancel_request {request_id} member {}", missing.member_id),
+            member: format!("cancel_request {request_id} root {root_kind}:{root_id}"),
             reason: format!(
                 "committed cancellation of {root_kind}:{root_id} not settled (status {status})"
             ),
@@ -160,7 +127,7 @@ fn root_run(
                 .and_then(|p| p.get(&db("run_id")).and_then(value_str))
         }
         CancelKind::Attempt => {
-            let node = store.attempt_id_node(graph, root_id)?;
+            let node = store.attempt_id_node(root_id)?;
             let unit = graph
                 .node_properties(node)
                 .and_then(|p| p.get(&db("unit_id")).and_then(value_str))?;
@@ -170,7 +137,7 @@ fn root_run(
                 .and_then(|p| p.get(&db("run_id")).and_then(value_str))
         }
         CancelKind::EffectIntent => {
-            let node = store.effect_intent_id_node(graph, root_id)?;
+            let node = store.effect_intent_id_node(root_id)?;
             let unit = graph
                 .node_properties(node)
                 .and_then(|p| p.get(&db("unit_id")).and_then(value_str))?;
@@ -188,16 +155,6 @@ fn kind_from_wire(wire: &str) -> Option<CancelKind> {
         "execution_unit" => Some(CancelKind::ExecutionUnit),
         "attempt" => Some(CancelKind::Attempt),
         "effect_intent" => Some(CancelKind::EffectIntent),
-        _ => None,
-    }
-}
-
-fn outcome_from_wire(wire: &str) -> Option<DeliveryOutcome> {
-    match wire {
-        "observed_stopped" => Some(DeliveryOutcome::ObservedStopped),
-        "unresponsive" => Some(DeliveryOutcome::Unresponsive),
-        "already_terminal" => Some(DeliveryOutcome::AlreadyTerminal),
-        "detached_declined" => Some(DeliveryOutcome::DetachedDeclined),
         _ => None,
     }
 }

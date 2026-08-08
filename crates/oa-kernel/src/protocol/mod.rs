@@ -5,6 +5,7 @@
 //! direct Rust calls are not a conforming Adapter 1 path.
 
 mod adapter;
+pub(crate) mod event;
 pub mod generate;
 mod json;
 mod translate;

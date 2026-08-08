@@ -58,6 +58,7 @@ pub(super) enum Plan {
         operation_key: String,
         effect_intent_id: String,
         unit_id: String,
+        attempt_epoch: u64,
         record: String,
     },
     UpdateEffect {
@@ -87,6 +88,7 @@ pub(super) struct CancelRequestPlan {
     pub root_id: String,
     pub policy: String,
     pub reason: String,
+    pub status: String,
     /// The frozen scope, serialized once so the row and the journal event
     /// carry the same bytes.
     pub scope: String,
@@ -110,6 +112,7 @@ pub(super) struct CancelDeliveryPlan {
     pub request_record_after: String,
     pub member_id: String,
     pub member_kind: String,
+    pub order_index: u32,
     pub outcome: String,
     /// The immutable `CancelDelivery` row record.
     pub delivery_record: String,

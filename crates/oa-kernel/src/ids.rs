@@ -148,6 +148,14 @@ pub struct Stamp(pub u64);
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct AuthorityEpoch(pub u64);
 
+pub(crate) fn valid_wire_identifier(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"_.:-".contains(&byte))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

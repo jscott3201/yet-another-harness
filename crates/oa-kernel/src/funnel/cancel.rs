@@ -13,11 +13,12 @@
 //! [`super::cancel_rules`]; this file is the transaction shape, the
 //! own-tree membership walk (finding 2), and the authorization order.
 
+use super::cancel_resolution::{MemberLink, adoption_lineage, member_link, root_is_terminal};
 use super::plan::{CancelDeliveryPlan, CancelRequestPlan, EffectParkPlan, EventDraft, Plan};
 use super::*;
 use crate::cancel::{
     CancelDelivery, CancelKind, CancelPolicy, CancelReason, CancelRequest, CancelScope,
-    CancelStatus, DeliveryOutcome, MemberInput, ScopeError,
+    CancelStatus, DeliveryOutcome, ScopeError,
 };
 use crate::effect::{EffectIntent, EffectState};
 use crate::error::ErrorKind;
@@ -26,6 +27,7 @@ use crate::store::{BookKind, db, no_labels, props_set, value_str, value_u64};
 use selene_core::{LabelSet, NodeId, PropertyMap, Value};
 use selene_graph::{Mutator, SeleneGraph};
 use serde_json::json;
+use std::collections::HashMap;
 
 /// §5 data the funnel pre-reads in the same transaction as every other
 /// fence input: the rule-4 admission gate for a child this command would
@@ -36,30 +38,22 @@ pub(super) struct CancelPreRead {
     /// §5.2 rule 4: applicable committed ancestor cancellations.
     pub(super) admission_blockers: Vec<super::cancel_rules::Blocker>,
     /// Own-tree resolution for each proposed scope member (`cancel.request`).
-    pub(super) member_links: Vec<MemberLink>,
+    pub(super) member_links: HashMap<String, MemberLink>,
     /// The committed request a delivery names, when it resolves
     /// (`cancel.record_delivery`).
     pub(super) request: Option<RequestData>,
-    /// Existing delivery rows for the named request.
+    /// Existing delivery rows, loaded only when the final member decides
+    /// whether the complete scope settles or remains observed-partial.
     pub(super) deliveries: Vec<super::cancel_rules::DeliverySummary>,
+    pub(super) delivery_exists: bool,
     /// The effect this delivery targets, when the member is an EffectIntent.
     pub(super) effect_row: Option<EffectRow>,
     /// The owning (unit_id, attempt_epoch) of an Attempt root —
     /// `cancel.request` only; the root's own row anchors the member check.
     pub(super) root_attempt: Option<(String, u64)>,
-}
-
-/// How one proposed member resolves UP its own-root chain. Resolution to an
-/// id is not membership (finding 2): an id may resolve while the row lives
-/// under a different run, and the frozen scope must not claim it.
-pub(super) struct MemberLink {
-    pub member_id: String,
-    /// The member's parent unit id (Attempt/EffectIntent members).
-    pub parent_unit: Option<String>,
-    /// The member's topmost run id (every kind resolves up to one).
-    pub run_id: Option<String>,
-    /// The effect member's attempt epoch (an Attempt root compares it).
-    pub attempt_epoch: Option<u64>,
+    /// `Some` only when the cancellation root resolves; the value records
+    /// whether an empty scope is the lawful no-op for a terminal root.
+    pub(super) root_terminal: Option<bool>,
 }
 
 /// The committed request a delivery names, with its frozen scope and the
@@ -72,138 +66,6 @@ pub(super) struct RequestData {
 
 fn prop_str(p: &PropertyMap, name: &str) -> Option<String> {
     p.get(&db(name)).and_then(value_str)
-}
-
-fn unit_run_id(read: &SeleneGraph, store: &Store, unit_id: &str) -> Option<String> {
-    let node = store.unit_node(unit_id)?;
-    let props = read.node_properties(node)?;
-    prop_str(props, "run_id")
-}
-
-/// `attempt_id` -> `(unit_id, run_id)`: the attempt row addresses its unit,
-/// the unit row addresses its run.
-fn attempt_to_unit(
-    read: &SeleneGraph,
-    store: &Store,
-    attempt_id: &str,
-) -> Option<(String, String)> {
-    let node = store.attempt_id_node(read, attempt_id)?;
-    let props = read.node_properties(node)?;
-    let unit_id = prop_str(props, "unit_id")?;
-    let run_id = unit_run_id(read, store, &unit_id)?;
-    Some((unit_id, run_id))
-}
-
-/// `effect_intent_id` -> `(unit_id, run_id, attempt_epoch)`. The epoch rides
-/// the serialized intent record, so an Attempt root can compare it exactly.
-fn effect_to_unit(
-    read: &SeleneGraph,
-    store: &Store,
-    effect_intent_id: &str,
-) -> Option<(String, String, Option<u64>)> {
-    let node = store.effect_intent_id_node(read, effect_intent_id)?;
-    let props = read.node_properties(node)?;
-    let unit_id = prop_str(props, "unit_id")?;
-    let run_id = unit_run_id(read, store, &unit_id)?;
-    let attempt_epoch = prop_str(props, "record")
-        .and_then(|r| serde_json::from_str::<EffectIntent>(&r).ok())
-        .map(|i| i.attempt_epoch.0);
-    Some((unit_id, run_id, attempt_epoch))
-}
-
-/// Resolve one proposed member up its own-root chain.
-fn member_link(read: &SeleneGraph, store: &Store, m: &MemberInput) -> MemberLink {
-    let (parent_unit, run_id, attempt_epoch) = match m.member_kind {
-        CancelKind::Run => (None, Some(m.member_id.clone()), None),
-        CancelKind::ExecutionUnit => (None, unit_run_id(read, store, &m.member_id), None),
-        CancelKind::Attempt => {
-            let (unit, run) = attempt_to_unit(read, store, &m.member_id).unwrap_or_default();
-            (Some(unit), Some(run), None)
-        }
-        CancelKind::EffectIntent => {
-            let (unit, run, epoch) = effect_to_unit(read, store, &m.member_id).unwrap_or_default();
-            (Some(unit), Some(run), epoch)
-        }
-    };
-    MemberLink {
-        member_id: m.member_id.clone(),
-        parent_unit,
-        run_id,
-        attempt_epoch,
-    }
-}
-
-/// The lineage of a candidate child, root-first, as the rule-4 gate reads
-/// it: run + unit [+ current attempt] — and, for a DISPATCH, the intent
-/// itself. A new unit's lineage is its run alone; a new attempt's and a new
-/// effect's include the unit; the effect arm carries the unit's current
-/// attempt (brief finding 6), because §5.1 roots cancellations at an
-/// attempt id, not at the `unit/epoch` composite the book addresses rows
-/// by.
-fn adoption_lineage(
-    method: &Method,
-    read: &SeleneGraph,
-    store: &Store,
-    effect: &Option<EffectRow>,
-) -> Option<Vec<(CancelKind, String)>> {
-    match method {
-        Method::UnitAdmit { run_id, .. } => Some(vec![(CancelKind::Run, run_id.clone())]),
-        Method::UnitDispatch { unit_id, .. } | Method::EffectPrepare { unit_id, .. } => {
-            unit_lineage(read, store, unit_id)
-        }
-        // The dispatch arm's "child" is the intent itself being admitted to
-        // act, so an EffectIntent-rooted cancellation — a sibling, not an
-        // ancestor — must ALSO gate it: without the intent's own root in
-        // the lineage, a cancel rooted AT the intent never matches, and a
-        // prepared intent would dispatch past its own committed
-        // cancellation. UnitAdmit/UnitDispatch/EffectPrepare lineages stay
-        // unchanged (their cancelled root is by construction an ancestor).
-        Method::EffectDispatch { unit_id, .. } => {
-            let mut lineage = unit_lineage(read, store, unit_id)?;
-            if let Some(row) = effect
-                && let Some(props) = read.node_properties(row.node)
-                && let Some(intent_id) = prop_str(props, "effect_intent_id")
-            {
-                lineage.push((CancelKind::EffectIntent, intent_id));
-            }
-            Some(lineage)
-        }
-        _ => None,
-    }
-}
-
-/// Run + unit [+ current attempt] lineage for a child of `unit_id`. The
-/// attempt in the lineage is the unit's current one — attempt keys ascend
-/// by epoch (`unit/epoch`) and the funnel serializes dispatch, so the max
-/// key is the live attempt.
-fn unit_lineage(
-    read: &SeleneGraph,
-    store: &Store,
-    unit_id: &str,
-) -> Option<Vec<(CancelKind, String)>> {
-    let run_id = unit_run_id(read, store, unit_id)?;
-    let current: Option<String> = store
-        .attempt_entries()
-        .iter()
-        .filter(|(key, _)| key.starts_with(&format!("{unit_id}/")))
-        .filter_map(|(key, node)| {
-            let epoch = key
-                .rsplit_once('/')
-                .and_then(|(_, e)| e.parse::<u64>().ok())?;
-            let props = read.node_properties(*node)?;
-            let attempt_id = prop_str(props, "attempt_id");
-            attempt_id.map(|id| (epoch, id))
-        })
-        .max_by_key(|(epoch, _)| *epoch)
-        .map(|(_, id)| id);
-    let mut lineage = vec![
-        (CancelKind::Run, run_id),
-        (CancelKind::ExecutionUnit, unit_id.to_owned()),
-    ];
-    if let Some(id) = current {
-        lineage.push((CancelKind::Attempt, id));
-    }
-    Some(lineage)
 }
 
 fn kind_wire(k: CancelKind) -> &'static str {
@@ -313,11 +175,13 @@ impl Funnel {
                         child_kind,
                         &lineage,
                     ),
-                    member_links: Vec::new(),
+                    member_links: HashMap::new(),
                     request: None,
                     deliveries: Vec::new(),
+                    delivery_exists: false,
                     effect_row: None,
                     root_attempt: None,
+                    root_terminal: None,
                 })
             }
             Method::CancelRequest {
@@ -328,10 +192,15 @@ impl Funnel {
             } => {
                 let member_links = proposed
                     .iter()
-                    .map(|m| member_link(read, &self.store, m))
+                    .map(|member| {
+                        (
+                            member.member_id.clone(),
+                            member_link(read, &self.store, member),
+                        )
+                    })
                     .collect();
                 let root_attempt = if *root_kind == CancelKind::Attempt {
-                    self.store.attempt_id_node(read, root_id).and_then(|node| {
+                    self.store.attempt_id_node(root_id).and_then(|node| {
                         let props = read.node_properties(node)?;
                         let unit = prop_str(props, "unit_id")?;
                         // `attempt_epoch` is an indexed NUMERIC column, not a
@@ -343,13 +212,16 @@ impl Funnel {
                 } else {
                     None
                 };
+                let root_terminal = root_is_terminal(read, &self.store, *root_kind, root_id);
                 Some(CancelPreRead {
                     admission_blockers: Vec::new(),
                     member_links,
                     request: None,
                     deliveries: Vec::new(),
+                    delivery_exists: false,
                     effect_row: None,
                     root_attempt,
+                    root_terminal,
                 })
             }
             Method::CancelRecordDelivery {
@@ -358,7 +230,22 @@ impl Funnel {
                 ..
             } => {
                 let request = self.request_data(read, cancel_request_id);
-                let deliveries = self.delivery_summaries(read, cancel_request_id);
+                let delivery_exists = self
+                    .store
+                    .cancel_delivery_node(&format!("{cancel_request_id}|{member_id}"))
+                    .is_some();
+                let is_final_member = request
+                    .as_ref()
+                    .and_then(|request| request.record.scope.member(member_id))
+                    .zip(request.as_ref())
+                    .is_some_and(|(member, request)| {
+                        member.order_index as usize + 1 == request.record.scope.members().len()
+                    });
+                let deliveries = if is_final_member {
+                    self.delivery_summaries(read, cancel_request_id)
+                } else {
+                    Vec::new()
+                };
                 let effect_row = request
                     .as_ref()
                     .and_then(|r| r.record.scope.member(member_id))
@@ -366,11 +253,13 @@ impl Funnel {
                     .and_then(|m| self.effect_for_intent(read, &m.member_id));
                 Some(CancelPreRead {
                     admission_blockers: Vec::new(),
-                    member_links: Vec::new(),
+                    member_links: HashMap::new(),
                     request,
                     deliveries,
+                    delivery_exists,
                     effect_row,
                     root_attempt: None,
+                    root_terminal: None,
                 })
             }
             _ => None,
@@ -403,9 +292,9 @@ impl Funnel {
         request_id: &str,
     ) -> Vec<super::cancel_rules::DeliverySummary> {
         self.store
-            .cancel_delivery_entries()
+            .cancel_delivery_nodes(request_id)
             .into_iter()
-            .filter_map(|(_, node)| {
+            .filter_map(|node| {
                 let props = read.node_properties(node)?;
                 if prop_str(props, "cancel_request_id").as_deref() != Some(request_id) {
                     return None;
@@ -422,7 +311,7 @@ impl Funnel {
 
     /// The effect one delivery member names, when it resolves.
     fn effect_for_intent(&self, read: &SeleneGraph, member_id: &str) -> Option<EffectRow> {
-        let node = self.store.effect_intent_id_node(read, member_id)?;
+        let node = self.store.effect_intent_id_node(member_id)?;
         let props = read.node_properties(node)?;
         Some(EffectRow {
             node,
@@ -449,16 +338,29 @@ impl Funnel {
         let cpre = pre.cancel.as_ref().expect("cancel pre present");
         let scope = CancelScope::freeze(*root_kind, root_id.clone(), proposed.clone())
             .map_err(scope_rejection)?;
+        let Some(root_terminal) = cpre.root_terminal else {
+            return Err((
+                ErrorKind::NotFound,
+                format!("cancellation root {}:{root_id}", root_kind.wire()),
+                false,
+            ));
+        };
+        if scope.members().is_empty() && (*policy != CancelPolicy::RootOnly || !root_terminal) {
+            return Err((
+                ErrorKind::InvalidRequest,
+                format!(
+                    "empty cancellation scope requires root_only policy and a terminal root; {}:{root_id} is not eligible",
+                    root_kind.wire()
+                ),
+                false,
+            ));
+        }
         for member in scope.members() {
             let is_root = member.member_kind == *root_kind && member.member_id == *root_id;
             if is_root {
                 continue;
             }
-            let Some(link) = cpre
-                .member_links
-                .iter()
-                .find(|l| l.member_id == member.member_id)
-            else {
+            let Some(link) = cpre.member_links.get(&member.member_id) else {
                 return Err(not_under_root(
                     *root_kind,
                     root_id,
@@ -491,12 +393,13 @@ impl Funnel {
         }
 
         let now = *self.clock_ms.lock().expect("clock");
+        let status = cancel_rules::request_status_after(&scope, &[]);
         let request = CancelRequest {
             cancel_request_id: self.mint_id(),
             reason: *reason,
             policy: *policy,
             scope: scope.clone(),
-            status: CancelStatus::Requested,
+            status,
             requested_at: now,
             requested_by_kind: "daemon".to_owned(),
         };
@@ -510,6 +413,7 @@ impl Funnel {
                 root_id: root_id.clone(),
                 policy: policy_wire(*policy).to_owned(),
                 reason: reason_wire(*reason).to_owned(),
+                status: status_wire(status).to_owned(),
                 scope: scope_json,
                 record,
             }),
@@ -523,13 +427,14 @@ impl Funnel {
                     "root_id": root_id,
                     "reason": reason_wire(*reason),
                     "policy": policy_wire(*policy),
-                    "status": "requested",
+                    "status": status_wire(status),
                     "members": scope.members().len(),
                 }),
             }],
             result: json!({
                 "cancel_request_id": request_id,
-                "status": "requested",
+                "version": 1,
+                "status": status_wire(status),
                 "root_kind": kind_wire(*root_kind),
                 "root_id": root_id,
             }),
@@ -572,14 +477,33 @@ impl Funnel {
                 true,
             ));
         };
-        if cancel_rules::already_delivered(&cpre.deliveries, member_id) {
+        if cpre.delivery_exists {
             return Err((
                 ErrorKind::InvalidRequest,
                 format!("delivery already recorded for member {member_id} (§5.1 write-once)"),
                 true,
             ));
         }
-        if !cancel_rules::delivery_leaf_first(&request.record.scope, &cpre.deliveries, member_id) {
+        let observation_is_valid = match (outcome, observed_at) {
+            (DeliveryOutcome::Unresponsive, None) => true,
+            (DeliveryOutcome::Unresponsive, Some(_)) | (_, None) => false,
+            (_, Some(observed_at)) => observed_at >= delivered_at,
+        };
+        if !observation_is_valid {
+            return Err((
+                ErrorKind::InvalidRequest,
+                "observed_at must be absent only for an unresponsive delivery and must not predate delivery".into(),
+                true,
+            ));
+        }
+        let delivered = request.version.checked_sub(1).ok_or_else(|| {
+            (
+                ErrorKind::Internal,
+                "cancel request version is zero".into(),
+                false,
+            )
+        })?;
+        if u64::from(member.order_index) != delivered {
             // NOT persisted: once the true next member is delivered, this
             // SAME byte-identical command becomes lawful, and the durable
             // receipt replay must not return a stale rejection without
@@ -594,12 +518,17 @@ impl Funnel {
             ));
         }
 
-        let mut deliveries = cpre.deliveries.clone();
-        deliveries.push(cancel_rules::DeliverySummary {
-            member_id: member_id.clone(),
-            outcome: *outcome,
-        });
-        let status = cancel_rules::request_status_after(&request.record.scope, &deliveries);
+        let final_member = member.order_index as usize + 1 == request.record.scope.members().len();
+        let status = if final_member {
+            let mut deliveries = cpre.deliveries.clone();
+            deliveries.push(cancel_rules::DeliverySummary {
+                member_id: member_id.clone(),
+                outcome: *outcome,
+            });
+            cancel_rules::request_status_after(&request.record.scope, &deliveries)
+        } else {
+            CancelStatus::Delivering
+        };
         let status_wire = status_wire(status).to_owned();
         let mut updated = request.record.clone();
         updated.status = status;
@@ -670,6 +599,28 @@ impl Funnel {
             .expect("delivery serializes")
         };
 
+        let mut events = vec![EventDraft {
+            aggregate_kind: "cancel_request",
+            aggregate_id: cancel_request_id.clone(),
+            aggregate_version: request_version_after,
+            event_kind: "cancel_request.delivered",
+            payload: json!({
+                "member_id": member_id,
+                "delivered_at": delivered_at,
+                "observed_at": observed_at,
+                "outcome": outcome.wire(),
+                "status": status_wire,
+            }),
+        }];
+        if let Some(park) = &park_effect {
+            events.push(EventDraft {
+                aggregate_kind: "effect",
+                aggregate_id: member_id.clone(),
+                aggregate_version: park.effect_version,
+                event_kind: "effect.reconciling",
+                payload: json!({ "next_reconcile_at": null, "source": "cancel_delivery" }),
+            });
+        }
         let plan = Plan::CancelRecordDelivery(CancelDeliveryPlan {
             delivery_key: format!("{cancel_request_id}|{member_id}"),
             request_id: cancel_request_id.clone(),
@@ -679,27 +630,17 @@ impl Funnel {
             request_record_after: serde_json::to_string(&updated).expect("record serializes"),
             member_id: member_id.clone(),
             member_kind: kind_wire(member.member_kind).to_owned(),
+            order_index: member.order_index,
             outcome: outcome.wire().to_owned(),
             delivery_record,
             park_effect,
         });
         Ok(Accepted {
             plan,
-            events: vec![EventDraft {
-                aggregate_kind: "cancel_request",
-                aggregate_id: cancel_request_id.clone(),
-                aggregate_version: request_version_after,
-                event_kind: "cancel_request.delivered",
-                payload: json!({
-                    "member_id": member_id,
-                    "delivered_at": delivered_at,
-                    "observed_at": observed_at,
-                    "outcome": outcome.wire(),
-                    "status": status_wire,
-                }),
-            }],
+            events,
             result: json!({
                 "cancel_request_id": cancel_request_id,
+                "version": request_version_after,
                 "member_id": member_id,
                 "outcome": outcome.wire(),
                 "status": status_wire,
@@ -738,13 +679,19 @@ pub(super) fn apply_create_request(
                 (db("policy"), s(&p.policy)),
                 (db("reason"), s(&p.reason)),
                 (db("scope"), s(&p.scope)),
-                (db("status"), s("requested")),
+                (db("status"), s(&p.status)),
                 (db("record"), s(&p.record)),
             ])
             .expect("cancel request property map"),
         )
         .map_err(|e| format!("{e:?}"))?;
-    Ok(vec![(BookKind::CancelRequest, p.request_id.clone(), node)])
+    Ok(vec![(
+        BookKind::CancelRequest {
+            root_key: format!("{}/{}", p.root_kind, p.root_id),
+        },
+        p.request_id.clone(),
+        node,
+    )])
 }
 
 /// Apply one `cancel.record_delivery`: the write-once delivery row, the
@@ -764,13 +711,20 @@ pub(super) fn apply_record_delivery(
                 (db("cancel_request_id"), s(&p.request_id)),
                 (db("member_id"), s(&p.member_id)),
                 (db("member_kind"), s(&p.member_kind)),
+                (db("order_index"), Value::Uint(u64::from(p.order_index))),
                 (db("outcome"), s(&p.outcome)),
                 (db("record"), s(&p.delivery_record)),
             ])
             .expect("cancel delivery property map"),
         )
         .map_err(|e| format!("{e:?}"))?;
-    books.push((BookKind::CancelDelivery, p.delivery_key.clone(), delivery));
+    books.push((
+        BookKind::CancelDelivery {
+            request_id: p.request_id.clone(),
+        },
+        p.delivery_key.clone(),
+        delivery,
+    ));
     m.update_node(
         p.request_node,
         no_labels(),

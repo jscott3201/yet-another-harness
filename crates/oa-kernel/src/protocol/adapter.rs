@@ -11,6 +11,7 @@ use std::collections::{BTreeMap, VecDeque};
 use std::sync::{Arc, Mutex};
 
 mod project;
+mod receipt;
 mod subscription;
 
 pub struct InProcessAdapter {
@@ -22,6 +23,8 @@ pub struct InProcessAdapter {
     command_gate: Mutex<()>,
     stream_gate: Mutex<()>,
     published_cursor: Mutex<u64>,
+    #[cfg(test)]
+    command_test_hook: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
 }
 
 #[derive(Default)]
@@ -63,6 +66,8 @@ impl InProcessAdapter {
             command_gate: Mutex::new(()),
             stream_gate: Mutex::new(()),
             published_cursor: Mutex::new(published_cursor),
+            #[cfg(test)]
+            command_test_hook: Mutex::new(None),
         };
         adapter.validate_durable_events()?;
         adapter.validate_durable_receipts()?;
@@ -171,6 +176,11 @@ impl InProcessAdapter {
             ClientMessage::Command(command) => {
                 ServerMessage::Receipt(self.handle_command(*command))
             }
+            ClientMessage::GetReceipt {
+                project_id,
+                scope,
+                command_id,
+            } => self.handle_get_receipt(&project_id, scope, &command_id),
             ClientMessage::Resume {
                 project_id,
                 after_cursor,
@@ -219,6 +229,25 @@ impl InProcessAdapter {
                 }
             }
         }
+        if matches!(command.body, CommandBody::WorkItemCreate(_))
+            && command.scope.scope_kind == ScopeKind::Project
+            && command.scope.scope_id != self.project_id
+        {
+            return self.rejection_receipt(
+                Some(&command),
+                ErrorKind::InvalidRequest,
+                "work_item.create requires the current project receipt scope",
+            );
+        }
+        if command.scope.scope_kind == ScopeKind::Project
+            && command.scope.scope_id != self.project_id
+        {
+            return self.rejection_receipt(
+                Some(&command),
+                ErrorKind::InvalidRequest,
+                "command scope does not match the control graph project",
+            );
+        }
         if let Err(detail) = validate_envelope(&command) {
             let holder_command = matches!(command.body, CommandBody::ProgressReport(_));
             let claims = holder_command
@@ -254,8 +283,7 @@ impl InProcessAdapter {
             };
         }
         if matches!(command.body, CommandBody::WorkItemCreate(_))
-            && (command.scope.scope_kind != ScopeKind::Project
-                || command.scope.scope_id != self.project_id)
+            && command.scope.scope_kind != ScopeKind::Project
         {
             return self.reject_keyed(
                 &command,
@@ -263,17 +291,6 @@ impl InProcessAdapter {
                 None,
                 KernelErrorKind::InvalidRequest,
                 "work_item.create requires the current project receipt scope",
-            );
-        }
-        if command.scope.scope_kind == ScopeKind::Project
-            && command.scope.scope_id != self.project_id
-        {
-            return self.reject_keyed(
-                &command,
-                request_digest,
-                None,
-                KernelErrorKind::InvalidRequest,
-                "command scope does not match the control graph project",
             );
         }
         let claims = match self.resolve_token(&command) {
@@ -296,6 +313,15 @@ impl InProcessAdapter {
         };
         let submission = self.funnel.submit(&internal);
         let receipt = self.project_submission(&command, submission);
+        #[cfg(test)]
+        if let Some(hook) = self
+            .command_test_hook
+            .lock()
+            .expect("command test hook")
+            .as_ref()
+        {
+            hook();
+        }
         if let Some(cursor) = receipt.event_cursors.last() {
             self.publish_through(cursor.get());
         }
@@ -418,7 +444,9 @@ impl InProcessAdapter {
                 unit_id: command.target.aggregate_id.clone(),
             },
         };
-        let submission = self.funnel.reject_keyed(&internal, kind, detail);
+        let submission =
+            self.funnel
+                .reject_keyed(&internal, command.body.command_type().wire(), kind, detail);
         self.project_submission(command, submission)
     }
 
@@ -464,12 +492,17 @@ impl InProcessAdapter {
 
     fn validate_durable_receipts(&self) -> Result<(), Error> {
         for key in self.funnel.store().receipt_keys() {
-            self.funnel.store().receipt(&key).map_err(|error| {
+            let stored = self.funnel.store().receipt(&key).map_err(|error| {
                 protocol_error(
                     ErrorKind::Internal,
                     &format!("durable receipt is unreadable: {error:?}"),
                 )
             })?;
+            let stored = stored.ok_or_else(|| {
+                protocol_error(ErrorKind::Internal, "durable receipt book entry is missing")
+            })?;
+            self.validate_stored_receipt(&key, stored)
+                .map_err(|detail| protocol_error(ErrorKind::Internal, &detail))?;
         }
         self.funnel
             .store()

@@ -602,6 +602,13 @@ pub enum SubscriptionPoll {
 #[serde(tag = "kind", content = "message", rename_all = "snake_case")]
 pub enum ClientMessage {
     Command(Box<Command>),
+    GetReceipt {
+        #[schemars(length(min = 1, max = 64), regex(pattern = "^[A-Za-z0-9_.:-]+$"))]
+        project_id: String,
+        scope: Scope,
+        #[schemars(length(min = 1, max = 64), regex(pattern = "^[A-Za-z0-9_.:-]+$"))]
+        command_id: String,
+    },
     Resume {
         project_id: String,
         after_cursor: DecimalU64,

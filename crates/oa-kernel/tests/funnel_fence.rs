@@ -377,7 +377,7 @@ fn recover_replays_receipts_and_fences_out_the_prior_lifetime() {
     let stale_progress = Command {
         command_id: Uuid7::mint(2, 2).to_string(),
         scope_kind: ScopeKind::Unit,
-        scope_id: "g".into(),
+        scope_id: "u-1".into(),
         request_digest: Digest::of_bytes(b"progress stale lifetime"),
         principal_kind: PrincipalKind::Agent,
         principal_id: "h1".into(),
@@ -397,7 +397,7 @@ fn recover_replays_receipts_and_fences_out_the_prior_lifetime() {
     let stale_reissue = Command {
         command_id: Uuid7::mint(2, 3).to_string(),
         scope_kind: ScopeKind::Unit,
-        scope_id: "g".into(),
+        scope_id: "u-1".into(),
         request_digest: Digest::of_bytes(b"reissue stale lifetime"),
         principal_kind: PrincipalKind::Agent,
         principal_id: "h1".into(),
@@ -446,7 +446,7 @@ fn recover_replays_receipts_and_fences_out_the_prior_lifetime() {
     let live = Command {
         command_id: Uuid7::mint(2, 5).to_string(),
         scope_kind: ScopeKind::Unit,
-        scope_id: "g".into(),
+        scope_id: "u-1".into(),
         request_digest: Digest::of_bytes(b"progress new lifetime"),
         principal_kind: PrincipalKind::Agent,
         principal_id: "h1".into(),

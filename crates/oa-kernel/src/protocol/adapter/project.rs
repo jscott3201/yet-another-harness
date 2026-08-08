@@ -1,6 +1,4 @@
 use super::*;
-use crate::protocol::{EVENT_VERSION, MAX_EVENT_BYTES, MAX_EVENT_PAYLOAD_BYTES};
-use chrono::{DateTime, Utc};
 
 impl InProcessAdapter {
     pub(super) fn project_submission(&self, command: &Command, submission: Submission) -> Receipt {
@@ -104,42 +102,7 @@ impl InProcessAdapter {
     }
 
     pub(super) fn event(&self, event: crate::store::EventRecord) -> Result<Event, String> {
-        let event_id = event.event_id.clone();
-        let mut payload: JsonObject = serde_json::from_str(&event.payload).map_err(|error| {
-            format!("durable event {} has invalid JSON: {error}", event.event_id)
-        })?;
-        payload.values_mut().for_each(stringify_json_integers);
-        let ordinal = u32::try_from(event.ordinal)
-            .map_err(|_| format!("durable event {event_id} has an invalid ordinal"))?;
-        let projected = Event {
-            event_id: event.event_id,
-            cursor: DecimalU64::new(event.cursor),
-            stream_class: StreamClass::DurableSemantic,
-            aggregate_kind: event.aggregate_kind,
-            aggregate_id: event.aggregate_id,
-            aggregate_version: DecimalU64::new(event.aggregate_version),
-            ordinal: BoundedU32::new(ordinal),
-            event_kind: event.event_kind,
-            event_version: EVENT_VERSION,
-            occurred_at: Rfc3339Timestamp::new(format_timestamp(event.occurred_at_ms)?)
-                .map_err(|error| format!("durable event {event_id} {error}"))?,
-            actor: Actor {
-                principal_kind: event.actor_kind,
-                principal_id: event.actor_id,
-            },
-            command_id: Some(event.command_id),
-            causation_id: event.causation_id,
-            correlation_id: event.correlation_id,
-            payload,
-        };
-        if serde_json::to_vec(&projected.payload).unwrap().len() > MAX_EVENT_PAYLOAD_BYTES
-            || serde_json::to_vec(&projected).unwrap().len() > MAX_EVENT_BYTES
-        {
-            return Err(format!(
-                "durable event {event_id} exceeds the protocol size limit"
-            ));
-        }
-        Ok(projected)
+        crate::protocol::event::project(event)
     }
 
     pub(super) fn rejection_receipt(
@@ -183,7 +146,19 @@ impl InProcessAdapter {
             let current = self
                 .funnel
                 .store()
-                .validate_dispatch_claims(&claims)
+                .validate_dispatch_claims(
+                    &claims,
+                    object
+                        .get("attempt_id")
+                        .and_then(Value::as_str)
+                        .ok_or_else(|| {
+                            "durable dispatch result has invalid attempt_id".to_owned()
+                        })?,
+                    object
+                        .get("version")
+                        .and_then(Value::as_u64)
+                        .ok_or_else(|| "durable dispatch result has invalid version".to_owned())?,
+                )
                 .map_err(|error| format!("durable dispatch result is invalid: {error:?}"))?;
             let token = token_for(self.funnel.store().token_key(), &self.project_id, &claims);
             let mut tokens = self.tokens.lock().expect("token registry");
@@ -216,7 +191,7 @@ impl InProcessAdapter {
     }
 }
 
-fn claims_from_result(
+pub(super) fn claims_from_result(
     result: &serde_json::Map<String, Value>,
 ) -> Result<AttemptTokenClaims, String> {
     let string = |field: &str| {
@@ -242,6 +217,14 @@ fn claims_from_result(
     })
 }
 
+pub(super) fn stringify_result_integers(object: &mut serde_json::Map<String, Value>) {
+    for field in ["version", "attempt_epoch", "stamp", "authority_epoch"] {
+        if let Some(number) = object.get(field).and_then(Value::as_u64) {
+            object.insert(field.into(), Value::String(number.to_string()));
+        }
+    }
+}
+
 fn token_for(key: &[u8; 32], project_id: &str, claims: &AttemptTokenClaims) -> String {
     let canonical = serde_json_canonicalizer::to_vec(&json!({
         "project_id": project_id,
@@ -254,22 +237,4 @@ fn token_for(key: &[u8; 32], project_id: &str, claims: &AttemptTokenClaims) -> S
     }))
     .expect("token claims canonicalize");
     blake3::keyed_hash(key, &canonical).to_hex().to_string()
-}
-
-fn stringify_json_integers(value: &mut Value) {
-    match value {
-        Value::Number(number) if number.is_i64() || number.is_u64() => {
-            *value = Value::String(number.to_string());
-        }
-        Value::Array(values) => values.iter_mut().for_each(stringify_json_integers),
-        Value::Object(object) => object.values_mut().for_each(stringify_json_integers),
-        _ => {}
-    }
-}
-
-pub(super) fn format_timestamp(ms: u64) -> Result<String, String> {
-    let ms = i64::try_from(ms).map_err(|_| "timestamp exceeds RFC 3339 range".to_owned())?;
-    DateTime::<Utc>::from_timestamp_millis(ms)
-        .ok_or_else(|| "timestamp exceeds RFC 3339 range".to_owned())
-        .map(|timestamp| timestamp.format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string())
 }

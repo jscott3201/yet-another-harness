@@ -222,6 +222,26 @@ pub enum Method {
 }
 
 impl Method {
+    pub(super) fn wire(&self) -> &'static str {
+        match self {
+            Method::RunOpen { .. } => "run.open",
+            Method::RunClose { .. } => "run.close",
+            Method::WorkItemCreate { .. } => "work_item.create",
+            Method::UnitAdmit { .. } => "unit.admit",
+            Method::UnitDispatch { .. } => "unit.dispatch",
+            Method::ProgressReport { .. } => "unit.progress_report",
+            Method::StampBump { .. } => "unit.stamp_bump",
+            Method::TokenReissue { .. } => "token.reissue",
+            Method::EffectPrepare { .. } => "effect.prepare",
+            Method::EffectDispatch { .. } => "effect.dispatch",
+            Method::EffectRecordDispatched { .. } => "effect.record_dispatched",
+            Method::EffectSettle { .. } => "effect.settle",
+            Method::EffectParkReconciling { .. } => "effect.park_reconciling",
+            Method::CancelRequest { .. } => "cancel.request",
+            Method::CancelRecordDelivery { .. } => "cancel.record_delivery",
+        }
+    }
+
     pub(super) fn unit_id(&self) -> Option<&str> {
         match self {
             Method::RunOpen { .. } | Method::RunClose { .. } => None,

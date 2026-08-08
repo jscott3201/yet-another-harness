@@ -1,17 +1,10 @@
-//! Tests added from the 3-lens adversarial review: lifecycle guard,
-//! full book rebuild, every unique and immutable flag provoked, and the
-//! WriterLockHeld surface pinned.
-
 use super::*;
-use crate::cancel::{
-    Attachment, CancelDelivery, CancelKind, CancelPolicy, CancelReason, CancelRequest, CancelScope,
-    CancelStatus, DeliveryOutcome, MemberInput,
-};
-use crate::effect::{EffectIntent, EffectState, RetryClass, ReversibilityClass, TargetEnumeration};
+use crate::cancel::*;
+use crate::effect::*;
 use crate::ids::{AttemptEpoch, Digest, Stamp, Uuid7};
 use selene_core::DbString;
 
-fn pairs_for(label: &str, key: &str) -> PropertyMap {
+pub(super) fn pairs_for(label: &str, key: &str) -> PropertyMap {
     let p = |pairs: Vec<(DbString, Value)>| PropertyMap::from_pairs(pairs).expect("pairs");
     let s = |v: &str| Value::String(db(v));
     match label {
@@ -68,6 +61,7 @@ fn pairs_for(label: &str, key: &str) -> PropertyMap {
             (db("cancel_request_id"), s("cr1")),
             (db("member_id"), s("u1")),
             (db("member_kind"), s("execution_unit")),
+            (db("order_index"), Value::Uint(0)),
             (db("outcome"), s("observed_stopped")),
             (db("record"), s("{}")),
         ]),
@@ -88,14 +82,16 @@ fn pairs_for(label: &str, key: &str) -> PropertyMap {
         ]),
         "Receipt" => p(vec![
             (db("receipt_key"), s(key)),
+            (db("command_type"), s("unit.progress_report")),
+            (db("receipt_version"), Value::Uint(1)),
             (
                 db("request_digest"),
                 s(Digest::of_bytes(key.as_bytes()).as_str()),
             ),
-            (db("principal_kind"), s("daemon")),
-            (db("principal_id"), s("daemon-local")),
+            (db("principal_kind"), s("agent")),
+            (db("principal_id"), s("h1")),
             (db("status"), s("completed")),
-            (db("result"), s("{}")),
+            (db("result"), s(r#"{"unit_id":"u1","version":1}"#)),
         ]),
         "Evidence" => p(vec![
             (db("evidence_key"), s(key)),
@@ -107,7 +103,7 @@ fn pairs_for(label: &str, key: &str) -> PropertyMap {
     }
 }
 
-fn effect_pairs(operation_key: &str, intent_id: &str) -> PropertyMap {
+pub(super) fn effect_pairs(operation_key: &str, intent_id: &str) -> PropertyMap {
     let intent = EffectIntent {
         effect_intent_id: Uuid7::try_from(intent_id.to_owned()).unwrap(),
         version: 1,
@@ -139,6 +135,7 @@ fn effect_pairs(operation_key: &str, intent_id: &str) -> PropertyMap {
         (db("operation_key"), Value::String(db(operation_key))),
         (db("effect_intent_id"), Value::String(db(intent_id))),
         (db("unit_id"), Value::String(db("u1"))),
+        (db("attempt_epoch"), Value::Uint(1)),
         (db("version"), Value::Uint(1)),
         (db("state"), Value::String(db("prepared"))),
         (
@@ -149,7 +146,7 @@ fn effect_pairs(operation_key: &str, intent_id: &str) -> PropertyMap {
     .expect("effect pairs")
 }
 
-fn recovery_cancel_pairs() -> (String, PropertyMap, String, PropertyMap) {
+pub(super) fn recovery_cancel_pairs() -> (String, PropertyMap, String, PropertyMap) {
     let request_id = Uuid7::mint(1, 1);
     let request_id_string = request_id.to_string();
     let scope = CancelScope::freeze(
@@ -209,6 +206,7 @@ fn recovery_cancel_pairs() -> (String, PropertyMap, String, PropertyMap) {
         ),
         (db("member_id"), Value::String(db("u1"))),
         (db("member_kind"), Value::String(db("execution_unit"))),
+        (db("order_index"), Value::Uint(0)),
         (db("outcome"), Value::String(db("observed_stopped"))),
         (
             db("record"),
@@ -273,28 +271,63 @@ fn recover_rebuilds_every_book() {
         ("Attempt", "u1/1"),
         ("Lease", "u1"),
         ("WorkItem", "w1"),
-        ("Receipt", "global/g/r1"),
+        ("Receipt", "unit/u1/r1"),
         ("Evidence", "ev1"),
         ("Run", "r1"),
     ] {
-        create_raw(&store, label, pairs_for(label, key)).unwrap();
+        let node = create_raw(&store, label, pairs_for(label, key)).unwrap();
+        if label == "Unit" {
+            store.book_insert(BookKind::Unit, key.into(), node);
+        }
     }
     let (request_id, request_pairs, delivery_key, delivery_pairs) = recovery_cancel_pairs();
-    create_raw(&store, "CancelRequest", request_pairs).unwrap();
+    let request = create_raw(&store, "CancelRequest", request_pairs).unwrap();
+    let request_record: CancelRequest = {
+        let read = store.shared.read();
+        serde_json::from_str(
+            &read
+                .node_properties(request)
+                .unwrap()
+                .get(&db("record"))
+                .and_then(value_str)
+                .unwrap(),
+        )
+        .unwrap()
+    };
+    let mut settled = request_record;
+    settled.status = CancelStatus::Settled;
+    update_raw(&store, request, "version", Value::Uint(2));
+    update_raw(&store, request, "status", Value::String(db("settled")));
+    update_raw(
+        &store,
+        request,
+        "record",
+        Value::String(db(&serde_json::to_string(&settled).unwrap())),
+    );
     create_raw(&store, "CancelDelivery", delivery_pairs).unwrap();
     let effect_id = Uuid7::mint(1, 1).to_string();
     create_raw(&store, "Effect", effect_pairs("op1", &effect_id)).unwrap();
     super::tests::append_event(&store, "e1", "u1", 1);
+    let request_history =
+        super::cancel_recovery_tests::cancellation_request_history(&request_id, 2);
+    let (request_event, request_receipt) = request_history;
+    create_raw(&store, "Event", request_event).unwrap();
+    create_raw(&store, "Receipt", request_receipt).unwrap();
+    let delivery_history =
+        super::cancel_recovery_tests::cancellation_delivery_history(&request_id, 2, 3, "settled");
+    let (delivery_event, delivery_receipt) = delivery_history;
+    create_raw(&store, "Event", delivery_event).unwrap();
+    create_raw(&store, "Receipt", delivery_receipt).unwrap();
     drop(store);
     let store = Store::recover(dir.path(), "inst-2").unwrap();
-    assert!(store.unit_node("u1").is_some(), "unit book");
-    assert!(store.attempt_node("u1/1").is_some(), "attempt book");
-    assert!(store.lease_node("u1").is_some(), "lease book");
-    assert!(store.work_item_node("w1").is_some(), "work item book");
-    assert!(store.receipt_node("global/g/r1").is_some(), "receipt book");
-    assert!(store.effect_node("op1").is_some(), "effect book");
-    assert!(store.evidence_node("ev1").is_some(), "evidence book");
-    assert!(store.run_node("r1").is_some(), "run book");
+    assert!(store.unit_node("u1").is_some());
+    assert!(store.attempt_node("u1/1").is_some());
+    assert!(store.lease_node("u1").is_some());
+    assert!(store.work_item_node("w1").is_some());
+    assert!(store.receipt_node("unit/u1/r1").is_some());
+    assert!(store.effect_node("op1").is_some());
+    assert!(store.evidence_node("ev1").is_some());
+    assert!(store.run_node("r1").is_some());
     assert!(
         store.cancel_request_node(&request_id).is_some(),
         "cancel request book"
@@ -420,31 +453,6 @@ fn recover_under_a_live_holder_reports_writer_lock_held() {
 }
 
 #[test]
-fn missing_lease_with_present_unit_is_not_found() {
-    let dir = tempfile::tempdir().unwrap();
-    let store = Store::create(dir.path(), "inst-1").unwrap();
-    let read = super::tests::FakeFenceRead {
-        unit: Some(UnitFence {
-            attempt_epoch: AttemptEpoch(3),
-            stamp: Stamp(1),
-        }),
-        lease: None,
-    };
-    let claims = AttemptTokenClaims {
-        unit_id: "u1".into(),
-        attempt_epoch: AttemptEpoch(3),
-        stamp: Stamp(1),
-        authority_epoch: store.authority_epoch(),
-        holder_id: "h1".into(),
-        nonce: "n1".into(),
-    };
-    assert!(matches!(
-        store.check_holder_fence(&read, &claims),
-        Err(StoreRejection::NotFound { .. })
-    ));
-}
-
-#[test]
 fn recovery_rejects_invalid_authority_metadata() {
     assert!(super::recovery::decode_token_key(&"z".repeat(64)).is_none());
 
@@ -466,6 +474,103 @@ fn recovery_rejects_malformed_cancellation_records() {
     let (_, request_pairs, _, _) = recovery_cancel_pairs();
     let request = create_raw(&store, "CancelRequest", request_pairs).unwrap();
     update_raw(&store, request, "status", Value::String(db("unknown")));
+    drop(store);
+    assert!(matches!(
+        Store::recover(dir.path(), "inst-2"),
+        Err(StoreError::Internal(_))
+    ));
+
+    for delivery in [
+        CancelDelivery {
+            cancel_request_id: Uuid7::mint(1, 1),
+            member_id: "u1".into(),
+            member_kind: CancelKind::ExecutionUnit,
+            delivered_at: 2,
+            observed_at: None,
+            outcome: DeliveryOutcome::ObservedStopped,
+        },
+        CancelDelivery {
+            cancel_request_id: Uuid7::mint(1, 1),
+            member_id: "u1".into(),
+            member_kind: CancelKind::ExecutionUnit,
+            delivered_at: 2,
+            observed_at: Some(1),
+            outcome: DeliveryOutcome::ObservedStopped,
+        },
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::create(dir.path(), "inst-1").unwrap();
+        let (_, _, _, mut pairs) = recovery_cancel_pairs();
+        pairs
+            .set(
+                db("record"),
+                Value::String(db(&serde_json::to_string(&delivery).unwrap())),
+            )
+            .unwrap();
+        create_raw(&store, "CancelDelivery", pairs).unwrap();
+        drop(store);
+        assert!(matches!(
+            Store::recover(dir.path(), "inst-2"),
+            Err(StoreError::Internal(_))
+        ));
+    }
+
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::create(dir.path(), "inst-1").unwrap();
+    let (_, request_pairs, _, _) = recovery_cancel_pairs();
+    let request = create_raw(&store, "CancelRequest", request_pairs).unwrap();
+    update_raw(&store, request, "version", Value::Uint(99));
+    drop(store);
+    assert!(matches!(
+        Store::recover(dir.path(), "inst-2"),
+        Err(StoreError::Internal(_))
+    ));
+
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::create(dir.path(), "inst-1").unwrap();
+    let request_id = Uuid7::mint(1, 1);
+    let scope: CancelScope = serde_json::from_value(serde_json::json!({
+        "root_kind": "execution_unit",
+        "root_id": "u1",
+        "members": [
+            {
+                "member_kind": "execution_unit",
+                "member_id": "u1",
+                "attachment": "attached",
+                "order_index": 0
+            },
+            {
+                "member_kind": "execution_unit",
+                "member_id": "u1",
+                "attachment": "attached",
+                "order_index": 1
+            }
+        ]
+    }))
+    .unwrap();
+    let request = CancelRequest {
+        cancel_request_id: request_id,
+        reason: CancelReason::OwnerRequest,
+        policy: CancelPolicy::AttachedCascade,
+        scope: scope.clone(),
+        status: CancelStatus::Requested,
+        requested_at: 1,
+        requested_by_kind: "daemon".into(),
+    };
+    let mut pairs = recovery_cancel_pairs().1;
+    pairs
+        .set(
+            db("scope"),
+            Value::String(db(&serde_json::to_string(&scope).unwrap())),
+        )
+        .unwrap();
+    pairs
+        .set(
+            db("record"),
+            Value::String(db(&serde_json::to_string(&request).unwrap())),
+        )
+        .unwrap();
+    create_raw(&store, "CancelRequest", pairs).unwrap();
     drop(store);
     assert!(matches!(
         Store::recover(dir.path(), "inst-2"),

@@ -161,20 +161,22 @@ pub fn graph_type() -> GraphTypeDef {
                     prop_def("record", PStr, true, false, false),
                 ],
             ),
-            // §2.3: deterministic rejections persist too; status/result stay
-            // mutable only for the §2.2 outcome_unknown resolution path.
+            // §2.3: completed and deterministic-rejection receipts are final.
+            // `outcome_unknown` is a transient wire state, never a row (R42b).
             node_type(
                 "oa.receipt",
                 "Receipt",
                 vec![
                     prop_def("receipt_key", PStr, true, true, true),
+                    prop_def("command_type", PStr, true, true, false),
+                    prop_def("receipt_version", Uint, true, true, false),
                     prop_def("request_digest", PStr, true, true, false),
                     prop_def("principal_kind", PStr, true, true, false),
                     prop_def("principal_id", PStr, true, true, false),
-                    prop_def("status", PStr, true, false, false),
-                    prop_def("result", PStr, true, false, false),
-                    prop_def("first_cursor", Uint, false, false, false),
-                    prop_def("last_cursor", Uint, false, false, false),
+                    prop_def("status", PStr, true, true, false),
+                    prop_def("result", PStr, true, true, false),
+                    prop_def("first_cursor", Uint, false, true, false),
+                    prop_def("last_cursor", Uint, false, true, false),
                 ],
             ),
             // §2.4: every payload-bearing property immutable; deletes are
@@ -208,6 +210,7 @@ pub fn graph_type() -> GraphTypeDef {
                     prop_def("operation_key", PStr, true, true, true),
                     prop_def("effect_intent_id", PStr, true, true, true),
                     prop_def("unit_id", PStr, true, true, false),
+                    prop_def("attempt_epoch", Uint, true, true, false),
                     // The effect's own §1 aggregate-version axis: settle
                     // events stamp this, never the unit's version (§3.3
                     // settle does not advance unit state).
@@ -265,6 +268,7 @@ pub fn graph_type() -> GraphTypeDef {
                     prop_def("cancel_request_id", PStr, true, true, false),
                     prop_def("member_id", PStr, true, true, false),
                     prop_def("member_kind", PStr, true, true, false),
+                    prop_def("order_index", Uint, true, true, false),
                     prop_def("outcome", PStr, true, true, false),
                     prop_def("record", PStr, true, true, false),
                 ],

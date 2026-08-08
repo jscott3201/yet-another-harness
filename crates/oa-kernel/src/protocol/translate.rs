@@ -50,7 +50,7 @@ pub(crate) fn validate_envelope(command: &Command) -> Result<(), String> {
         command.scope.scope_id.as_str(),
         command.target.aggregate_id.as_str(),
     ] {
-        validate_id(id)?;
+        validate_wire_id(id)?;
     }
     for id in [
         command.causation_id.as_deref(),
@@ -59,7 +59,7 @@ pub(crate) fn validate_envelope(command: &Command) -> Result<(), String> {
     .into_iter()
     .flatten()
     {
-        validate_id(id)?;
+        validate_wire_id(id)?;
     }
     validate_payload_ids(&command.body)?;
     if command.body.extra_fields().contains_key("principal") {
@@ -108,32 +108,27 @@ fn validate_scope(scope: &Scope, body: &CommandBody) -> Result<(), String> {
 fn validate_payload_ids(payload: &CommandBody) -> Result<(), String> {
     match payload {
         CommandBody::RunOpen(p) => {
-            validate_id(&p.run_id)?;
-            validate_id(&p.goal_work_item_id)
+            validate_wire_id(&p.run_id)?;
+            validate_wire_id(&p.goal_work_item_id)
         }
-        CommandBody::RunClose(p) => validate_id(&p.run_id),
-        CommandBody::WorkItemCreate(p) => validate_id(&p.work_item_id),
+        CommandBody::RunClose(p) => validate_wire_id(&p.run_id),
+        CommandBody::WorkItemCreate(p) => validate_wire_id(&p.work_item_id),
         CommandBody::UnitAdmit(p) => {
-            validate_id(&p.unit_id)?;
-            validate_id(&p.work_item_id)?;
-            validate_id(&p.run_id)
+            validate_wire_id(&p.unit_id)?;
+            validate_wire_id(&p.work_item_id)?;
+            validate_wire_id(&p.run_id)
         }
         CommandBody::UnitDispatch(p) => {
-            validate_id(&p.unit_id)?;
-            validate_id(&p.holder_id)
+            validate_wire_id(&p.unit_id)?;
+            validate_wire_id(&p.holder_id)
         }
-        CommandBody::ProgressReport(p) => validate_id(&p.unit_id),
-        CommandBody::StampBump(p) => validate_id(&p.unit_id),
+        CommandBody::ProgressReport(p) => validate_wire_id(&p.unit_id),
+        CommandBody::StampBump(p) => validate_wire_id(&p.unit_id),
     }
 }
 
-fn validate_id(value: &str) -> Result<(), String> {
-    if value.is_empty()
-        || value.len() > 64
-        || !value
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b"_.:-".contains(&b))
-    {
+pub(crate) fn validate_wire_id(value: &str) -> Result<(), String> {
+    if !crate::ids::valid_wire_identifier(value) {
         return Err("wire identifier must be 1-64 characters from [A-Za-z0-9_.:-]".into());
     }
     Ok(())
