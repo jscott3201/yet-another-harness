@@ -7,8 +7,8 @@
 //! authorization class. Authority methods require the current
 //! `authority_epoch` and no token; holder methods require the full §3.3
 //! five-axis fence AND that the token's sealed `unit_id` names the method's
-//! target; `token.reissue` is the single `holder_reauth` method — it
-//! forgives a stale stamp (that is its purpose, §3.4) but nothing else.
+//! target. The reserved `token.reissue` method fails closed until an
+//! authority-issued policy and approval revalidation record exists.
 //!
 //! `submit` is serialized end to end by the funnel gate: Selene's writer
 //! lock releases at seal, before the commit's durability wait, so the
@@ -17,11 +17,11 @@
 //! `internal` instead of `Replayed`). One command at a time IS the §2.2
 //! funnel; the gate makes it literal.
 //!
-//! A commit error is not proof of rejection (§2.2): the write may be durable
-//! but unpublished. The funnel answers `outcome_unknown`, poisons itself,
-//! and rejects everything after as `unavailable` — recovery (a new lifetime
-//! over `Store::recover`) is the reconcile path, because resubmitting the
-//! command there resolves it by durable receipt.
+//! A durable commit error is not proof of rejection (§2.2): the write may be
+//! durable but unpublished. The funnel answers `outcome_unknown`, poisons
+//! itself, and rejects everything after as `unavailable`. Errors Selene
+//! classifies before durability return `internal` without poisoning. Recovery
+//! is the reconcile path for an uncertain commit.
 //!
 //! Time and identity are injected: the funnel owns a logical clock advanced
 //! by the caller and mints Uuid7s from (clock, authority_epoch, counter).
@@ -34,8 +34,8 @@ use crate::effect::EffectIntent;
 use crate::error::ErrorKind;
 use crate::ids::{AttemptEpoch, AuthorityEpoch, Digest, Stamp, Uuid7};
 use crate::store::{
-    AttemptTokenClaims, BookKind, LeaseFence, Store, StoreRejection, UnitFence, UnitFenceRead, db,
-    no_labels, props_set, value_str, value_u64,
+    AttemptTokenClaims, BookKind, LeaseFence, Store, StoreError, StoreRejection, UnitFence,
+    UnitFenceRead, db, no_labels, props_set, value_str, value_u64,
 };
 use selene_core::{LabelSet, NodeId, PropertyMap, Value};
 use serde_json::json;
@@ -46,13 +46,16 @@ mod cancel_rules;
 mod command;
 mod effect_rules;
 mod effects;
+mod lifecycle;
 mod plan;
+mod reject;
 mod replay;
 mod run_rules;
 #[cfg(test)]
 #[path = "unit_tests.rs"]
 mod tests;
 mod validate;
+mod wire;
 
 use plan::{EventDraft, Plan};
 
@@ -162,39 +165,6 @@ pub struct Funnel {
 }
 
 impl Funnel {
-    pub fn new(store: Store, clock_ms: u64) -> Funnel {
-        Funnel {
-            store,
-            gate: Mutex::new(None),
-            clock_ms: Mutex::new(clock_ms),
-            mint_seq: Mutex::new(0),
-        }
-    }
-
-    pub fn store(&self) -> &Store {
-        &self.store
-    }
-
-    pub fn into_store(self) -> Store {
-        self.store
-    }
-
-    /// Advance the logical clock (monotonic; lower values are ignored).
-    pub fn tick(&self, to_ms: u64) {
-        let mut c = self.clock_ms.lock().expect("clock");
-        *c = (*c).max(to_ms);
-    }
-
-    fn mint_id(&self) -> Uuid7 {
-        let ms = *self.clock_ms.lock().expect("clock");
-        let mut seq = self.mint_seq.lock().expect("seq");
-        *seq += 1;
-        // Authority epoch in the entropy high bits: cross-lifetime
-        // uniqueness by construction, not by caller clock discipline.
-        let entropy = (u128::from(self.store.authority_epoch().0) << 64) | u128::from(*seq);
-        Uuid7::mint(ms, entropy)
-    }
-
     pub fn submit(&self, cmd: &Command) -> Submission {
         let mut gate = self.gate.lock().expect("funnel gate");
         if let Some(detail) = gate.as_ref() {
@@ -221,6 +191,8 @@ impl Funnel {
             let stored = txn.read().node_properties(node).map(|p| {
                 (
                     p.get(&db("request_digest")).and_then(value_str),
+                    p.get(&db("principal_kind")).and_then(value_str),
+                    p.get(&db("principal_id")).and_then(value_str),
                     p.get(&db("status")).and_then(value_str),
                     p.get(&db("result")).and_then(value_str),
                 )
@@ -331,6 +303,7 @@ impl Funnel {
                 // transition. version_conflict and not_found do NOT
                 // persist: both depend on mutable state a later command
                 // can change, so a retry must re-validate.
+                let detail = wire::bounded_detail(&detail);
                 let result = json!({ "error_kind": kind, "detail": detail });
                 let node = {
                     let mut m = txn.mutator();
@@ -342,21 +315,48 @@ impl Funnel {
                                 db("request_digest"),
                                 Value::String(db(cmd.request_digest.as_str())),
                             ),
+                            (
+                                db("principal_kind"),
+                                Value::String(db(cmd.principal_kind.wire())),
+                            ),
+                            (db("principal_id"), Value::String(db(&cmd.principal_id))),
                             (db("status"), Value::String(db("rejected"))),
                             (db("result"), Value::String(db(&result.to_string()))),
                         ])
                         .expect("rejection receipt property map"),
                     )
                 };
-                match node {
+                let persistence_error = match node {
                     Ok(n) => match txn.commit() {
-                        Ok(_) => self.store.book_insert(BookKind::Receipt, receipt_key, n),
+                        Ok(_) => {
+                            self.store.book_insert(BookKind::Receipt, receipt_key, n);
+                            None
+                        }
                         // The domain answer (rejection, no transition) is
                         // certain either way; the engine's health is not —
                         // poison so the next submit halts (§2.2).
-                        Err(e) => *gate = Some(format!("{e:?}")),
+                        Err(error) => {
+                            if let StoreError::CommitUnknown(detail) =
+                                crate::store::commit_error(error)
+                            {
+                                *gate = Some(detail);
+                                None
+                            } else {
+                                Some("rejection receipt commit failed before durability".to_owned())
+                            }
+                        }
                     },
-                    Err(_) => txn.rollback(),
+                    Err(error) => {
+                        txn.rollback();
+                        Some(format!("cannot stage rejection receipt: {error:?}"))
+                    }
+                };
+                if let Some(detail) = persistence_error {
+                    return Submission::Rejected {
+                        kind: ErrorKind::Internal,
+                        detail,
+                        replayed: false,
+                    };
                 }
                 return Submission::Rejected {
                     kind,
@@ -365,6 +365,70 @@ impl Funnel {
                 };
             }
         };
+        let over_limit = accepted.events.iter().any(|event| {
+            wire::wire_json_len(&event.payload) > crate::protocol::MAX_EVENT_PAYLOAD_BYTES
+        }) || serde_json_canonicalizer::to_vec(&accepted.result)
+            .map(|result| result.len() > crate::protocol::MAX_RESULT_BYTES)
+            .unwrap_or(true);
+        if over_limit {
+            let kind = ErrorKind::PayloadTooLarge;
+            let detail = "inline result or semantic event payload exceeds its protocol limit; use an artifact reference".to_owned();
+            let result = json!({ "error_kind": kind, "detail": detail });
+            let node = {
+                let mut m = txn.mutator();
+                m.create_node(
+                    LabelSet::single(db("Receipt")),
+                    PropertyMap::from_pairs([
+                        (db("receipt_key"), Value::String(db(&receipt_key))),
+                        (
+                            db("request_digest"),
+                            Value::String(db(cmd.request_digest.as_str())),
+                        ),
+                        (
+                            db("principal_kind"),
+                            Value::String(db(cmd.principal_kind.wire())),
+                        ),
+                        (db("principal_id"), Value::String(db(&cmd.principal_id))),
+                        (db("status"), Value::String(db("rejected"))),
+                        (db("result"), Value::String(db(&result.to_string()))),
+                    ])
+                    .expect("oversize rejection receipt property map"),
+                )
+            };
+            let persistence_error = match node {
+                Ok(node) => match txn.commit() {
+                    Ok(_) => {
+                        self.store.book_insert(BookKind::Receipt, receipt_key, node);
+                        None
+                    }
+                    Err(error) => {
+                        if let StoreError::CommitUnknown(detail) = crate::store::commit_error(error)
+                        {
+                            *gate = Some(detail);
+                            None
+                        } else {
+                            Some("oversize rejection commit failed before durability".to_owned())
+                        }
+                    }
+                },
+                Err(error) => {
+                    txn.rollback();
+                    Some(format!("cannot stage oversize rejection: {error:?}"))
+                }
+            };
+            if let Some(detail) = persistence_error {
+                return Submission::Rejected {
+                    kind: ErrorKind::Internal,
+                    detail,
+                    replayed: false,
+                };
+            }
+            return Submission::Rejected {
+                kind,
+                detail,
+                replayed: false,
+            };
+        }
 
         // §2.2 steps 4–7: apply the staged plan, append events, finalize
         // the completed receipt. No reads below this line.
@@ -460,8 +524,11 @@ impl Funnel {
                     unit_id,
                     new_version,
                     new_epoch,
+                    stamp,
+                    authority_epoch,
                     holder_id,
                     attempt_id,
+                    token_nonce,
                     existing_lease,
                     prior_attempt,
                 } => {
@@ -492,7 +559,10 @@ impl Funnel {
                                 (db("attempt_id"), s(attempt_id)),
                                 (db("unit_id"), s(unit_id)),
                                 (db("attempt_epoch"), Value::Uint(*new_epoch)),
+                                (db("stamp"), Value::Uint(*stamp)),
+                                (db("authority_epoch"), Value::Uint(*authority_epoch)),
                                 (db("holder_id"), s(holder_id)),
+                                (db("token_nonce"), s(token_nonce)),
                                 (db("status"), s("active")),
                             ])
                             .expect("attempt property map"),
@@ -508,7 +578,12 @@ impl Funnel {
                                     (db("attempt_epoch"), Value::Uint(*new_epoch)),
                                     (db("holder_id"), s(holder_id)),
                                     (db("status"), s("active")),
-                                    (db("version"), Value::Uint(lease_version + 1)),
+                                    (
+                                        db("version"),
+                                        Value::Uint(lease_version.checked_add(1).ok_or_else(
+                                            || "lease version space exhausted".to_owned(),
+                                        )?),
+                                    ),
                                 ]),
                             )
                             .map_err(|e| format!("{e:?}"))?;
@@ -595,7 +670,10 @@ impl Funnel {
             for draft in &accepted.events {
                 // Cursor allocation under the open write txn — the
                 // allocate_cursor ordering contract.
-                let cursor = self.store.allocate_cursor();
+                let cursor = self
+                    .store
+                    .allocate_cursor()
+                    .map_err(|error| format!("{error:?}"))?;
                 let event_id = self.mint_id().to_string();
                 let n = m
                     .create_node(
@@ -624,18 +702,43 @@ impl Funnel {
                             (db("ordinal"), Value::Uint(0)),
                             (db("event_kind"), s(draft.event_kind)),
                             (db("payload"), s(&draft.payload.to_string())),
-                            (db("command_id"), s(&cmd.command_id.to_string())),
+                            (db("receipt_key"), s(&receipt_key)),
+                            (db("command_id"), s(&cmd.command_id)),
+                            (db("actor_kind"), s(cmd.principal_kind.wire())),
+                            (db("actor_id"), s(&cmd.principal_id)),
+                            (
+                                db("occurred_at_ms"),
+                                Value::Uint(*self.clock_ms.lock().expect("clock")),
+                            ),
                         ])
                         .expect("event property map"),
                     )
                     .map_err(|e| format!("{e:?}"))?;
-                new_books.push((BookKind::Event, event_id, n));
+                if let Some(causation_id) = &cmd.causation_id {
+                    m.update_node(
+                        n,
+                        no_labels(),
+                        props_set([(db("causation_id"), s(causation_id))]),
+                    )
+                    .map_err(|e| format!("{e:?}"))?;
+                }
+                if let Some(correlation_id) = &cmd.correlation_id {
+                    m.update_node(
+                        n,
+                        no_labels(),
+                        props_set([(db("correlation_id"), s(correlation_id))]),
+                    )
+                    .map_err(|e| format!("{e:?}"))?;
+                }
+                new_books.push((BookKind::Event, cursor.to_string(), n));
                 cursors.push(cursor);
             }
 
             let mut receipt_pairs = vec![
                 (db("receipt_key"), s(&receipt_key)),
                 (db("request_digest"), s(cmd.request_digest.as_str())),
+                (db("principal_kind"), s(cmd.principal_kind.wire())),
+                (db("principal_id"), s(&cmd.principal_id)),
                 (db("status"), s("completed")),
                 (db("result"), s(&accepted.result.to_string())),
             ];
@@ -661,17 +764,24 @@ impl Funnel {
                 replayed: false,
             };
         }
-        // §2.2 step 8. An Err here is NOT proof of rejection — the write
-        // may be durable but unpublished — so the answer is outcome_unknown
-        // and the funnel halts; a recovered lifetime resolves the command
-        // by resubmitting against its durable receipt.
-        if let Err(e) = txn.commit() {
-            let detail = format!("{e:?}");
-            *gate = Some(detail.clone());
-            return Submission::Rejected {
-                kind: ErrorKind::OutcomeUnknown,
-                detail: format!("commit outcome uncertain: {detail}"),
-                replayed: false,
+        // §2.2 step 8. Only a durable/unclassified error has an uncertain
+        // outcome. Selene validation and cancellation errors happened before
+        // durability and must not demand reconciliation.
+        if let Err(error) = txn.commit() {
+            return match crate::store::commit_error(error) {
+                StoreError::CommitUnknown(detail) => {
+                    *gate = Some(detail.clone());
+                    Submission::Rejected {
+                        kind: ErrorKind::OutcomeUnknown,
+                        detail: format!("commit outcome uncertain: {detail}"),
+                        replayed: false,
+                    }
+                }
+                error => Submission::Rejected {
+                    kind: ErrorKind::Internal,
+                    detail: format!("commit rejected before durability: {error:?}"),
+                    replayed: false,
+                },
             };
         }
         for (kind, key, node) in new_books {

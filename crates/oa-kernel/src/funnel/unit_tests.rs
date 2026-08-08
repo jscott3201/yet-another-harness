@@ -5,7 +5,7 @@ use super::*;
 fn scratch_funnel() -> (tempfile::TempDir, Funnel) {
     let dir = tempfile::tempdir().expect("tempdir");
     let store = Store::create(dir.path(), "kernel-t").expect("create");
-    (dir, Funnel::new(store, 1_000))
+    (dir, Funnel::new(store, 1_000).unwrap())
 }
 
 /// Commit faults cannot be injected through Selene, so the latch is
@@ -15,14 +15,17 @@ fn scratch_funnel() -> (tempfile::TempDir, Funnel) {
 fn poisoned_funnel_rejects_every_submit_unavailable() {
     let (_dir, funnel) = scratch_funnel();
     let cmd = Command {
-        command_id: Uuid7::mint(1, 1),
+        command_id: Uuid7::mint(1, 1).to_string(),
         scope_kind: ScopeKind::Global,
         scope_id: "g".into(),
         request_digest: Digest::of_bytes(b"create wi-1"),
         principal_kind: PrincipalKind::Daemon,
+        principal_id: "daemon-local".into(),
         expected_version: None,
         authority_epoch: Some(funnel.store().authority_epoch()),
         attempt_token: None,
+        causation_id: None,
+        correlation_id: None,
         method: Method::WorkItemCreate {
             work_item_id: "wi-1".into(),
             acceptance_contract_digest: Digest::of_bytes(b"c"),

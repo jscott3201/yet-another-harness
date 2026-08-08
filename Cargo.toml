@@ -8,18 +8,22 @@ members = ["crates/exp001-harness", "crates/oa-kernel"]
 [workspace.package]
 edition = "2024"
 rust-version = "1.97"
+license = "MIT OR Apache-2.0"
 
 [workspace.dependencies]
-# Path deps at the R25/EXP-001 pinned SHA (9a61de1); the run manifest records
-# the actual checkout. Unreleased APIs are required — crates.io v1.4.0 lacks
-# them — so switch these to git deps pinned to the SHA at the public flip.
-selene-core = { package = "selene-db-core", path = "../selene-db/crates/selene-core" }
-selene-graph = { package = "selene-db-graph", path = "../selene-db/crates/selene-graph" }
-selene-persist = { package = "selene-db-persist", path = "../selene-db/crates/selene-persist" }
+# G02-qualified Selene revision. Exact Git pins keep local and hosted builds on
+# the same storage implementation.
+selene-core = { package = "selene-db-core", git = "https://github.com/jscott3201/selene-db.git", rev = "9a61de124ffa2b471461d83e6e51c5856c81f791" }
+selene-graph = { package = "selene-db-graph", git = "https://github.com/jscott3201/selene-db.git", rev = "9a61de124ffa2b471461d83e6e51c5856c81f791" }
+selene-persist = { package = "selene-db-persist", git = "https://github.com/jscott3201/selene-db.git", rev = "9a61de124ffa2b471461d83e6e51c5856c81f791" }
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+serde_json = { version = "1", features = ["raw_value"] }
 rand = "0.9"
 rand_chacha = "0.9"
 blake3 = "1"
 libc = "0.2"
 clap = { version = "4", features = ["derive"] }
+schemars = "1.2.2"
+serde_json_canonicalizer = "0.3.2"
+ts-rs = { version = "12.0.1", features = ["serde-json-impl"] }
+chrono = { version = "0.4", default-features = false, features = ["std"] }

@@ -49,14 +49,14 @@ fn prepare_is_idempotent_and_rejects_every_divergent_axis() {
     let logical_op = Uuid7::mint(7, 1);
     let (key, id, existing) = prepare(&mut ctx, "p1", &token, effect_spec(logical_op, "req"));
     assert!(!existing);
-    let journal_len = ctx.funnel.store().journal().len();
+    let journal_len = ctx.funnel.store().journal().unwrap().len();
 
     // Re-preparing the same logical operation returns the existing intent —
     // no second record, no event, no version bump (§4.1).
     let (key2, id2, existing2) = prepare(&mut ctx, "p2", &token, effect_spec(logical_op, "req"));
     assert!(existing2);
     assert_eq!((key2.as_str(), id2), (key.as_str(), id));
-    assert_eq!(ctx.funnel.store().journal().len(), journal_len);
+    assert_eq!(ctx.funnel.store().journal().unwrap().len(), journal_len);
     assert_eq!(
         ctx.funnel.store().effect_record(&key).expect("row").version,
         1
@@ -213,6 +213,7 @@ fn dispatch_is_a_committed_transition_before_the_adapter_acts() {
         .funnel
         .store()
         .journal()
+        .unwrap()
         .iter()
         .filter(|e| e.aggregate_kind == "effect")
         .map(|e| e.event_kind.clone())
@@ -295,7 +296,7 @@ fn operation_key_survives_kill_recover_and_rework() {
     let dir = ctx.dir;
     drop(ctx.funnel);
     let store = Store::recover(dir.path(), "kernel-b").expect("recover");
-    let mut ctx = Ctx::resume(dir, Funnel::new(store, 1_000), 100);
+    let mut ctx = Ctx::resume(dir, Funnel::new(store, 1_000).unwrap(), 100);
 
     // Takeover: new epoch, new holder, same logical operation.
     let t2 = ctx.dispatch("u-1", "h2", 2);
@@ -668,6 +669,7 @@ fn withheld_outcome_parks_reconciling_then_settles() {
         .funnel
         .store()
         .journal()
+        .unwrap()
         .iter()
         .filter(|e| e.aggregate_kind == "effect")
         .map(|e| (e.event_kind.clone(), e.aggregate_version))

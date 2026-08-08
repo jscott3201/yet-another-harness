@@ -3,6 +3,7 @@ name = "exp001-harness"
 version = "0.0.1"
 edition.workspace = true
 rust-version.workspace = true
+license.workspace = true
 publish = false
 description = "EXP-001: Selene fan-in and crash-recovery gate harness (G02)"
 

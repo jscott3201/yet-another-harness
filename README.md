@@ -1,50 +1,80 @@
 # Open Agent
 
-A local-first daemon that runs and supervises coding agents, built so the
-runtime's record of what happened survives crashes, retries, and concurrent
-writers without lying about any of it.
+Open Agent is an experimental, local-first runtime for supervising coding
+agents. It is designed to preserve a trustworthy record across retries,
+crashes, cancellation, and external tool calls.
 
-**Status: pre-0.1.** No releases, no published crates. The kernel is under
-construction; the gate table below is the real state of the project and is
-updated as code lands. Design decisions live in a local planning corpus owned by
-the maintainer — this README is its public projection.
+**Status: pre-0.1 and not ready for use.** There is no release, installable
+daemon, live model connection, or production execution backend yet. Current
+work is building and testing the model-free kernel first.
 
-## Objectives
+## Why Open Agent
 
-- **Durable execution truth.** Current state, an immutable semantic journal, and
-  command receipts commit in one transaction. Recovery is proven by kill/reopen
-  tests at every commit-pipeline stage, not assumed.
-- **Explicit external-effect uncertainty.** An effect whose outcome was never
-  observed stays `unknown` until reconciled. It is never blindly retried and
-  never marked done by guess; irreversible effects escalate immediately.
-- **Small-blast-radius multi-agent coordination.** Depth-one delegation, at most
-  two concurrent writer agents with disjoint write ownership, context-fresh
-  review, and one human-controlled integration authority.
-- **Provider neutrality.** Normalized provider contracts (streaming, tool calls,
-  typed errors, usage) exercised against a deterministic fake provider — in both
-  Responses and Anthropic Messages dialects — before any live endpoint.
-- **Honest sandboxing.** Execution backends declare what they actually enforce.
-  The first backend, `local.trusted`, claims no isolation it does not have.
+Coding agents can edit files and call tools, but long-running work also needs
+answers to harder questions:
 
-## Gate tracking
+- Did this command commit before the process crashed?
+- Is this worker still authorized to publish a result?
+- Did an external action succeed, fail, or become uncertain?
+- Can a retry safely continue without repeating an effect?
+- Which result is still current and authorized to advance state?
 
-Every claim above must pass a model-free gate — deterministic tests with zero
-live model calls and zero real external effects — before any live-model proof
-runs.
+Open Agent treats those answers as durable runtime state instead of inferring
+them from a surviving process or chat transcript.
 
-| Gate | Proves | Status |
-|---|---|---|
-| G02 — storage fan-in and crash recovery | Atomic CAS + receipt + journal append under process kill, writer-takeover contest, corruption drill | **Passed** — [report](docs/gates/G02-storage-fanin-recovery.md) |
-| G01 — model-free kernel milestone | Command/state/effect/cancellation semantics against fake provider and fake effects; 23 deterministic exit obligations | **Next up** |
-| Protocol conformance, adapters 2–4 | Same conformance corpus over UDS, named pipe, loopback HTTP/SSE | Not started |
-| Install and negative tests | Clean-machine install, daemon lifecycle, honest `local.trusted` negative tests | Not started |
-| Multi-agent evaluation freeze | Frozen arms, budgets, and thresholds for the first live multi-agent proof | Blocked on G01/G02 |
+## Current Progress
 
-A gate is **Passed** only when its full obligation table runs deterministically;
-a reproducible failure of G02's hard bars falsifies the storage design rather
-than delaying it, and the fallback design track opens instead.
+- Storage fan-in and crash recovery gate: passed across 1,440 scored trials.
+- Model-free kernel gate: in progress.
+- Implemented foundations: command receipts, semantic journal, fencing,
+  cancellation records, effect reconciliation state and parking, provider
+  normalization, and the first in-process JSON protocol slice.
+- Not implemented: usable daemon, CLI, live providers, real tool execution,
+  sandboxing, MCP lifecycle, or network adapters.
 
-## What is not here yet
+See [project status](docs/project-status.md) for the detailed gate table and
+[architecture](docs/architecture.md) for the runtime model.
 
-No GUI, no live provider adapter, no published protocol spec, no sandbox
-guarantees. Those arrive behind their gates, in the order above.
+## Repository
+
+| Path | Contents |
+|---|---|
+| `crates/oa-kernel/` | Model-free kernel and Adapter 1 work |
+| `crates/exp001-harness/` | Storage and recovery evidence harness |
+| `generated/protocol/` | Checked-in client/server JSON Schemas and TypeScript bindings |
+| `docs/` | Architecture, protocol, development, and gate reports |
+
+The workspace pins Selene to an exact public Git revision. Cargo fetches that
+revision during the first build.
+
+## Development
+
+The pinned toolchain is Rust 1.97.1:
+
+```bash
+cargo test --locked --workspace
+```
+
+Run the complete local gate before a pull request:
+
+```bash
+bash scripts/full-gate.sh
+```
+
+Source files are capped at 700 reviewable lines. Generated protocol artifacts,
+formatting, Clippy, tests, and documentation updates are part of the pull
+request checklist. See [development](docs/development.md) for details.
+
+## Documentation
+
+- [Documentation index](docs/README.md)
+- [Project status](docs/project-status.md)
+- [Architecture](docs/architecture.md)
+- [Application protocol](docs/protocol.md)
+- [Development and pull requests](docs/development.md)
+- [G02 storage evidence](docs/gates/G02-storage-fanin-recovery.md)
+
+## License
+
+Licensed under either the [Apache License, Version 2.0](LICENSE-APACHE) or the
+[MIT License](LICENSE-MIT), at your option.

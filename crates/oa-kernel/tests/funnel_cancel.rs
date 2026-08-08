@@ -92,6 +92,7 @@ fn cancel_request_commits_durable_before_any_signal() {
         .funnel
         .store()
         .journal()
+        .unwrap()
         .into_iter()
         .filter(|e| e.aggregate_kind == "cancel_request")
         .collect();
@@ -243,6 +244,7 @@ fn delivery_order_is_leaf_first_and_pair_is_write_once() {
         .funnel
         .store()
         .journal()
+        .unwrap()
         .into_iter()
         .filter(|e| e.aggregate_kind == "cancel_request")
         .map(|e| (e.event_kind.clone(), e.aggregate_version))
@@ -420,6 +422,7 @@ fn a14_prepared_settles_cancelled_and_dispatching_follows_5_3() {
         .funnel
         .store()
         .journal()
+        .unwrap()
         .into_iter()
         .filter(|e| e.aggregate_kind == "effect" && e.aggregate_id == p_key)
         .map(|e| e.event_kind.clone())

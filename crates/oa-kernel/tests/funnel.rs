@@ -33,6 +33,23 @@ fn work_item_create_completes_replays_and_guards_the_digest() {
 }
 
 #[test]
+fn credential_bearing_receipt_replay_is_bound_to_the_original_principal() {
+    let mut ctx = Ctx::new();
+    ctx.seed_unit();
+    let dispatch = ctx.dispatch_cmd("u-1", "h1", 1);
+    let first = completed(ctx.funnel.submit(&dispatch));
+    assert!(token_from_result(&first).is_some());
+
+    let mut intruder = dispatch.clone();
+    intruder.principal_id = "daemon-other".into();
+    assert_eq!(
+        rejected(ctx.funnel.submit(&intruder)),
+        (ErrorKind::Unauthorized, false)
+    );
+    assert_eq!(replayed(ctx.funnel.submit(&dispatch)), first);
+}
+
+#[test]
 fn version_conflict_is_transient_and_never_persisted() {
     let mut ctx = Ctx::new();
     ctx.seed_unit();
@@ -54,7 +71,7 @@ fn version_conflict_is_transient_and_never_persisted() {
     let mut corrected = stale.clone();
     corrected.request_digest = Digest::of_bytes(b"progress corrected");
     corrected.expected_version = Some(2);
-    assert_eq!(completed(ctx.funnel.submit(&corrected))["version"], 3);
+    assert_eq!(completed(ctx.funnel.submit(&corrected))["version"], 2);
 }
 
 #[test]
@@ -109,6 +126,7 @@ fn shared_id_across_kinds_commits_cleanly() {
         .funnel
         .store()
         .journal()
+        .unwrap()
         .into_iter()
         .filter(|e| e.aggregate_kind != "run")
         .collect();
@@ -121,8 +139,8 @@ fn shared_id_across_kinds_commits_cleanly() {
 
 #[test]
 fn journal_appends_exactly_one_event_set_per_completed_command() {
-    // Obligation 2's journal half: one event set per completed command,
-    // none on replay, none on reissue.
+    // Obligation 2's journal half: one event set per semantic transition.
+    // Fence observations, replays, and unsupported commands append none.
     let mut ctx = Ctx::new();
     let run = ctx.open_run(Ctx::RUN);
     completed(ctx.funnel.submit(&run));
@@ -135,8 +153,8 @@ fn journal_appends_exactly_one_event_set_per_completed_command() {
     let progress = ctx.progress_cmd("progress 1", "u-1", token.clone(), Some(2), "step");
     completed(ctx.funnel.submit(&progress));
 
-    let journal = ctx.funnel.store().journal();
-    assert_eq!(journal.len(), 5);
+    let journal = ctx.funnel.store().journal().unwrap();
+    assert_eq!(journal.len(), 4);
     let kinds: Vec<&str> = journal.iter().map(|e| e.event_kind.as_str()).collect();
     assert_eq!(
         kinds,
@@ -144,8 +162,7 @@ fn journal_appends_exactly_one_event_set_per_completed_command() {
             "run.opened",
             "work_item.created",
             "unit.admitted",
-            "unit.dispatched",
-            "unit.progress"
+            "unit.dispatched"
         ]
     );
     assert!(
@@ -157,15 +174,15 @@ fn journal_appends_exactly_one_event_set_per_completed_command() {
         .filter(|e| e.aggregate_kind == "unit")
         .map(|e| e.aggregate_version)
         .collect();
-    assert_eq!(unit_versions, [1, 2, 3], "contiguous per aggregate");
+    assert_eq!(unit_versions, [1, 2], "contiguous per aggregate");
 
     // Replays append nothing.
     for cmd in [&run, &wi, &admit, &dispatch, &progress] {
         replayed(ctx.funnel.submit(cmd));
     }
-    assert_eq!(ctx.funnel.store().journal().len(), 5);
+    assert_eq!(ctx.funnel.store().journal().unwrap().len(), 4);
 
-    // token.reissue is not a domain transition: no event.
+    // Reissue remains fail-closed until policy revalidation exists.
     let reissue = ctx.holder_cmd(
         "reissue",
         token,
@@ -174,8 +191,11 @@ fn journal_appends_exactly_one_event_set_per_completed_command() {
             unit_id: "u-1".into(),
         },
     );
-    completed(ctx.funnel.submit(&reissue));
-    assert_eq!(ctx.funnel.store().journal().len(), 5);
+    assert_eq!(
+        rejected(ctx.funnel.submit(&reissue)),
+        (ErrorKind::CapabilityUnsupported, false)
+    );
+    assert_eq!(ctx.funnel.store().journal().unwrap().len(), 4);
 }
 
 #[test]

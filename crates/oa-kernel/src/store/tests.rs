@@ -1,6 +1,7 @@
 //! Store-layer unit tests (formerly the inline `tests` module).
 
 use super::*;
+use crate::ids::Digest;
 
 pub(crate) fn event_pairs(event_id: &str, cursor: u64, agg: &str, ver: u64) -> PropertyMap {
     PropertyMap::from_pairs([
@@ -18,7 +19,14 @@ pub(crate) fn event_pairs(event_id: &str, cursor: u64, agg: &str, ver: u64) -> P
         (db("ordinal"), Value::Uint(0)),
         (db("event_kind"), Value::String(db("test.evt"))),
         (db("payload"), Value::String(db("{}"))),
-        (db("command_id"), Value::String(db("cmd-1"))),
+        (
+            db("receipt_key"),
+            Value::String(db(&format!("unit/{agg}/{event_id}"))),
+        ),
+        (db("command_id"), Value::String(db(event_id))),
+        (db("actor_kind"), Value::String(db("daemon"))),
+        (db("actor_id"), Value::String(db("test"))),
+        (db("occurred_at_ms"), Value::Uint(1)),
     ])
     .expect("event property map")
 }
@@ -27,17 +35,44 @@ pub(crate) fn append_event(store: &Store, event_id: &str, agg: &str, ver: u64) -
     // Allocation under the open write txn — the allocate_cursor
     // ordering contract.
     let mut txn = store.shared.begin_write();
-    let cursor = store.allocate_cursor();
-    let node = {
+    let cursor = store.allocate_cursor().unwrap();
+    let (event_node, receipt_node) = {
         let mut m = txn.mutator();
-        m.create_node(
-            LabelSet::single(db("Event")),
-            event_pairs(event_id, cursor, agg, ver),
-        )
-        .expect("event create")
+        let event_node = m
+            .create_node(
+                LabelSet::single(db("Event")),
+                event_pairs(event_id, cursor, agg, ver),
+            )
+            .expect("event create");
+        let receipt_key = format!("unit/{agg}/{event_id}");
+        let receipt_node = m
+            .create_node(
+                LabelSet::single(db("Receipt")),
+                PropertyMap::from_pairs([
+                    (db("receipt_key"), Value::String(db(&receipt_key))),
+                    (
+                        db("request_digest"),
+                        Value::String(db(Digest::of_bytes(event_id.as_bytes()).as_str())),
+                    ),
+                    (db("principal_kind"), Value::String(db("daemon"))),
+                    (db("principal_id"), Value::String(db("test"))),
+                    (db("status"), Value::String(db("completed"))),
+                    (db("result"), Value::String(db("{}"))),
+                    (db("first_cursor"), Value::Uint(cursor)),
+                    (db("last_cursor"), Value::Uint(cursor)),
+                ])
+                .unwrap(),
+            )
+            .expect("receipt create");
+        (event_node, receipt_node)
     };
     txn.commit().expect("event commit");
-    store.book_insert(BookKind::Event, event_id.to_owned(), node);
+    store.book_insert(BookKind::Event, cursor.to_string(), event_node);
+    store.book_insert(
+        BookKind::Receipt,
+        format!("unit/{agg}/{event_id}"),
+        receipt_node,
+    );
     cursor
 }
 
@@ -64,20 +99,20 @@ fn cursor_allocator_restores_strictly_above_committed_max() {
     // burned across recovery only if committed — an aborted allocation
     // MAY be reused after restart because nothing durable observed it;
     // what is forbidden is allocating at or below the committed max.
-    let burned = store.allocate_cursor();
+    let burned = store.allocate_cursor().unwrap();
     assert_eq!(burned, 3);
     drop(store);
     let store = Store::recover(dir.path(), "inst-2").unwrap();
     // The uncommitted allocation was not durable, so recovery restores
     // to committed-max + 1 = 3 — and this probe burns 3 in doing so.
-    assert_eq!(store.allocate_cursor(), 3);
+    assert_eq!(store.allocate_cursor().unwrap(), 3);
     // The next committed event therefore lands at cursor 4, and the
     // floor after another recovery sits strictly above it.
     let committed_at = append_event(&store, "e3", "u1", 3);
     assert_eq!(committed_at, 4);
     drop(store);
     let store = Store::recover(dir.path(), "inst-3").unwrap();
-    assert_eq!(store.allocate_cursor(), 5);
+    assert_eq!(store.allocate_cursor().unwrap(), 5);
 }
 
 #[test]
@@ -86,7 +121,7 @@ fn duplicate_event_identity_rejects_at_commit() {
     let store = Store::create(dir.path(), "inst-1").unwrap();
     append_event(&store, "e1", "u1", 1);
     // Same event_id, fresh cursor and composite: unique on event_id.
-    let cursor = store.allocate_cursor();
+    let cursor = store.allocate_cursor().unwrap();
     let mut txn = store.shared.begin_write();
     {
         let mut m = txn.mutator();
@@ -98,7 +133,7 @@ fn duplicate_event_identity_rejects_at_commit() {
     }
     assert!(txn.commit().is_err(), "duplicate event_id must fail commit");
     // Same (aggregate, version, ordinal) composite under a new id.
-    let cursor = store.allocate_cursor();
+    let cursor = store.allocate_cursor().unwrap();
     let mut txn = store.shared.begin_write();
     {
         let mut m = txn.mutator();
@@ -119,14 +154,7 @@ fn committed_event_payload_is_immutable() {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::create(dir.path(), "inst-1").unwrap();
     append_event(&store, "e1", "u1", 1);
-    let node = store
-        .books
-        .lock()
-        .unwrap()
-        .events
-        .get("e1")
-        .copied()
-        .unwrap();
+    let node = store.books.lock().unwrap().events.get(&1).copied().unwrap();
     let mut txn = store.shared.begin_write();
     let result = txn.mutator().update_node(
         node,
@@ -176,6 +204,7 @@ fn claims(store: &Store) -> AttemptTokenClaims {
         stamp: Stamp(1),
         authority_epoch: store.authority_epoch(),
         holder_id: "h1".into(),
+        nonce: "n1".into(),
     }
 }
 

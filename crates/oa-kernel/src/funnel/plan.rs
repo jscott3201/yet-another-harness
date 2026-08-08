@@ -37,10 +37,13 @@ pub(super) enum Plan {
         unit_id: String,
         new_version: u64,
         new_epoch: u64,
+        stamp: u64,
+        authority_epoch: u64,
         holder_id: String,
         /// Minted in the plan step, not the apply step: the apply closure
         /// runs inside the Selene mutator and must stay a pure writer.
         attempt_id: String,
+        token_nonce: String,
         existing_lease: Option<(NodeId, u64)>,
         /// §1.2: at most one active attempt per unit — the prior epoch's
         /// row flips to `superseded` in this same transaction (§3.1).

@@ -1,8 +1,6 @@
 #!/usr/bin/env bash
 # Compile gates on every push: clippy -D warnings across all targets and the
-# full workspace test suite. These live HERE rather than in remote CI because
-# the workspace pins selene-db as a local path dependency the hosted runner
-# cannot see (.github/workflows/ci.yml documents the split).
+# full workspace test suite. Hosted CI repeats both gates.
 # Skip once with `git push --no-verify`; skip a session with
 # `export OA_SKIP_HOOKS=1` (empty, 0, and false do not skip).
 
@@ -15,5 +13,5 @@ esac
 
 cd "$(git rev-parse --show-toplevel)"
 
-cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace
+cargo clippy --locked --workspace --all-targets -- -D warnings
+cargo test --locked --workspace

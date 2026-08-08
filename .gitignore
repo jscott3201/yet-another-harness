@@ -1,6 +1,7 @@
 *-id.json
 .DS_Store
 /target
+**/target
 
 # Owner's local planning corpus — never committed to the public repo (R17).
 # Private-repo custody is the fallback if needed; see _research/decisions/00.

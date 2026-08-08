@@ -13,7 +13,7 @@
 # second form: PR N's artifacts can mask a break PR N+1 introduces, and the
 # two only diverge once someone builds from a clean tree.
 #
-# Cost: this rebuilds the whole workspace including the selene-db path
+# Cost: this rebuilds the whole workspace including the pinned Selene Git
 # dependency, so it is minutes, not seconds. Use the hooks for the fast loop
 # and this before a PR/commit that lands.
 #
@@ -28,9 +28,15 @@ cd "$(git rev-parse --show-toplevel)"
 
 echo "==> cargo clean"
 cargo clean
+cargo clean --manifest-path tools/protocol-codegen/Cargo.toml
 
 echo "==> fmt"
 cargo fmt --all --check
+cargo fmt --manifest-path tools/protocol-codegen/Cargo.toml -- --check
+
+echo "==> generated protocol artifacts"
+cargo clippy --locked --manifest-path tools/protocol-codegen/Cargo.toml -- -D warnings
+cargo run --locked -p oa-kernel --bin generate-protocol -- --check
 
 echo "==> file-size cap"
 bash .github/scripts/check-file-size.sh
@@ -39,10 +45,10 @@ echo "==> no-secret scan"
 bash .github/scripts/check-no-secrets.sh
 
 echo "==> clippy (-D warnings, all targets, from scratch)"
-cargo clippy --workspace --all-targets -- -D warnings
+cargo clippy --locked --workspace --all-targets -- -D warnings
 
 echo "==> tests (from scratch)"
-cargo test --workspace
+cargo test --locked --workspace
 
 echo
 echo "FULL GATE GREEN"

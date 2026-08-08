@@ -7,15 +7,33 @@
 set -euo pipefail
 
 violations=0
+CACHED=false
+[ "${1:-}" = "--cached" ] && CACHED=true
 
 scan() {
   local pattern="$1"
   local label="$2"
-  if git grep -nE "$pattern" >/dev/null 2>&1; then
-    echo "FAIL: matched $label pattern in tracked files:"
-    git grep -nE "$pattern" || true
-    violations=$((violations + 1))
-  fi
+  local grep_args=(-nE)
+  $CACHED && grep_args+=(--cached)
+  local output
+  local status
+  set +e
+  output=$(git grep "${grep_args[@]}" -e "$pattern" 2>&1)
+  status=$?
+  set -e
+  case "$status" in
+    0)
+      echo "FAIL: matched $label pattern in tracked files:"
+      printf '%s\n' "$output"
+      violations=$((violations + 1))
+      ;;
+    1) ;;
+    *)
+      echo "FAIL: secret scanner could not inspect the repository:"
+      printf '%s\n' "$output"
+      exit 2
+      ;;
+  esac
 }
 
 scan 'AKIA[0-9A-Z]{16}' 'AWS access key id'

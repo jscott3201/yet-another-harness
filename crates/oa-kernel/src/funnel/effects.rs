@@ -116,6 +116,16 @@ fn already_settled(intent: &EffectIntent, operation_key: &str) -> Result<(), Rej
     Ok(())
 }
 
+fn next_version(version: u64) -> Result<u64, Rejection> {
+    version.checked_add(1).ok_or_else(|| {
+        (
+            ErrorKind::ResourceExhausted,
+            "effect version space exhausted".into(),
+            true,
+        )
+    })
+}
+
 fn update_accepted(
     row: &EffectRow,
     intent: EffectIntent,
@@ -201,7 +211,7 @@ impl Funnel {
                 }
                 intent.state = EffectState::Dispatched;
                 intent.dispatched_at = Some(*dispatched_at);
-                intent.version = row.version + 1;
+                intent.version = next_version(row.version)?;
                 update_accepted(
                     row,
                     intent,
@@ -251,7 +261,7 @@ impl Funnel {
                 })?;
                 intent.state = EffectState::Settled;
                 intent.settled_at = Some(*settled_at);
-                intent.version = row.version + 1;
+                intent.version = next_version(row.version)?;
                 let wire = terminal_wire(*terminal);
                 update_accepted(
                     row,
@@ -288,7 +298,7 @@ impl Funnel {
                 }
                 intent.state = EffectState::Reconciling;
                 intent.next_reconcile_at = Some(*next_reconcile_at);
-                intent.version = row.version + 1;
+                intent.version = next_version(row.version)?;
                 update_accepted(
                     row,
                     intent,
@@ -410,7 +420,7 @@ impl Funnel {
             let terminal = EffectTerminal::Cancelled;
             intent.settle(terminal).expect("prepared settles cancelled");
             intent.settled_at = Some(settled_at);
-            intent.version = row.version + 1;
+            intent.version = next_version(row.version)?;
             return update_accepted(
                 row,
                 intent,
@@ -424,7 +434,7 @@ impl Funnel {
             );
         }
         intent.state = EffectState::Dispatching;
-        intent.version = row.version + 1;
+        intent.version = next_version(row.version)?;
         update_accepted(
             row,
             intent,
