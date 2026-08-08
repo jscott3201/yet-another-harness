@@ -565,7 +565,6 @@ impl Funnel {
                 let record = serde_json::to_string(&intent).expect("intent serializes");
                 Ok(Some(EffectParkPlan {
                     effect_node: row.node,
-                    operation_key: intent.operation_key.clone(),
                     effect_version: intent.version,
                     effect_record: record,
                 }))
@@ -616,7 +615,7 @@ impl Funnel {
         if let Some(park) = &park_effect {
             events.push(EventDraft {
                 aggregate_kind: "effect",
-                aggregate_id: park.operation_key.clone(),
+                aggregate_id: member_id.clone(),
                 aggregate_version: park.effect_version,
                 event_kind: "effect.reconciling",
                 payload: json!({ "next_reconcile_at": null, "source": "cancel_delivery" }),

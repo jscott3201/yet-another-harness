@@ -227,9 +227,8 @@ fn dispatch_is_a_committed_transition_before_the_adapter_acts() {
 #[test]
 fn irreversible_without_approval_cannot_reach_dispatching() {
     // R20's predicate at the boundary that matters: the gate must fire
-    // BEFORE the adapter is authorized, and it is permanent for this
-    // intent — no method in this milestone can attach an approval, so the
-    // lawful path is a new logical operation once the approval commits.
+    // BEFORE the adapter is authorized. The answer is not persisted because
+    // a later cancellation can lawfully settle the prepared intent.
     let mut ctx = Ctx::new();
     ctx.seed_unit();
     let token = ctx.dispatch("u-1", "h1", 1);
@@ -243,10 +242,10 @@ fn irreversible_without_approval_cannot_reach_dispatching() {
         rejected(ctx.funnel.submit(&d)),
         (ErrorKind::ApprovalRequired, false)
     );
-    // Permanently deterministic for this intent: persisted and replayed.
+    // Revalidation is required so a later cancellation can take precedence.
     assert_eq!(
         rejected(ctx.funnel.submit(&d)),
-        (ErrorKind::ApprovalRequired, true)
+        (ErrorKind::ApprovalRequired, false)
     );
     // Nothing was authorized, so nothing can have been dispatched.
     assert_eq!(

@@ -371,7 +371,7 @@ fn a14_prepared_settles_cancelled_and_dispatching_follows_5_3() {
     let token = ctx.dispatch("u-1", "h1", 1);
 
     // P stays prepared; D reaches `dispatching` (never recorded dispatched).
-    let (p_key, _, _) = prepare(
+    let (p_key, p_intent, _) = prepare(
         &mut ctx,
         "prepared P",
         "u-1",
@@ -425,7 +425,7 @@ fn a14_prepared_settles_cancelled_and_dispatching_follows_5_3() {
         .journal()
         .unwrap()
         .into_iter()
-        .filter(|e| e.aggregate_kind == "effect" && e.aggregate_id == p_key)
+        .filter(|e| e.aggregate_kind == "effect" && e.aggregate_id == p_intent.to_string())
         .map(|e| e.event_kind.clone())
         .collect();
     assert_eq!(kinds, ["effect.prepared", "effect.settled"]);
@@ -445,7 +445,9 @@ fn a14_prepared_settles_cancelled_and_dispatching_follows_5_3() {
         .journal()
         .unwrap()
         .into_iter()
-        .filter(|event| event.aggregate_kind == "effect" && event.aggregate_id == d_key)
+        .filter(|event| {
+            event.aggregate_kind == "effect" && event.aggregate_id == d_intent.to_string()
+        })
         .map(|event| (event.event_kind, event.aggregate_version, event.ordinal))
         .collect();
     assert_eq!(

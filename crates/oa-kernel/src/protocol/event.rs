@@ -5,6 +5,7 @@ pub(crate) fn project(record: crate::store::EventRecord) -> Result<Event, String
     let event_id = record.event_id.clone();
     if [
         Some(record.event_id.as_str()),
+        Some(record.aggregate_id.as_str()),
         Some(record.command_id.as_str()),
         Some(record.actor_id.as_str()),
         record.causation_id.as_deref(),

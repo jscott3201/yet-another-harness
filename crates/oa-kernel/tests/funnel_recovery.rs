@@ -250,17 +250,19 @@ fn predecessor_cancellation_bars_its_effect_under_a_successor_token() {
     let first = completed(ctx.funnel.submit(&dispatch));
     let first_token = oa_kernel::funnel::token_from_result(&first).unwrap();
     let first_attempt = first["attempt_id"].as_str().unwrap();
-    let (key, intent_id) = prepare(&mut ctx, &first_token, Uuid7::mint(7, 4));
+    let mut spec = effect_spec(Uuid7::mint(7, 4), "req");
+    spec.reversibility_class = oa_kernel::effect::ReversibilityClass::Irreversible;
+    let prepare = ctx.prepare_cmd("prepare", "u-1", first_token, spec);
+    let prepared = completed(ctx.funnel.submit(&prepare));
+    let key = prepared["operation_key"].as_str().unwrap().to_owned();
+    let intent_id = prepared["effect_intent_id"].as_str().unwrap().to_owned();
     let request = ctx.cancel_request_cmd(
         "cancel first attempt effect",
         CancelKind::Attempt,
         first_attempt,
         CancelReason::OwnerRequest,
         CancelPolicy::AttachedCascade,
-        vec![member_input(
-            CancelKind::EffectIntent,
-            &intent_id.to_string(),
-        )],
+        vec![member_input(CancelKind::EffectIntent, &intent_id)],
     );
     completed(ctx.funnel.submit(&request));
 

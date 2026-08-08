@@ -92,7 +92,7 @@ pub(super) fn validate_cancel_park(
         ));
     }
     let node = store
-        .effect_node(&event.aggregate_id)
+        .effect_intent_id_node(&event.aggregate_id)
         .ok_or_else(|| StoreError::Internal("park event has no Effect row".into()))?;
     let read = store.shared.read();
     let props = read
@@ -132,36 +132,44 @@ fn validate_identity(
     event: &EventRecord,
 ) -> Result<(), StoreError> {
     let (event_kinds, aggregate_kind, identity_field) = match command_type {
-        "run.open" => (&["run.opened"][..], "run", "run_id"),
-        "run.close" => (&["run.closed"][..], "run", "run_id"),
-        "work_item.create" => (&["work_item.created"][..], "work_item", "work_item_id"),
-        "unit.admit" => (&["unit.admitted"][..], "unit", "unit_id"),
-        "unit.dispatch" => (&["unit.dispatched"][..], "unit", "unit_id"),
-        "unit.stamp_bump" => (&["unit.stamp_bumped"][..], "unit", "unit_id"),
-        "effect.prepare" => (&["effect.prepared"][..], "effect", "operation_key"),
+        "run.open" => (&["run.opened"][..], "run", Some("run_id")),
+        "run.close" => (&["run.closed"][..], "run", Some("run_id")),
+        "work_item.create" => (
+            &["work_item.created"][..],
+            "work_item",
+            Some("work_item_id"),
+        ),
+        "unit.admit" => (&["unit.admitted"][..], "unit", Some("unit_id")),
+        "unit.dispatch" => (&["unit.dispatched"][..], "unit", Some("unit_id")),
+        "unit.stamp_bump" => (&["unit.stamp_bumped"][..], "unit", Some("unit_id")),
+        "effect.prepare" => (&["effect.prepared"][..], "effect", None),
         "effect.dispatch" => (
             &["effect.dispatching", "effect.settled"][..],
             "effect",
-            "operation_key",
+            None,
         ),
-        "effect.record_dispatched" => (&["effect.dispatched"][..], "effect", "operation_key"),
-        "effect.settle" => (&["effect.settled"][..], "effect", "operation_key"),
-        "effect.park_reconciling" => (&["effect.reconciling"][..], "effect", "operation_key"),
+        "effect.record_dispatched" => (&["effect.dispatched"][..], "effect", None),
+        "effect.settle" => (&["effect.settled"][..], "effect", None),
+        "effect.park_reconciling" => (&["effect.reconciling"][..], "effect", None),
         "cancel.request" => (
             &["cancel_request.requested"][..],
             "cancel_request",
-            "cancel_request_id",
+            Some("cancel_request_id"),
         ),
         "cancel.record_delivery" => (
             &["cancel_request.delivered"][..],
             "cancel_request",
-            "cancel_request_id",
+            Some("cancel_request_id"),
         ),
         _ => return Err(StoreError::Internal("receipt has no event contract".into())),
     };
+    let identity_matches = match identity_field {
+        Some(field) => event.aggregate_id == string(result, field)?,
+        None => true,
+    };
     if !event_kinds.contains(&event.event_kind.as_str())
         || event.aggregate_kind != aggregate_kind
-        || event.aggregate_id != string(result, identity_field)?
+        || !identity_matches
         || event.ordinal != 0
         || result
             .get("version")
@@ -400,6 +408,16 @@ fn validate_aggregate(
             let props = read
                 .node_properties(node)
                 .ok_or_else(|| StoreError::Internal("receipt Effect row is unreadable".into()))?;
+            if props
+                .get(&db("effect_intent_id"))
+                .and_then(value_str)
+                .as_deref()
+                != Some(event.aggregate_id.as_str())
+            {
+                return Err(StoreError::Internal(
+                    "effect receipt disagrees with its event aggregate id".into(),
+                ));
+            }
             version_at_least(props, event.aggregate_version, "Effect")?;
             if command_type == "effect.prepare" {
                 let intent: EffectIntent = serde_json::from_str(

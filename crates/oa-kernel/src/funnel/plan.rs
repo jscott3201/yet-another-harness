@@ -125,7 +125,6 @@ pub(super) struct CancelDeliveryPlan {
 /// unset, version bumped.
 pub(super) struct EffectParkPlan {
     pub effect_node: NodeId,
-    pub operation_key: String,
     pub effect_version: u64,
     pub effect_record: String,
 }

@@ -280,7 +280,7 @@ fn recovery_rejects_extra_rejection_result_fields() {
 
 #[test]
 fn recovery_rejects_non_durable_rejection_kinds() {
-    for kind in ["outcome_unknown", "internal"] {
+    for kind in ["outcome_unknown", "internal", "approval_required"] {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::create(dir.path(), "inst-1").unwrap();
         let mut receipt = receipt_pairs("run.open", 1);
@@ -362,7 +362,7 @@ fn recovery_rejects_effect_dispatch_result_that_disagrees_with_its_event_branch(
         r#"{"operation_key":"op-1","version":2,"state":"dispatching"}"#,
         "effect.settled",
         "effect",
-        "op-1",
+        &Uuid7::mint(1, 1).to_string(),
         2,
         r#"{"terminal":"cancelled"}"#,
     );
@@ -388,7 +388,7 @@ fn recovery_rejects_event_bearing_existing_prepare_receipt() {
         ),
         "effect.prepared",
         "effect",
-        "op-1",
+        &Uuid7::mint(1, 1).to_string(),
         1,
         &format!(r#"{{"effect_intent_id":"{}"}}"#, Uuid7::mint(1, 1)),
     );
@@ -603,7 +603,7 @@ fn cancellation_park_event_must_match_the_delivered_effect() {
             cursor: 2,
             event_id: "event-2".into(),
             aggregate_kind: "effect".into(),
-            aggregate_id: "op-1".into(),
+            aggregate_id: Uuid7::mint(1, 1).to_string(),
             aggregate_version: 1,
             ordinal: 0,
             event_kind: "effect.reconciling".into(),
@@ -658,7 +658,7 @@ fn recovery_rejects_impossible_effect_dispatch_settlement_payload() {
         r#"{"operation_key":"op-1","version":2,"state":"settled"}"#,
         "effect.settled",
         "effect",
-        "op-1",
+        &Uuid7::mint(1, 1).to_string(),
         2,
         r#"{"terminal":"succeeded","rule_4":false}"#,
     );

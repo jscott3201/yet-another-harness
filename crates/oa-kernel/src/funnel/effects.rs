@@ -145,7 +145,7 @@ fn update_accepted(
         },
         events: vec![EventDraft {
             aggregate_kind: "effect",
-            aggregate_id: intent.operation_key.clone(),
+            aggregate_id: intent.effect_intent_id.to_string(),
             aggregate_version: intent.version,
             event_kind,
             payload,
@@ -387,23 +387,6 @@ impl Funnel {
                 ));
             }
         }
-        // R20: an irreversible intent MUST NOT reach `dispatching` without a
-        // committed approval. Persisted: nothing in this milestone's method
-        // registry can attach an approval to an existing intent (that is
-        // ADR-002's separate ApprovalResponse command, which no holder may
-        // pre-answer under P15.5), so for THIS intent the answer can never
-        // change. The lawful path is a new logical operation once the
-        // approval is committed — safe precisely because this gate
-        // guarantees nothing was dispatched.
-        if intent.reversibility_class == ReversibilityClass::Irreversible
-            && intent.approval_ref.is_none()
-        {
-            return Err((
-                ErrorKind::ApprovalRequired,
-                format!("irreversible effect {operation_key} has no committed approval_ref"),
-                true,
-            ));
-        }
         // §5.2 rule 4's second disjunct (A14): an intent whose
         // `prepared -> dispatching` transition did NOT commit before an
         // applicable cancellation committed settles `cancelled` instead of
@@ -432,6 +415,19 @@ impl Funnel {
                     "rule_4": true,
                 }),
             );
+        }
+        // R20: an irreversible intent MUST NOT reach `dispatching` without a
+        // committed approval. This rejection is not durable: a later
+        // cancellation changes the lawful result from approval_required to
+        // a cancelled settlement without authorizing the adapter.
+        if intent.reversibility_class == ReversibilityClass::Irreversible
+            && intent.approval_ref.is_none()
+        {
+            return Err((
+                ErrorKind::ApprovalRequired,
+                format!("irreversible effect {operation_key} has no committed approval_ref"),
+                false,
+            ));
         }
         intent.state = EffectState::Dispatching;
         intent.version = next_version(row.version)?;
@@ -582,7 +578,7 @@ impl Funnel {
             },
             events: vec![EventDraft {
                 aggregate_kind: "effect",
-                aggregate_id: key.clone(),
+                aggregate_id: effect_intent_id.clone(),
                 aggregate_version: 1,
                 event_kind: "effect.prepared",
                 payload: json!({

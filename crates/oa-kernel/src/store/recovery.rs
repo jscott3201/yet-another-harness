@@ -188,20 +188,11 @@ impl Store {
                     next_attempt_id: id.to_owned(),
                 })
             }
-            CancelKind::EffectIntent => {
-                let node = self.effect_intent_id_node(id).ok_or_else(|| {
-                    StoreError::Internal("cancellation has no effect root".into())
-                })?;
-                let operation_key = read
-                    .node_properties(node)
-                    .and_then(|properties| properties.get(&db("operation_key")).and_then(value_str))
-                    .ok_or_else(|| StoreError::Internal("effect root is unreadable".into()))?;
-                Ok(HistoricalProof::Aggregate {
-                    aggregate_kind: "effect",
-                    aggregate_id: operation_key,
-                    event_kind: "effect.prepared",
-                })
-            }
+            CancelKind::EffectIntent => Ok(HistoricalProof::Aggregate {
+                aggregate_kind: "effect",
+                aggregate_id: id.to_owned(),
+                event_kind: "effect.prepared",
+            }),
         }
     }
 
@@ -220,20 +211,11 @@ impl Store {
                 aggregate_id: root_id.to_owned(),
                 event_kind: "run.closed",
             })),
-            CancelKind::EffectIntent => {
-                let node = self.effect_intent_id_node(root_id).ok_or_else(|| {
-                    StoreError::Internal("empty cancellation has no effect root".into())
-                })?;
-                let operation_key = read
-                    .node_properties(node)
-                    .and_then(|properties| properties.get(&db("operation_key")).and_then(value_str))
-                    .ok_or_else(|| StoreError::Internal("effect root is unreadable".into()))?;
-                Ok(Some(HistoricalProof::Aggregate {
-                    aggregate_kind: "effect",
-                    aggregate_id: operation_key,
-                    event_kind: "effect.settled",
-                }))
-            }
+            CancelKind::EffectIntent => Ok(Some(HistoricalProof::Aggregate {
+                aggregate_kind: "effect",
+                aggregate_id: root_id.to_owned(),
+                event_kind: "effect.settled",
+            })),
             CancelKind::Attempt => {
                 let node = self.attempt_id_node(root_id).ok_or_else(|| {
                     StoreError::Internal("empty cancellation has no attempt root".into())

@@ -29,7 +29,10 @@ fn recovery_rejects_wire_invalid_event_identifiers() {
     let store = Store::create(dir.path(), "inst-1").unwrap();
     let mut event = super::tests::event_pairs("e1", 1, "u1", 1);
     event
-        .set(db("causation_id"), Value::String(db("invalid/id")))
+        .set(db("aggregate_id"), Value::String(db("invalid/id")))
+        .unwrap();
+    event
+        .set(db("agg_ver_ord"), Value::String(db("unit/invalid/id/1/0")))
         .unwrap();
     create_raw(&store, "Event", event);
     let mut receipt = super::review_tests::pairs_for("Receipt", "unit/u1/e1");

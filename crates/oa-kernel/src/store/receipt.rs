@@ -36,7 +36,6 @@ pub(super) fn validate_rejection_result(result: &str) -> Result<(), StoreError> 
             crate::error::ErrorKind::InvalidRequest
                 | crate::error::ErrorKind::Unauthorized
                 | crate::error::ErrorKind::FenceRejected
-                | crate::error::ErrorKind::ApprovalRequired
                 | crate::error::ErrorKind::ResourceExhausted
                 | crate::error::ErrorKind::PayloadTooLarge
         )
