@@ -88,4 +88,9 @@ effects. The 8- and 32-writer arms are capacity evidence only — the
 runtime's admission cap of two concurrent writers is a separate,
 already-made design decision that this gate neither reopens nor ratifies.
 
-Next gate: G01, the model-free kernel milestone.
+At the time of this ruling, G01 was the planned next gate. The later
+full-harness pivot preserves this report only as storage evidence. The G01
+plan, the two-writer admission cap, and kernel ownership of subscriptions are
+historical context rather than binding target-architecture decisions. The next
+proof is being re-scoped around contextual composition, plugin boundaries, and
+integration with the existing kernel.

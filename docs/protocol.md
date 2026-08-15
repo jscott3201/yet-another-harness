@@ -1,5 +1,10 @@
 # Application Protocol
 
+> **Pivot note:** this page documents the current model-free kernel's Adapter 1
+> experiment. It is not the future plugin ABI, SDK contract, or a promised
+> stable daemon protocol. Useful behavior and tests may be retained while the
+> command surface is reshaped around the new harness architecture.
+
 Open Agent's application protocol separates commands, receipts, views, events,
 and server requests from any transport. Adapter 1 is an in-process adapter that
 still serializes and deserializes JSON so tests exercise the wire shapes.

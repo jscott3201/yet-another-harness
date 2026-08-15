@@ -1,51 +1,233 @@
 # Open Agent
 
-Open Agent is an experimental, local-first runtime for supervising coding
-agents. It is designed to preserve a trustworthy record across retries,
-crashes, cancellation, and external tool calls.
+**A Rust-native, graph-backed, plugin-extensible harness for building and
+operating agents.**
 
-**Status: pre-0.1 and not ready for use.** There is no release, installable
-daemon, live model connection, or production execution backend yet. Current
-work is building and testing the model-free kernel first.
+Open Agent is an early-stage effort to build a complete agent harness whose
+runtime truth, composition model, memory, and extension boundaries are owned in
+Rust. The harness is designed around a live graph of components and a durable
+Selene graph of work, sessions, memory, evidence, artifacts, and external
+effects.
 
-## Why Open Agent
+The project is currently pivoting from a narrow reliability kernel into this
+larger architecture. The existing kernel is a useful foundation, not a frozen
+specification.
 
-Coding agents can edit files and call tools, but long-running work also needs
-answers to harder questions:
+> **Status: pre-0.1 and not ready for use.** There is no installable daemon,
+> live agent loop, plugin runtime, sandbox, or end-user client yet. APIs and
+> crate boundaries will change.
 
-- Did this command commit before the process crashed?
-- Is this worker still authorized to publish a result?
-- Did an external action succeed, fail, or become uncertain?
-- Can a retry safely continue without repeating an effect?
-- Which result is still current and authorized to advance state?
+## Direction
 
-Open Agent treats those answers as durable runtime state instead of inferring
-them from a surviving process or chat transcript.
+Open Agent treats an agent harness as a composition of replaceable components,
+not one privileged loop surrounded by callbacks. Model adapters, tools, prompt
+and context contributors, memory strategies, subagent drivers, execution
+backends, policies, storage projections, and user surfaces all attach through
+explicit capabilities.
 
-## Current Progress
+The intended result has four defining properties:
 
-- Storage fan-in and crash recovery gate: passed across 1,440 scored trials.
-- Model-free kernel gate: in progress.
-- Implemented foundations: command receipts, semantic journal, fencing,
-  cancellation records, effect reconciliation state and parking, provider
-  normalization, and the first in-process JSON protocol slice.
-- Not implemented: usable daemon, CLI, live providers, real tool execution,
-  sandboxing, MCP lifecycle, or network adapters.
+- **Rust owns authority.** Lifecycle, policy, durable state transitions,
+  permissions, recovery, and external-effect reconciliation remain in the Rust
+  host.
+- **Selene stores durable meaning.** Work, attempts, sessions, memories,
+  evidence, decisions, artifacts, plugin revisions, and provenance form a
+  queryable graph rather than a collection of unrelated logs.
+- **Plugins are first-class.** Built-in Rust components and sandboxed Wasm,
+  JavaScript/TypeScript, and Python extensions share one semantic SDK surface.
+- **Composition is reactive.** Components declare the services they provide
+  and require. Activation, replacement, failure, and unload have scoped,
+  reversible local effects.
 
-See [project status](docs/project-status.md) for the detailed gate table and
-[architecture](docs/architecture.md) for the runtime model.
+## Target Architecture
+
+```text
+                    CLI / UI / API / embedding SDKs
+                                  |
+                                  v
++-------------------------------------------------------------------+
+|                         Rust harness                              |
+|                                                                   |
+|  agent/session loop     contextual composition    policy/approval |
+|  tools + providers  <-> services + effect scopes <-> capabilities |
+|  workflows/subagents          lifecycle             observability |
++-------------------------------+-----------------------------------+
+                                |
+                 durable commands, facts, and evidence
+                                |
+                                v
++-------------------------------------------------------------------+
+|                         Selene graph                              |
+| work | sessions | memory | evidence | artifacts | plugin lineage  |
+|       receipts | leases | fencing | external-effect ledger        |
++-------------------------------------------------------------------+
+                                |
+               explicit, capability-scoped host interfaces
+                                |
+        +-----------------------+------------------------+
+        |                       |                        |
+  built-in Rust          Wasm components       sandboxed processes
+                         Wasmtime + WIT       Node/TS and CPython
+```
+
+### Contextual composition
+
+The live runtime will use an idiomatic Rust interpretation of the contextual
+composition model described by Cordis:
+
+- component instances move through explicit pending, starting, active,
+  stopping, failed, and removed states;
+- required services keep consumers pending until a compatible provider exists;
+- replacing a provider causes controlled recomposition of its dependents;
+- registrations and other local effects belong to nested scopes and unwind
+  automatically;
+- isolation realms and policy interception narrow what a component can see or
+  do.
+
+Live values, closures, and guest handles remain in memory. Selene records
+durable desired state, identities, relationships, decisions, and evidence.
+
+### Durable graph and memory
+
+Selene is more than a persistence adapter. It is the substrate for linking:
+
+- goals, work items, attempts, dependencies, decisions, and verification;
+- sessions, model turns, tool calls, external effects, and receipts;
+- observations, memories, summaries, source evidence, and retrieval traces;
+- artifacts, code locations, plugin revisions, evaluations, and provenance.
+
+Plugins will access graph and memory capabilities through namespaced host
+commands and queries. They will not receive a raw database handle or bypass the
+mutation and authority boundaries.
+
+### Plugin SDK and execution lanes
+
+One semantic plugin model will be presented through language-native SDKs. The
+transport and isolation mechanism may differ by lane.
+
+| Lane | Intended use | Boundary |
+|---|---|---|
+| Built-in Rust | First-party components and trusted integrations | Statically linked Rust traits |
+| Wasm Component | Portable third-party plugins | Wasmtime, WIT imports/exports, explicit limits |
+| Node.js / TypeScript | Modern ESM plugins and npm packages allowed by sandbox policy | ESM-first SDK over a sandboxed process protocol |
+| CPython | Modern Python plugins and packages supported by the selected worker and sandbox | Latest stable CPython in a sandboxed process, with PyO3-backed SDK support |
+| Native embedding | Supported foreign-language applications embedding the Rust library | Optional UniFFI bindings; not a plugin sandbox or universal plugin ABI |
+| Browser / JS host | Rust-backed web and JavaScript utilities | Optional `wasm-bindgen` surface |
+
+The compatibility policy will favor current runtimes rather than historical
+versions: the latest stable CPython line, the current Node.js release and active
+LTS line, modern ESM, and contemporary TypeScript syntax.
+
+Untrusted Python, JavaScript, and native code will not execute inside the Rust
+authority process. In-process Wasm is a target only when explicit WIT imports
+and host-enforced resource limits are in place. Node and Python plugins will
+run in supervised worker processes constrained by an OS sandbox, container, or
+stronger isolation backend. Runtime permission switches are defense in depth,
+not the security boundary. No plugin sandbox has been implemented or audited
+yet.
+
+### Two kinds of effects
+
+The design deliberately separates two concerns:
+
+1. **Local reversible effects** register services, tools, listeners, tasks, and
+   other live resources. Closing their scope unwinds them.
+2. **Durable external effects** may escape the process through files, Git,
+   subprocesses, networks, providers, or remote tools. They use the existing
+   prepare, dispatch, settle, and reconciling/parking state machinery; the
+   query-before-retry reconciliation worker remains future work.
+
+A clean plugin unload cannot prove that an external action did not happen. That
+distinction is a hard runtime invariant.
+
+## Existing Foundation
+
+The repository already contains a model-free Rust kernel and evidence harness:
+
+- atomic Selene commits for current state, semantic events, and command
+  receipts;
+- authority and attempt epochs, leases, fencing, and stale-holder rejection;
+- durable cancellation scopes and delivery observations;
+- external-effect preparation, dispatch evidence, settlement, uncertainty, and
+  parking;
+- provider stream normalization fixtures for OpenAI Responses and Anthropic
+  Messages shapes;
+- an in-process JSON protocol slice with generated schemas and TypeScript
+  bindings;
+- a passed storage fan-in and crash-recovery gate across 1,440 scored trials.
+
+These mechanics are candidates for integration into the new harness. The
+current closed command surface, crate layout, and earlier product plan are not
+treated as architectural authority.
+
+## Roadmap
+
+The pivot is organized around executable vertical slices rather than a large
+up-front specification:
+
+1. Build the Rust composition kernel and an independent semantic conformance
+   corpus informed by Cordis lifecycle behavior.
+2. Define the plugin manifest, capability model, lifecycle, and SDK
+   conformance suite.
+3. Connect scoped local effects to the existing durable external-effect and
+   recovery machinery.
+4. Establish Selene-native work, session, memory, evidence, and plugin-lineage
+   graphs.
+5. Prove Wasm, Node/TypeScript, and Python plugins against the same tool and
+   graph capabilities.
+6. Deliver one useful agent vertical slice: session, model provider, prompt
+   assembly, tools, sandboxed execution, memory, and a bounded subagent.
+7. Add the daemon, CLI and UI surfaces, adversarial sandbox tests, evaluations,
+   packaging, and release discipline.
+
+Detailed working specifications and sprint tracking are intentionally kept out
+of the public repository while the pivot is being explored. Public documents
+describe implemented behavior and stable direction; tests and evidence decide
+when an experiment becomes a commitment.
+
+## Prior Art and Attribution
+
+Open Agent is being developed independently in Rust. It currently vendors no
+code from the projects below, but it deliberately learns from them. DeepSeek
+Harness itself is [powered by Cordis](https://github.com/deepseek-ai/deepseek-harness/blob/47f943859bef60e4160492346772ded9b24f765a/README.md),
+so we credit DeepSeek Harness for harness-level implementation influences and
+Cordis and its paper for the underlying composition model.
+
+- [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness/tree/47f943859bef60e4160492346772ded9b24f765a)
+  demonstrates a product architecture in which the model adapter, tool
+  registry, session log, agent loop, sandbox, UI, and other capabilities are
+  composed as plugins. Concept-level influences from its implementation
+  include plugin-first product decomposition, service-definition/provider/
+  consumer seams, layered profiles and bundles, a guarded tool pipeline, a
+  provider-backed subagent taxonomy, and the distinction between durable
+  session facts and live extension events. See its pinned
+  [architecture](https://github.com/deepseek-ai/deepseek-harness/blob/47f943859bef60e4160492346772ded9b24f765a/docs/architecture.md),
+  [capability-seam catalog](https://github.com/deepseek-ai/deepseek-harness/blob/47f943859bef60e4160492346772ded9b24f765a/docs/capability-seams.md),
+  [tool pipeline](https://github.com/deepseek-ai/deepseek-harness/blob/47f943859bef60e4160492346772ded9b24f765a/docs/tool-execution-pipeline.md),
+  and [subagent model](https://github.com/deepseek-ai/deepseek-harness/blob/47f943859bef60e4160492346772ded9b24f765a/docs/subsystems/subagent.md).
+- [Cordis](https://github.com/cordiverse/cordis/tree/8cc9e33fab69e2d0476d126baaf2acb24e6a6ab4)
+  supplies the semantic inspiration for contexts, reactive dependencies,
+  fibers/component instances, service isolation, and reversible effect scopes.
+  The accompanying paper by Yifan Shi, Wei Zhang, and Tianyi Cui,
+  [*A Programming Paradigm for Spatiotemporal Composability*](https://github.com/cordiverse/paper/blob/948a07b369c62adb3b12e102458be5c18dfb69b9/paper.pdf),
+  is the conceptual reference. The target design will implement these ideas
+  idiomatically in Rust and combine them with the existing durability and
+  authority kernel plus planned graph and memory domains.
+
+The pinned links document the sources reviewed for this pivot. Upstream
+projects are evolving independently and do not define Open Agent compatibility.
 
 ## Repository
 
 | Path | Contents |
 |---|---|
-| `crates/oa-kernel/` | Model-free kernel and Adapter 1 work |
-| `crates/exp001-harness/` | Storage and recovery evidence harness |
-| `generated/protocol/` | Checked-in client/server JSON Schemas and TypeScript bindings |
-| `docs/` | Architecture, protocol, development, and gate reports |
+| `crates/oa-kernel/` | Current model-free durability, authority, effect, cancellation, provider, and protocol kernel |
+| `crates/exp001-harness/` | Storage fan-in and crash-recovery evidence harness |
+| `generated/protocol/` | Checked-in JSON Schemas and TypeScript bindings for the current protocol experiment |
+| `docs/` | Public architecture, protocol, development, status, and gate evidence |
 
-The workspace pins Selene to an exact public Git revision. Cargo fetches that
-revision during the first build.
+The workspace pins Selene to an exact public Git revision so local and hosted
+builds use the same storage implementation.
 
 ## Development
 
@@ -61,18 +243,8 @@ Run the complete local gate before a pull request:
 bash scripts/full-gate.sh
 ```
 
-Source files are capped at 700 reviewable lines. Generated protocol artifacts,
-formatting, Clippy, tests, and documentation updates are part of the pull
-request checklist. See [development](docs/development.md) for details.
-
-## Documentation
-
-- [Documentation index](docs/README.md)
-- [Project status](docs/project-status.md)
-- [Architecture](docs/architecture.md)
-- [Application protocol](docs/protocol.md)
-- [Development and pull requests](docs/development.md)
-- [G02 storage evidence](docs/gates/G02-storage-fanin-recovery.md)
+See [development](docs/development.md) for repository checks and
+[project status](docs/project-status.md) for the implemented boundary.
 
 ## License
 
