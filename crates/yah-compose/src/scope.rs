@@ -1,4 +1,4 @@
-//! Structural scope identity without service visibility or effect ownership yet.
+//! Structural composition-scope identity without contextual service visibility.
 
 use std::{error::Error, fmt};
 
@@ -6,9 +6,10 @@ use crate::ScopeId;
 
 /// One node in the live composition scope tree.
 ///
-/// A scope records only explicit parentage in this slice. A future registry will
-/// own uniqueness, ancestry validation, inherited services, and reversible
-/// effects; constructing this value alone does not claim those behaviors.
+/// A scope records only explicit parentage in this slice. A future contextual
+/// registry will own uniqueness, ancestry validation, and inherited service
+/// visibility; [`crate::EffectScope`] separately owns reversible effects.
+/// Constructing this value alone does not claim registry behavior.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Scope {
     id: ScopeId,

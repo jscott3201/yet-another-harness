@@ -64,8 +64,19 @@ for hostile code.
 
 The current `yah-compose` slice implements the state bookkeeping behind this
 model, including incarnation-bound monotonic activation epochs, controlled
-stop/removal, and activation-owned effect-scope cleanup. It does not yet execute
-activation callbacks, publish services, or perform reconciliation.
+stop/removal, activation-owned effect-scope cleanup, typed required-service
+declarations, and revocable provider bindings. A registry inventories every
+compatible provider candidate in deterministic provider-registration-ID order,
+but callers must bind one exact registration; it does not silently select or
+switch a provider.
+
+Provider publication is admitted into an active component's effect scope before
+it becomes discoverable. Each handle is fenced by both provider and consumer
+scope cancellation, limits provider access to a checked callback, and fails
+closed rather than following a replacement. The initial registry is one flat
+visibility domain. It does not yet execute activation callbacks, implement
+contextual inheritance or isolation, select providers, or perform
+reconciliation.
 
 Live service values, futures, closures, guest resources, and process handles
 are not durable graph values. They remain in an in-memory registry whose state
@@ -222,12 +233,13 @@ future session, work, memory, and evidence identities survive process loss.
 
 ## Implemented Boundary
 
-Today the repository contains the initial process-local component lifecycle and
-effect-scope core, the Selene-backed reliability kernel, provider normalization
-fixtures, an in-process protocol experiment, and the G02 storage evidence
-harness. The component callback/service/reconciliation layers, plugin SDK,
-Wasm and process drivers, graph memory domains, sandbox, live agent loop,
-daemon, and clients described above are not implemented yet.
+Today the repository contains the initial process-local component lifecycle,
+effect-scope core, and typed revocable service registry; the Selene-backed
+reliability kernel; provider normalization fixtures; an in-process protocol
+experiment; and the G02 storage evidence harness. Component callbacks,
+contextual provider selection and reconciliation, the plugin SDK, Wasm and
+process drivers, graph memory domains, sandbox, live agent loop, daemon, and
+clients described above are not implemented yet.
 
 See [project status](project-status.md) for the exact current boundary and
 [protocol](protocol.md) for the existing Adapter 1 experiment.

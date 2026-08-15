@@ -5,9 +5,9 @@ from a narrow model-free reliability kernel to a complete Rust-native,
 graph-backed, plugin-extensible agent harness.
 
 There is no usable release. The repository contains a tested reliability
-foundation and the first process-local composition lifecycle and cleanup
-primitives; it does not yet contain a runnable composition host, plugin host,
-agent loop, sandbox, daemon, or client.
+foundation and the first process-local composition lifecycle, cleanup, and
+typed service-binding primitives; it does not yet contain a runnable
+composition host, plugin host, agent loop, sandbox, daemon, or client.
 
 ## Evidence Status
 
@@ -15,7 +15,7 @@ agent loop, sandbox, daemon, or client.
 |---|---|---|
 | G02 storage fan-in and crash recovery | Atomic state, receipt, and journal commits under kill/reopen, writer takeover, and corruption drills | Passed across 1,440 scored trials: [report](gates/G02-storage-fanin-recovery.md) |
 | Current model-free kernel | Deterministic tests for command, fencing, cancellation, effect, provider, recovery, and Adapter 1 behavior | Available for reuse; pivot integration has not started |
-| Contextual composition runtime | Component definition/instance/scope identities, epoch-fenced lifecycle transitions, and reversible nested effect scopes | Initial slices; no callbacks, services, or reconciler |
+| Contextual composition runtime | Component definition/instance/scope identities, epoch-fenced lifecycle, reversible nested effects, typed requirements, and exact revocable provider bindings | Initial slices; no callbacks, contextual provider selection, or reconciler |
 | Plugin manifest, SDK, and conformance suite | No implementation in this repository | Not started |
 | Wasm, Node/TypeScript, and Python plugin drivers | No implementation in this repository | Not started |
 | Selene work, session, memory, evidence, and plugin-lineage domains | Only the current kernel graph exists | Design/spike stage |
@@ -60,6 +60,27 @@ Cleanup is executor-neutral and sequential. The current layer does not provide
 deadlines, forced termination, concurrent admission/close, task supervision, or
 proof that cancellation stopped work. Dropping a scope requests cancellation
 but does not run its cleanup.
+
+### Typed live services
+
+- Stable semantic service IDs paired with exact process-local Rust contract
+  types, including unsized trait contracts.
+- Required-service declarations on component definitions and deterministic
+  ready/missing reports that let a caller leave an ineligible instance pending.
+- Multiple provider candidates in deterministic provider-registration-ID
+  order, with no implicit ranking, publication-order promise, or selection.
+- Provider publication only after synchronous withdrawal cleanup is admitted to
+  the active provider's effect scope.
+- Exact provider-registration bindings whose handles gate every call and fail
+  closed when the provider scope, consumer scope, or registry is revoked.
+- Generated provider identities reuse their unique effect registration, so a
+  stale handle or delayed cleanup cannot target a replacement publication.
+
+The registry is one flat, process-local visibility domain. It reports readiness
+but does not mutate lifecycle state. Contextual inheritance and isolation,
+provider-selection epochs, watches, dependent stop/rebind/start, and automatic
+reconciliation remain future work. Live service values are not serialized or
+stored in Selene.
 
 ### Selene-backed mutation and recovery
 
@@ -107,9 +128,9 @@ plugin SDK, daemon protocol, or promised compatibility surface.
 The next useful proof extends the composition core into a narrow vertical slice
 containing:
 
-1. executable component callbacks and a service-dependency graph;
-2. typed services and provider recomposition over the existing epoch-fenced
-   lifecycle and effect scopes;
+1. executable component callbacks and service-dependency reconciliation;
+2. provider selection and recomposition over the existing typed bindings,
+   epoch-fenced lifecycle, and effect scopes;
 3. a small plugin manifest and capability grant;
 4. one Selene graph/memory host capability;
 5. one Wasm component plus one modern Node or Python process plugin;
@@ -123,8 +144,9 @@ crate or protocol boundary in advance.
 
 ## Not Implemented
 
-- Component callback runner, contextual registry, service graph, concurrent
-  scope/task supervisor, desired-state reconciler, or isolation realms.
+- Component callback runner, contextual service inheritance/isolation,
+  provider-selection epochs, dependency reconciliation, concurrent scope/task
+  supervisor, desired-state reconciler, or isolation realms.
 - Plugin packages, manifests, admission, installation, updates, SDKs, or
   language conformance tests.
 - Wasmtime/WIT host or sandboxed Node/TypeScript and CPython workers.
