@@ -1,9 +1,9 @@
 # Yet Another Harness Documentation
 
 Yet Another Harness (YAH) is under active redesign and implementation. These
-pages separate the tested reliability kernel that exists today from the
-Rust-native, graph-backed, plugin-extensible target harness now being designed
-and spiked.
+pages separate the tested reliability kernel and initial live lifecycle core
+from the Rust-native, graph-backed, plugin-extensible target harness still being
+proved.
 
 ## Start Here
 

@@ -1742,6 +1742,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "aee1b19627c7c60102ab80d3a9cbe18de90bfe03bfa6c3715447681f0e8c8af6"
 
 [[package]]
+name = "yah-compose"
+version = "0.0.1"
+
+[[package]]
 name = "yah-kernel"
 version = "0.0.1"
 dependencies = [

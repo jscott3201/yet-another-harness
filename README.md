@@ -142,6 +142,14 @@ distinction is a hard runtime invariant.
 
 ## Existing Foundation
 
+The first pivot implementation is a dependency-free live composition core with
+explicit component definition, instance, and scope identities;
+instance-incarnation-bound activation epochs that fence start completions,
+failure reports, and stop requests or completions; and controlled pending,
+starting, active, failed, stopping, and removed transitions. It is state-machine
+groundwork only: component callbacks, reversible effect scopes, services, and
+reconciliation are not implemented yet.
+
 The repository already contains a model-free Rust kernel and evidence harness:
 
 - atomic Selene commits for current state, semantic events, and command
@@ -228,6 +236,7 @@ projects are evolving independently and do not define YAH compatibility.
 
 | Path | Contents |
 |---|---|
+| `crates/yah-compose/` | Process-local component identity, scope relationships, and epoch-fenced lifecycle transitions |
 | `crates/yah-kernel/` | Current model-free durability, authority, effect, cancellation, provider, and protocol kernel |
 | `crates/exp001-harness/` | Storage fan-in and crash-recovery evidence harness |
 | `generated/protocol/` | Checked-in JSON Schemas and TypeScript bindings for the current protocol experiment |

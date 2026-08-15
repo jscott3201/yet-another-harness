@@ -44,9 +44,10 @@ and create child effect scopes.
 The initial lifecycle model is intentionally small:
 
 ```text
-pending -> starting -> active -> stopping -> removed
-               |          |
-               +-> failed +
+pending -> starting -> active
+pending -> removed
+starting | active -> failed
+starting | active | failed -> stopping -> pending | removed
 ```
 
 - A missing required service leaves the consumer pending.
@@ -60,6 +61,11 @@ pending -> starting -> active -> stopping -> removed
 
 Composition realms scope service visibility; they are not a security boundary
 for hostile code.
+
+The current `yah-compose` slice implements the state bookkeeping behind this
+model, including incarnation-bound monotonic activation epochs and controlled
+stop/removal. It does not yet execute activation callbacks, own effect scopes,
+publish services, or perform reconciliation.
 
 Live service values, futures, closures, guest resources, and process handles
 are not durable graph values. They remain in an in-memory registry whose state
@@ -207,11 +213,12 @@ future session, work, memory, and evidence identities survive process loss.
 
 ## Implemented Boundary
 
-Today the repository contains the Selene-backed reliability kernel, provider
-normalization fixtures, an in-process protocol experiment, and the G02 storage
-evidence harness. The composition runtime, plugin SDK, Wasm and process drivers,
-graph memory domains, sandbox, live agent loop, daemon, and clients described
-above are not implemented yet.
+Today the repository contains the initial process-local component lifecycle
+core, the Selene-backed reliability kernel, provider normalization fixtures, an
+in-process protocol experiment, and the G02 storage evidence harness. The
+component callback/effect/service/reconciliation layers, plugin SDK, Wasm and
+process drivers, graph memory domains, sandbox, live agent loop, daemon, and
+clients described above are not implemented yet.
 
 See [project status](project-status.md) for the exact current boundary and
 [protocol](protocol.md) for the existing Adapter 1 experiment.

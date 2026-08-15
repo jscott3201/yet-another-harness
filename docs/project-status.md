@@ -4,9 +4,10 @@ Yet Another Harness (YAH) is pre-0.1 and is undergoing an architectural pivot
 from a narrow model-free reliability kernel to a complete Rust-native,
 graph-backed, plugin-extensible agent harness.
 
-There is no usable release. The repository contains a tested foundation that may
-be integrated into the new architecture; it does not yet contain the
-composition runtime, plugin host, agent loop, sandbox, daemon, or client.
+There is no usable release. The repository contains a tested reliability
+foundation and the first process-local composition lifecycle primitives; it does
+not yet contain a runnable composition host, plugin host, agent loop, sandbox,
+daemon, or client.
 
 ## Evidence Status
 
@@ -14,7 +15,7 @@ composition runtime, plugin host, agent loop, sandbox, daemon, or client.
 |---|---|---|
 | G02 storage fan-in and crash recovery | Atomic state, receipt, and journal commits under kill/reopen, writer takeover, and corruption drills | Passed across 1,440 scored trials: [report](gates/G02-storage-fanin-recovery.md) |
 | Current model-free kernel | Deterministic tests for command, fencing, cancellation, effect, provider, recovery, and Adapter 1 behavior | Available for reuse; pivot integration has not started |
-| Contextual composition runtime | No implementation in this repository | Not started |
+| Contextual composition runtime | Component definition/instance/scope identities and epoch-fenced lifecycle transitions | Initial slice; no callbacks, effect scopes, services, or reconciler |
 | Plugin manifest, SDK, and conformance suite | No implementation in this repository | Not started |
 | Wasm, Node/TypeScript, and Python plugin drivers | No implementation in this repository | Not started |
 | Selene work, session, memory, evidence, and plugin-lineage domains | Only the current kernel graph exists | Design/spike stage |
@@ -26,6 +27,23 @@ project roadmap. Individual tests and invariants remain useful evidence, but
 the gate is being re-scoped around the new harness architecture.
 
 ## Implemented Foundation
+
+### Live component lifecycle
+
+- A dependency-free `yah-compose` crate separated from Selene and the durable
+  external-effect kernel.
+- Opaque component definition, component instance, and scope identities with
+  explicit scope parentage.
+- Pending, starting, active, failed, stopping, and removed states.
+- Instance-incarnation-bound, monotonic activation epochs that reject stale
+  start completions, failure reports, and stop requests or completions without
+  mutating the current activation.
+- Controlled stop targets for recomposition back to pending or terminal removal.
+- Retained last-failure diagnostics after teardown and retry.
+
+This slice performs synchronous lifecycle bookkeeping. It does not invoke
+component code, clean up registrations, resolve services, or reconcile desired
+state.
 
 ### Selene-backed mutation and recovery
 
@@ -70,10 +88,12 @@ plugin SDK, daemon protocol, or promised compatibility surface.
 
 ## Pivot Work
 
-The next useful proof is a narrow vertical slice containing:
+The next useful proof extends the lifecycle core into a narrow vertical slice
+containing:
 
-1. a Rust component lifecycle and service-dependency graph;
-2. nested local effect scopes and provider recomposition;
+1. executable component callbacks and a service-dependency graph;
+2. nested local effect scopes and provider recomposition over the existing
+   epoch-fenced lifecycle;
 3. a small plugin manifest and capability grant;
 4. one Selene graph/memory host capability;
 5. one Wasm component plus one modern Node or Python process plugin;
@@ -87,8 +107,8 @@ crate or protocol boundary in advance.
 
 ## Not Implemented
 
-- Contextual component registry, service graph, effect scopes, desired-state
-  reconciler, or isolation realms.
+- Component callback runner, contextual registry, service graph, effect scopes,
+  desired-state reconciler, or isolation realms.
 - Plugin packages, manifests, admission, installation, updates, SDKs, or
   language conformance tests.
 - Wasmtime/WIT host or sandboxed Node/TypeScript and CPython workers.
