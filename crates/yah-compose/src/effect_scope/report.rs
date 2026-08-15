@@ -39,7 +39,7 @@ impl fmt::Display for EffectScopeId {
 }
 
 /// Identity assigned to one cleanup registration.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct EffectRegistrationId {
     scope_id: EffectScopeId,
     sequence: u64,

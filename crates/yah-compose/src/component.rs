@@ -4,29 +4,87 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::{
     ActivationEpoch, ComponentFailure, ComponentId, ComponentInstanceId, ComponentState,
-    LifecycleError, Scope, ScopeId, StopTarget,
+    LifecycleError, RequiredService, Scope, ScopeId, ServiceId, ServiceRequirement, StopTarget,
 };
 
 static NEXT_INSTANCE_INCARNATION: AtomicU64 = AtomicU64::new(1);
 
 /// Stable identity of a component definition.
 ///
-/// Factories, declared requirements, and manifest metadata are intentionally
-/// deferred until a real activation contract exercises them.
+/// Factories and manifest metadata remain deferred until a real activation
+/// contract exercises them. Required services are declared here so readiness
+/// can be checked before the future reconciler starts an instance.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ComponentDefinition {
     id: ComponentId,
+    requirements: Vec<RequiredService>,
 }
 
 impl ComponentDefinition {
     pub fn new(id: impl Into<ComponentId>) -> Self {
-        Self { id: id.into() }
+        Self {
+            id: id.into(),
+            requirements: Vec::new(),
+        }
     }
 
     pub fn id(&self) -> &ComponentId {
         &self.id
     }
+
+    /// Declare one exact required service.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ComponentDefinitionError::DuplicateRequirement`] if this
+    /// definition already declares the same semantic service identity.
+    pub fn require<T: ?Sized + Send + Sync + 'static>(
+        &mut self,
+        requirement: &ServiceRequirement<T>,
+    ) -> Result<(), ComponentDefinitionError> {
+        if self
+            .requirements
+            .iter()
+            .any(|declared| declared.service_id() == requirement.service_id())
+        {
+            return Err(ComponentDefinitionError::DuplicateRequirement {
+                component_id: self.id.clone(),
+                service_id: requirement.service_id().clone(),
+            });
+        }
+        self.requirements.push(requirement.erased());
+        Ok(())
+    }
+
+    pub fn requirements(&self) -> &[RequiredService] {
+        &self.requirements
+    }
 }
+
+/// Invalid service declarations on one component definition.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ComponentDefinitionError {
+    DuplicateRequirement {
+        component_id: ComponentId,
+        service_id: ServiceId,
+    },
+}
+
+impl std::fmt::Display for ComponentDefinitionError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::DuplicateRequirement {
+                component_id,
+                service_id,
+            } => write!(
+                f,
+                "component {component_id} declares service {service_id} more than once"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for ComponentDefinitionError {}
 
 /// One mounted component definition in one live scope.
 ///
