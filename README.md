@@ -1,13 +1,13 @@
-# Open Agent
+# Yet Another Harness
 
-**A Rust-native, graph-backed, plugin-extensible harness for building and
-operating agents.**
+**YAH is a Rust-native, graph-backed, plugin-extensible harness for building
+and operating agents.**
 
-Open Agent is an early-stage effort to build a complete agent harness whose
-runtime truth, composition model, memory, and extension boundaries are owned in
-Rust. The harness is designed around a live graph of components and a durable
-Selene graph of work, sessions, memory, evidence, artifacts, and external
-effects.
+Yet Another Harness (YAH) is an early-stage effort to build a complete agent
+harness whose runtime truth, composition model, memory, and extension
+boundaries are owned in Rust. The harness is designed around a live graph of
+components and a durable Selene graph of work, sessions, memory, evidence,
+artifacts, and external effects.
 
 The project is currently pivoting from a narrow reliability kernel into this
 larger architecture. The existing kernel is a useful foundation, not a frozen
@@ -19,11 +19,11 @@ specification.
 
 ## Direction
 
-Open Agent treats an agent harness as a composition of replaceable components,
-not one privileged loop surrounded by callbacks. Model adapters, tools, prompt
-and context contributors, memory strategies, subagent drivers, execution
-backends, policies, storage projections, and user surfaces all attach through
-explicit capabilities.
+YAH treats an agent harness as a composition of replaceable components, not one
+privileged loop surrounded by callbacks. Model adapters, tools, prompt and
+context contributors, memory strategies, subagent drivers, execution backends,
+policies, storage projections, and user surfaces all attach through explicit
+capabilities.
 
 The intended result has four defining properties:
 
@@ -187,9 +187,9 @@ when an experiment becomes a commitment.
 
 ## Prior Art and Attribution
 
-Open Agent is being developed independently in Rust. It currently vendors no
-code from the projects below, but it deliberately learns from them. DeepSeek
-Harness itself is [powered by Cordis](https://github.com/deepseek-ai/deepseek-harness/blob/47f943859bef60e4160492346772ded9b24f765a/README.md),
+YAH is being developed independently in Rust. It currently vendors no code from
+the projects below, but it deliberately learns from them. DeepSeek Harness
+itself is [powered by Cordis](https://github.com/deepseek-ai/deepseek-harness/blob/47f943859bef60e4160492346772ded9b24f765a/README.md),
 so we credit DeepSeek Harness for harness-level implementation influences and
 Cordis and its paper for the underlying composition model.
 
@@ -213,15 +213,22 @@ Cordis and its paper for the underlying composition model.
   is the conceptual reference. The target design will implement these ideas
   idiomatically in Rust and combine them with the existing durability and
   authority kernel plus planned graph and memory domains.
+- [NVIDIA OpenShell](https://github.com/NVIDIA/OpenShell/tree/d51a653f9cedeafa602364df61b74c4bd5a9495e)
+  informs the planned sandbox-backend boundary for full-language plugins and
+  autonomous workspaces. Its gateway, policy compiler, supervisor, credential
+  brokerage, and replaceable compute drivers are useful reference points. YAH
+  would integrate it behind a generic execution contract rather than make it
+  the harness control plane or a required dependency; the reviewed version is
+  explicitly alpha and single-player.
 
 The pinned links document the sources reviewed for this pivot. Upstream
-projects are evolving independently and do not define Open Agent compatibility.
+projects are evolving independently and do not define YAH compatibility.
 
 ## Repository
 
 | Path | Contents |
 |---|---|
-| `crates/oa-kernel/` | Current model-free durability, authority, effect, cancellation, provider, and protocol kernel |
+| `crates/yah-kernel/` | Current model-free durability, authority, effect, cancellation, provider, and protocol kernel |
 | `crates/exp001-harness/` | Storage fan-in and crash-recovery evidence harness |
 | `generated/protocol/` | Checked-in JSON Schemas and TypeScript bindings for the current protocol experiment |
 | `docs/` | Public architecture, protocol, development, status, and gate evidence |
@@ -231,16 +238,25 @@ builds use the same storage implementation.
 
 ## Development
 
-The pinned toolchain is Rust 1.97.1:
+The pinned toolchain is Rust 1.97.1 and the test runner is cargo-nextest
+0.9.143:
 
 ```bash
-cargo test --locked --workspace
+bash scripts/install-nextest.sh
+bash scripts/test.sh
 ```
 
 Run the complete local gate before a pull request:
 
 ```bash
 bash scripts/full-gate.sh
+```
+
+To run the hosted Linux environment and commands through Docker while keeping
+the native macOS loop fast:
+
+```bash
+bash scripts/container-test.sh
 ```
 
 See [development](docs/development.md) for repository checks and

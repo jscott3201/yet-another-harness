@@ -5,9 +5,9 @@
 mod common;
 
 use common::*;
-use oa_kernel::error::ErrorKind;
-use oa_kernel::funnel::{Method, Submission, token_from_result};
-use oa_kernel::ids::{Digest, Uuid7};
+use yah_kernel::error::ErrorKind;
+use yah_kernel::funnel::{Method, Submission, token_from_result};
+use yah_kernel::ids::{Digest, Uuid7};
 
 #[test]
 fn work_item_create_completes_replays_and_guards_the_digest() {
@@ -133,7 +133,7 @@ fn mutation_without_expected_version_is_invalid_request() {
 fn funnel_rejects_a_receipt_scope_that_disagrees_with_the_method() {
     let mut ctx = Ctx::new();
     let mut open = ctx.open_run("run-1");
-    open.scope_kind = oa_kernel::funnel::ScopeKind::Run;
+    open.scope_kind = yah_kernel::funnel::ScopeKind::Run;
     open.scope_id = "other-run".into();
     assert_eq!(
         rejected(ctx.funnel.submit(&open)),
@@ -146,7 +146,7 @@ fn funnel_rejects_a_receipt_scope_that_disagrees_with_the_method() {
 fn funnel_never_persists_a_foreign_project_receipt() {
     let mut ctx = Ctx::new();
     let mut work_item = ctx.create_work_item("wi-foreign");
-    work_item.scope_kind = oa_kernel::funnel::ScopeKind::Project;
+    work_item.scope_kind = yah_kernel::funnel::ScopeKind::Project;
     work_item.scope_id = "other-project".into();
     assert_eq!(
         rejected(ctx.funnel.submit(&work_item)),
@@ -156,7 +156,7 @@ fn funnel_never_persists_a_foreign_project_receipt() {
 
     let dir = ctx.dir;
     drop(ctx.funnel);
-    let recovered = oa_kernel::store::Store::recover(dir.path(), "kernel-b").unwrap();
+    let recovered = yah_kernel::store::Store::recover(dir.path(), "kernel-b").unwrap();
     assert_eq!(recovered.project_id(), "default");
 }
 
@@ -166,7 +166,7 @@ fn funnel_never_persists_a_holder_receipt_outside_its_unit_scope() {
     ctx.seed_unit();
     let token = ctx.dispatch("u-1", "h1", 1);
     let mut progress = ctx.progress_cmd("progress", "u-1", token, Some(2), "n");
-    progress.scope_kind = oa_kernel::funnel::ScopeKind::Global;
+    progress.scope_kind = yah_kernel::funnel::ScopeKind::Global;
     progress.scope_id = "g".into();
     assert_eq!(
         rejected(ctx.funnel.submit(&progress)),
@@ -175,14 +175,14 @@ fn funnel_never_persists_a_holder_receipt_outside_its_unit_scope() {
 
     let dir = ctx.dir;
     drop(ctx.funnel);
-    oa_kernel::store::Store::recover(dir.path(), "kernel-b").unwrap();
+    yah_kernel::store::Store::recover(dir.path(), "kernel-b").unwrap();
 }
 
 #[test]
 fn funnel_rejects_invalid_method_identifiers_before_persistence() {
     let mut ctx = Ctx::new();
     let mut work_item = ctx.create_work_item("bad/id");
-    work_item.scope_kind = oa_kernel::funnel::ScopeKind::Global;
+    work_item.scope_kind = yah_kernel::funnel::ScopeKind::Global;
     assert_eq!(
         rejected(ctx.funnel.submit(&work_item)),
         (ErrorKind::InvalidRequest, false)
@@ -191,7 +191,7 @@ fn funnel_rejects_invalid_method_identifiers_before_persistence() {
 
     let dir = ctx.dir;
     drop(ctx.funnel);
-    oa_kernel::store::Store::recover(dir.path(), "kernel-b").unwrap();
+    yah_kernel::store::Store::recover(dir.path(), "kernel-b").unwrap();
 }
 
 #[test]

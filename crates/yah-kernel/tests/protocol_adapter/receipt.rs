@@ -1,5 +1,5 @@
 use super::*;
-use oa_kernel::protocol::ClientMessage;
+use yah_kernel::protocol::ClientMessage;
 
 #[test]
 fn lookup_is_read_only_completed_while_submission_replays() {

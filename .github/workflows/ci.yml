@@ -1,7 +1,9 @@
-# CI for open-agent — runs on pushes and PRs to `main`.
+# CI for Yet Another Harness — runs on pushes and PRs to `main`.
 #
-# Selene is an exact public Git dependency, so hosted CI runs the same locked
-# compile and test gates as local development.
+# Rust executes inside one digest-pinned, multi-architecture Linux image. The
+# manifest resolves natively to amd64 on hosted runners and arm64 on Apple
+# Silicon Docker. Cargo source caches are safe to reuse; build targets are not
+# cached so every hosted run compiles from a fresh target directory.
 #
 # Security: no `${{ github.event.* }}` in any `run:` (confined to if:/with:/env:).
 
@@ -22,52 +24,57 @@ permissions:
   contents: read
 
 jobs:
-  fmt:
-    name: fmt
+  policy:
+    name: repository policy
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          toolchain: 1.97.1
-          components: rustfmt
-      - run: cargo fmt --all --check
-
-  file-size-cap:
-    name: source-file cap (700 LOC)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+          persist-credentials: false
       - run: bash .github/scripts/check-file-size.sh
-
-  generated-protocol:
-    name: generated protocol artifacts
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772
-        with:
-          toolchain: 1.97.1
-          components: rustfmt, clippy
-      - run: cargo fmt --manifest-path tools/protocol-codegen/Cargo.toml -- --check
-      - run: cargo clippy --locked --manifest-path tools/protocol-codegen/Cargo.toml -- -D warnings
-      - run: cargo run --locked --manifest-path tools/protocol-codegen/Cargo.toml -- --check
-
-  workspace:
-    name: workspace clippy and tests
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772
-        with:
-          toolchain: 1.97.1
-          components: clippy
-      - run: cargo clippy --locked --workspace --all-targets -- -D warnings
-      - run: cargo test --locked --workspace
-
-  no-secret-scan:
-    name: no-secret scan
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - run: bash .github/scripts/check-no-secrets.sh
+
+  rust:
+    name: rust (native linux container)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    container:
+      image: rust:1.97.1-bookworm@sha256:0e2bcaef56d041a486784e54104a81aebe0da44bd03019bd70bc0401e42e4a97
+      options: --init
+    defaults:
+      run:
+        shell: bash
+    env:
+      CARGO_INCREMENTAL: "0"
+      CARGO_TERM_COLOR: always
+      RUST_BACKTRACE: "1"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Restore locked Cargo sources
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            /usr/local/cargo/registry
+            /usr/local/cargo/git
+          key: cargo-src-linux-${{ runner.arch }}-rust-1.97.1-${{ hashFiles('Cargo.lock', 'tools/protocol-codegen/Cargo.lock') }}
+          restore-keys: |
+            cargo-src-linux-${{ runner.arch }}-rust-1.97.1-
+      - name: Install pinned cargo-nextest
+        run: bash scripts/install-nextest.sh
+      - name: Fetch locked dependencies
+        run: |
+          cargo fetch --locked
+          cargo fetch --locked --manifest-path tools/protocol-codegen/Cargo.toml
+      - name: Run canonical Rust lane
+        run: bash scripts/ci-rust.sh
+      - name: Upload Nextest JUnit report
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: nextest-junit-linux-${{ runner.arch }}
+          path: target/nextest/ci/junit.xml
+          if-no-files-found: warn
+          retention-days: 14

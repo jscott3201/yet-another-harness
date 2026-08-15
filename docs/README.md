@@ -1,8 +1,9 @@
-# Open Agent Documentation
+# Yet Another Harness Documentation
 
-Open Agent is under active redesign and implementation. These pages separate
-the tested reliability kernel that exists today from the Rust-native,
-graph-backed, plugin-extensible target harness now being designed and spiked.
+Yet Another Harness (YAH) is under active redesign and implementation. These
+pages separate the tested reliability kernel that exists today from the
+Rust-native, graph-backed, plugin-extensible target harness now being designed
+and spiked.
 
 ## Start Here
 
@@ -16,19 +17,19 @@ graph-backed, plugin-extensible target harness now being designed and spiked.
 ## Evidence
 
 Gate reports record completed experiments and their limits. A report is
-evidence for the named gate only; it does not imply that Open Agent is ready for
+evidence for the named gate only; it does not imply that YAH is ready for
 production use.
 
 - [G02: storage fan-in and crash recovery](gates/G02-storage-fanin-recovery.md)
 
 ## Generated Reference
 
-The protocol types in `crates/oa-kernel/src/protocol/` generate three checked-in
+The protocol types in `crates/yah-kernel/src/protocol/` generate three checked-in
 artifacts:
 
 - `generated/protocol/client.schema.json`
 - `generated/protocol/server.schema.json`
 - `generated/protocol/protocol.ts`
 
-Run `cargo run --locked -p oa-kernel --bin generate-protocol` after changing
+Run `cargo run --locked -p yah-kernel --bin generate-protocol` after changing
 protocol types. The local gate rejects stale generated files.

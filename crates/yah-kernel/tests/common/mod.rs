@@ -1,20 +1,20 @@
 //! Shared harness for the funnel integration suites.
 #![allow(dead_code)] // each test binary consumes a subset of these helpers
 
-use oa_kernel::cancel::{
+use yah_kernel::cancel::{
     Attachment, CancelKind, CancelPolicy, CancelReason, DeliveryOutcome, MemberInput,
 };
-use oa_kernel::effect::{
+use yah_kernel::effect::{
     EffectIntent, EffectState, EffectTerminal, RetryClass, ReversibilityClass, TargetEnumeration,
     TargetObservation, TargetState,
 };
-use oa_kernel::error::ErrorKind;
-use oa_kernel::funnel::{
+use yah_kernel::error::ErrorKind;
+use yah_kernel::funnel::{
     Command, EffectSpec, Funnel, Method, PrincipalKind, RunOutcome, ScopeKind, SettleEvidence,
     Submission, token_from_result,
 };
-use oa_kernel::ids::{AttemptEpoch, AuthorityEpoch, Digest, Stamp, Uuid7};
-use oa_kernel::store::{AttemptTokenClaims, Store};
+use yah_kernel::ids::{AttemptEpoch, AuthorityEpoch, Digest, Stamp, Uuid7};
+use yah_kernel::store::{AttemptTokenClaims, Store};
 
 pub struct Ctx {
     pub dir: tempfile::TempDir,

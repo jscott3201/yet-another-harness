@@ -1,8 +1,8 @@
 # Project Status
 
-Open Agent is pre-0.1 and is undergoing an architectural pivot from a narrow
-model-free reliability kernel to a complete Rust-native, graph-backed,
-plugin-extensible agent harness.
+Yet Another Harness (YAH) is pre-0.1 and is undergoing an architectural pivot
+from a narrow model-free reliability kernel to a complete Rust-native,
+graph-backed, plugin-extensible agent harness.
 
 There is no usable release. The repository contains a tested foundation that may
 be integrated into the new architecture; it does not yet contain the

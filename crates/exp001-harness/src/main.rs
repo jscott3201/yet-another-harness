@@ -33,7 +33,8 @@ enum Cmd {
         #[arg(long, default_value = "../selene-db")]
         selene_dir: String,
         #[arg(long, default_value = ".")]
-        open_agent_dir: String,
+        #[arg(visible_aliases = ["yah-dir", "open-agent-dir"])]
+        harness_dir: String,
         #[arg(long, default_value_t = 0)]
         seed: u64,
     },
@@ -176,10 +177,10 @@ fn main() {
     match cli.cmd {
         Cmd::Manifest {
             selene_dir,
-            open_agent_dir,
+            harness_dir,
             seed,
         } => {
-            let m = Manifest::capture(&selene_dir, &open_agent_dir, seed, 20, 50);
+            let m = Manifest::capture(&selene_dir, &harness_dir, seed, 20, 50);
             println!(
                 "{}",
                 serde_json::to_string_pretty(&m).expect("manifest serializes")
