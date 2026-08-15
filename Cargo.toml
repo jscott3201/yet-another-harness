@@ -1,9 +1,10 @@
 [workspace]
 resolver = "3"
-members = ["crates/exp001-harness", "crates/yah-kernel"]
+members = ["crates/exp001-harness", "crates/yah-compose", "crates/yah-kernel"]
 
 # Crate boundaries are deliberately provisional during the full-harness pivot.
-# Only the current reliability kernel and evidence harness live here today.
+# The composition crate is intentionally dependency-free while its live
+# lifecycle semantics are proved beside the retained reliability kernel.
 
 [workspace.package]
 edition = "2024"
