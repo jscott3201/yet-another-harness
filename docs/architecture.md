@@ -1,122 +1,210 @@
 # Architecture
 
-Open Agent separates durable runtime truth from disposable processes and
-connections. A worker can disappear; accepted commands, authority changes,
-effect observations, and cancellation state cannot.
+Open Agent is being developed as a Rust-native, graph-backed, plugin-extensible
+agent harness. This document describes the stable direction and marks the
+boundary between the existing reliability kernel and the target harness. It is
+not a frozen crate map or protocol specification.
 
-## Runtime Model
+## System Shape
 
 ```text
-client or embedded caller
-          |
-          | versioned JSON protocol
-          v
-  in-process adapter (Adapter 1)
-          |
-          | typed command
-          v
-     mutation funnel
-       /    |     \
-      /     |      \
- current  receipt  semantic
-  state             journal
-      \      |      /
-       one Selene transaction
+clients and embedding SDKs
+            |
+            v
+      Rust harness host
+      /      |       \
+     /       |        \
+agent     composition   policy and
+runtime      runtime     approval
+     \       |        /
+      \      |       /
+       durable commands
+            |
+            v
+       Selene graph
+ work, sessions, memory,
+ evidence, artifacts, effects
+            |
+            v
+ capability-scoped plugins
+ Rust | Wasm | Node/TS | Python
 ```
 
-The adapter does not own state or authority. It validates and translates a
-wire command, then sends it through the same mutation funnel used by the
-kernel. State changes, command receipts, and semantic events commit together.
+The Rust host is the authority process. It owns lifecycle decisions, policy,
+durable state transitions, plugin grants, recovery, and external-effect
+reconciliation. An extension can contribute behavior, but it cannot grant
+itself authority or commit around the host.
 
-## Authority and Fencing
+## Contextual Composition
 
-The kernel uses several independent axes:
+The live runtime is a graph of component definitions and component instances.
+A component may provide services, require services, register event handlers,
+and create child effect scopes.
 
-- `authority_epoch` changes when a new daemon lifetime claims the project.
-- `attempt_epoch` changes when work is dispatched or retried.
-- `stamp` invalidates existing holder tokens without creating a new attempt.
-- the active lease binds the holder identity to the attempt.
+The initial lifecycle model is intentionally small:
 
-Holder-authorized writes must pass every current check. Authority methods use
-the current authority epoch and do not accept holder tokens. A stale callback
-can be retained as diagnostic input where policy permits, but it cannot advance
-current state.
+```text
+pending -> starting -> active -> stopping -> removed
+               |          |
+               +-> failed +
+```
 
-## Commands and Receipts
+- A missing required service leaves the consumer pending.
+- A compatible provider makes the consumer eligible to start.
+- Provider replacement or disappearance causes controlled recomposition of
+  affected consumers.
+- Every registration belongs to an effect scope. Closing a scope unwinds its
+  owned effects, including nested scopes, in reverse registration order.
+- Isolation realms and interceptors can narrow the services and policies
+  visible to a subtree.
 
-The idempotency key is `(scope_kind, scope_id, command_id)`. Repeating the same
-command digest returns its stored receipt. Reusing the key with another digest
-is rejected without a second transition.
+Composition realms scope service visibility; they are not a security boundary
+for hostile code.
 
-Each accepted transition writes:
+Live service values, futures, closures, guest resources, and process handles
+are not durable graph values. They remain in an in-memory registry whose state
+can be reconstructed from durable configuration and plugin identity.
 
-- the aggregate state change;
-- its semantic event batch; and
-- the durable command receipt.
+This model is inspired by Cordis and its paper on spatiotemporal composability,
+but will be implemented idiomatically in Rust rather than porting JavaScript
+Proxy or Node module behavior. The pinned sources are listed in the root
+[README](../README.md#prior-art-and-attribution).
 
-The receipt records the event cursor range, so clients can reconnect and find
-the effects of their command without relying on a surviving connection.
+## Harness Components
 
-## External Effects
+The agent runtime is assembled from capabilities rather than hard-wired global
+singletons. Expected extension seats include:
 
-Filesystem, process, Git, network, tool, and model actions are treated as
-external effects. A non-read-only action needs a committed effect intent before
-dispatch. Dispatch is evidence that the action may have happened; it is not
-evidence of success.
+- model and streaming adapters;
+- prompt, tool-schema, and context contributors;
+- tool registries and execution middleware;
+- session projections and compaction policies;
+- graph and memory capture, retrieval, ranking, and summarization;
+- workflows, goals, schedules, and subagent drivers;
+- filesystem, process, sandbox, artifact, and credential backends;
+- policy, approval, telemetry, and user-interface contributions.
 
-If the result cannot be proven after a crash, the effect remains uncertain and
-enters reconciliation. The kernel currently enforces the `no_retry` class;
-query-before-retry reconciliation remains unfinished.
+A seat has a harness-owned service definition, one or more providers, and
+consumers. Provider-specific objects do not become canonical session, work, or
+memory state.
 
-## Cancellation
+## Durable Graph
 
-Cancellation is a durable tree operation. The request and its frozen member
-scope commit before signals are sent. One immutable delivery record carries
-the delivery time, optional observation time, and outcome because sending a
-signal does not prove that a child stopped.
+Selene is the durable semantic substrate. The target graph links several
+domains:
 
-A dispatched effect with no authoritative outcome remains reconciling after
-cancellation. The kernel does not manufacture a cancelled outcome for an
-action that may have escaped.
+| Domain | Representative durable concepts |
+|---|---|
+| Work | Goal, work item, dependency, attempt, lease, decision, verification |
+| Session | Turn, model request, message, tool call, projection, compaction |
+| Memory | Observation, memory, source, summary, retrieval trace, feedback |
+| Evidence | Receipt, event, artifact, test result, review, provenance |
+| Extensions | Plugin package, revision, capability request, grant, evaluation, activation intent |
+| Effects | Prepared action, dispatch evidence, observation, settlement, uncertainty |
 
-## Storage Boundary
+Graph writes pass through host commands that validate identity, expected
+version, grant scope, and invariants. Plugins receive namespaced graph and
+memory capabilities, never an unrestricted Selene handle.
 
-One control graph represents one project. The store persists project identity,
-authority epoch, retention floor, aggregate state, receipts, semantic events,
-effect records, and cancellation records. Connections and adapter instances
-are reconstructible indexes over that durable state.
+The existing kernel already commits aggregate state, command receipts, and
+semantic events atomically. Its schema and closed command enum are experiments,
+not permanent limits on the target graph.
 
-The passed G02 gate proves the storage transaction and recovery substrate. It
-does not prove the unfinished daemon, execution, or protocol-conformance work.
+## Local and External Effects
 
-## Configuration and Extensions
+Open Agent uses the word *effect* for two related but distinct mechanisms.
 
-The planned configuration layer separates preferences from authority. Built-in,
-user, project, and one-run values resolve by typed field rules, and an effective
-value reports where it came from. Repository configuration is untrusted: it may
-request a provider, backend, tool, or extension, but it cannot grant itself
-credentials, network access, broader file access, or weaker approval policy.
+### Reversible local effects
 
-The draft contract would require explicit user opt-in for experimental features,
-remote data or credential use, executable third-party extensions, optional
-listeners, and non-baseline backends. It would bind active work to an immutable
-effective-configuration digest so later edits cannot reinterpret an existing
-attempt or prepared tool call.
+Service registrations, event listeners, tool definitions, background tasks,
+and similar live resources belong to a component effect scope. They can be
+released during normal unload or recomposition.
 
-Future extensions attach through capability-scoped provider, tool, context,
-execution, VCS, artifact, and client seams. They cannot receive direct store or
-integration authority. This configuration layer and its public schema are
-designed but not implemented.
+### Durable external effects
 
-## Terminal Client
+Filesystem writes, Git operations, subprocesses, network calls, model requests,
+and remote tools can escape the authority process. An effectful action must
+record intent before dispatch, then record dispatch evidence and an
+authoritative outcome when one is available.
 
-Ratatui is the selected TUI library. The planned full-screen client has three
-primary destinations: Work, Approvals, and Configuration. Runs, effects,
-evidence, review, and configuration provenance appear as contextual panes or
-subviews rather than independent runtime state.
+```text
+prepared -> dispatching -> dispatched -> settled
+                              \-> reconciling (parked)
+```
 
-The client owns focus, selection, scroll offsets, visible tabs, overlays, and
-unsaved drafts. The daemon owns every workflow, approval, config revision,
-effect outcome, evidence packet, receipt, and cursor. Reconnect replaces or
-resumes the daemon projection; it never infers success from local screen state.
-The TUI and its test matrix are designed but not implemented.
+The kernel can durably park an effect for reconciliation; no production
+reconciliation worker exists yet.
+
+Unloading a component does not prove that a dispatched external action failed
+or was reversed. The existing prepare/dispatch/settle/uncertain machinery is
+therefore preserved beneath the new composition runtime.
+
+## Plugin Boundary
+
+Open Agent will expose one semantic plugin model through several execution
+drivers:
+
+| Driver | Trust and execution model |
+|---|---|
+| Built-in Rust | Trusted, statically linked first-party implementation |
+| Wasm Component | Explicit WIT imports/exports, Wasmtime limits, capability-oriented host calls |
+| Node/TypeScript | Modern ESM SDK in a separately sandboxed process |
+| CPython | Latest stable CPython in a separately sandboxed process, with PyO3-backed ergonomics where useful |
+| Native embedding | Optional UniFFI bindings for supported foreign-language applications embedding the Rust library; not a plugin sandbox or universal plugin ABI |
+| Browser / JS host | Optional `wasm-bindgen` utilities for Rust/Wasm consumed by JavaScript; not the Wasmtime guest ABI |
+
+Rust dynamic libraries are not a public plugin contract. Untrusted Node,
+Python, and native code does not run inside the authority process. Process
+protocols and WIT may encode values differently while conforming to the same
+plugin lifecycle and capability behavior.
+
+Each plugin revision has a content identity, manifest, requested capabilities,
+configuration, and execution driver. Admission separates:
+
+1. what the package requests;
+2. what policy permits;
+3. what a user or administrator grants; and
+4. what the selected sandbox actually enforces.
+
+The effective capability set is their intersection. Missing enforcement cannot
+be repaired by optimistic labeling.
+
+## Sandbox and Credentials
+
+The planned Wasm driver will expose only explicitly linked host interfaces and
+host-enforced resource limits. Full-language workers will be launched through
+a selected sandbox backend. Each backend must advertise and be tested for the
+controls it actually enforces; unsupported required controls must fail
+admission. No plugin sandbox is implemented or audited yet.
+
+Node permission flags, Python isolated mode, import controls, and audit hooks
+may be used as defense in depth. They are not substitutes for OS, container, or
+VM isolation when code is untrusted.
+
+Plugins receive narrow credential handles or brokered operations rather than
+the daemon's ambient environment. All graph mutations and irreversible actions
+remain attributable to the plugin identity and active grant.
+
+## Recovery
+
+The target composition graph must be reconstructible. After a host restart,
+the planned host must be able to reload approved plugin revisions, rebuild
+service bindings, and reactivate eligible components from durable desired
+state. This composition recovery is not implemented yet.
+
+The existing kernel already requires stale holders to remain fenced,
+cancellation delivery to remain distinct from observation, and dispatched
+external effects without proof to remain unsettled. The new harness must
+additionally ensure that plugin restarts receive fresh live handles and that
+future session, work, memory, and evidence identities survive process loss.
+
+## Implemented Boundary
+
+Today the repository contains the Selene-backed reliability kernel, provider
+normalization fixtures, an in-process protocol experiment, and the G02 storage
+evidence harness. The composition runtime, plugin SDK, Wasm and process drivers,
+graph memory domains, sandbox, live agent loop, daemon, and clients described
+above are not implemented yet.
+
+See [project status](project-status.md) for the exact current boundary and
+[protocol](protocol.md) for the existing Adapter 1 experiment.

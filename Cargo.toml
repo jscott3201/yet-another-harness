@@ -2,8 +2,8 @@
 resolver = "3"
 members = ["crates/exp001-harness", "crates/oa-kernel"]
 
-# Crate boundaries are deliberately provisional: the crate-boundary proposal is
-# gated behind G01/G02 (decisions/01:382-384). Only gate harnesses live here yet.
+# Crate boundaries are deliberately provisional during the full-harness pivot.
+# Only the current reliability kernel and evidence harness live here today.
 
 [workspace.package]
 edition = "2024"

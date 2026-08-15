@@ -1,16 +1,16 @@
 # Open Agent Documentation
 
-Open Agent is under active design and implementation. These pages describe the
-code that exists, its tested boundaries, and the work still required before a
-usable release.
+Open Agent is under active redesign and implementation. These pages separate
+the tested reliability kernel that exists today from the Rust-native,
+graph-backed, plugin-extensible target harness now being designed and spiked.
 
 ## Start Here
 
 | Document | Purpose |
 |---|---|
-| [Project status](project-status.md) | Current gates, implemented components, and missing product surfaces |
-| [Architecture](architecture.md) | Runtime truth model, authority boundaries, and recovery design |
-| [Application protocol](protocol.md) | Adapter 1 wire shapes, generated artifacts, and remaining conformance work |
+| [Project status](project-status.md) | Current evidence, reusable kernel foundation, and unimplemented pivot work |
+| [Architecture](architecture.md) | Target composition, graph, plugin, effect, sandbox, and recovery boundaries |
+| [Application protocol](protocol.md) | Current Adapter 1 experiment; not the future plugin SDK or a stable public protocol |
 | [Development](development.md) | Workspace setup, local gates, file-size policy, and pull request checklist |
 
 ## Evidence
