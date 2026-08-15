@@ -63,9 +63,9 @@ Composition realms scope service visibility; they are not a security boundary
 for hostile code.
 
 The current `yah-compose` slice implements the state bookkeeping behind this
-model, including incarnation-bound monotonic activation epochs and controlled
-stop/removal. It does not yet execute activation callbacks, own effect scopes,
-publish services, or perform reconciliation.
+model, including incarnation-bound monotonic activation epochs, controlled
+stop/removal, and activation-owned effect-scope cleanup. It does not yet execute
+activation callbacks, publish services, or perform reconciliation.
 
 Live service values, futures, closures, guest resources, and process handles
 are not durable graph values. They remain in an in-memory registry whose state
@@ -125,6 +125,15 @@ YAH uses the word *effect* for two related but distinct mechanisms.
 Service registrations, event listeners, tool definitions, background tasks,
 and similar live resources belong to a component effect scope. They can be
 released during normal unload or recomposition.
+
+The implemented scope tree accepts synchronous and asynchronous cleanup,
+requests cancellation before cleanup, and unwinds registrations and nested
+scopes serially in reverse registration order. Close reports are cached for
+idempotence, aggregate returned errors and panics without short-circuiting, and
+a later `close()` can resume pending cleanup after an earlier close waiter is
+dropped. Dropping the scope itself only requests cancellation and abandons
+unrun cleanup, so its owner must drive close to completion. This layer does not
+impose deadlines or prove that cooperatively cancelled work terminated.
 
 ### Durable external effects
 
@@ -213,12 +222,12 @@ future session, work, memory, and evidence identities survive process loss.
 
 ## Implemented Boundary
 
-Today the repository contains the initial process-local component lifecycle
-core, the Selene-backed reliability kernel, provider normalization fixtures, an
-in-process protocol experiment, and the G02 storage evidence harness. The
-component callback/effect/service/reconciliation layers, plugin SDK, Wasm and
-process drivers, graph memory domains, sandbox, live agent loop, daemon, and
-clients described above are not implemented yet.
+Today the repository contains the initial process-local component lifecycle and
+effect-scope core, the Selene-backed reliability kernel, provider normalization
+fixtures, an in-process protocol experiment, and the G02 storage evidence
+harness. The component callback/service/reconciliation layers, plugin SDK,
+Wasm and process drivers, graph memory domains, sandbox, live agent loop,
+daemon, and clients described above are not implemented yet.
 
 See [project status](project-status.md) for the exact current boundary and
 [protocol](protocol.md) for the existing Adapter 1 experiment.

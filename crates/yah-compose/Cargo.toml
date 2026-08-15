@@ -8,3 +8,7 @@ publish = false
 description = "Live component lifecycle and composition primitives for YAH"
 
 [dependencies]
+tokio-util.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt", "sync", "time"] }

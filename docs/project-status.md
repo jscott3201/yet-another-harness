@@ -5,9 +5,9 @@ from a narrow model-free reliability kernel to a complete Rust-native,
 graph-backed, plugin-extensible agent harness.
 
 There is no usable release. The repository contains a tested reliability
-foundation and the first process-local composition lifecycle primitives; it does
-not yet contain a runnable composition host, plugin host, agent loop, sandbox,
-daemon, or client.
+foundation and the first process-local composition lifecycle and cleanup
+primitives; it does not yet contain a runnable composition host, plugin host,
+agent loop, sandbox, daemon, or client.
 
 ## Evidence Status
 
@@ -15,7 +15,7 @@ daemon, or client.
 |---|---|---|
 | G02 storage fan-in and crash recovery | Atomic state, receipt, and journal commits under kill/reopen, writer takeover, and corruption drills | Passed across 1,440 scored trials: [report](gates/G02-storage-fanin-recovery.md) |
 | Current model-free kernel | Deterministic tests for command, fencing, cancellation, effect, provider, recovery, and Adapter 1 behavior | Available for reuse; pivot integration has not started |
-| Contextual composition runtime | Component definition/instance/scope identities and epoch-fenced lifecycle transitions | Initial slice; no callbacks, effect scopes, services, or reconciler |
+| Contextual composition runtime | Component definition/instance/scope identities, epoch-fenced lifecycle transitions, and reversible nested effect scopes | Initial slices; no callbacks, services, or reconciler |
 | Plugin manifest, SDK, and conformance suite | No implementation in this repository | Not started |
 | Wasm, Node/TypeScript, and Python plugin drivers | No implementation in this repository | Not started |
 | Selene work, session, memory, evidence, and plugin-lineage domains | Only the current kernel graph exists | Design/spike stage |
@@ -30,7 +30,7 @@ the gate is being re-scoped around the new harness architecture.
 
 ### Live component lifecycle
 
-- A dependency-free `yah-compose` crate separated from Selene and the durable
+- A small `yah-compose` crate separated from Selene and the durable
   external-effect kernel.
 - Opaque component definition, component instance, and scope identities with
   explicit scope parentage.
@@ -41,9 +41,25 @@ the gate is being re-scoped around the new harness architecture.
 - Controlled stop targets for recomposition back to pending or terminal removal.
 - Retained last-failure diagnostics after teardown and retry.
 
-This slice performs synchronous lifecycle bookkeeping. It does not invoke
-component code, clean up registrations, resolve services, or reconcile desired
-state.
+Lifecycle bookkeeping remains synchronous. It does not invoke component code,
+resolve services, or reconcile desired state.
+
+### Reversible local effect scopes
+
+- Generated, activation-bound root and nested scope identities, separate
+  diagnostic labels, and downward-only read-only cancellation observation.
+- One deterministic reverse-order stack for synchronous cleanup, asynchronous
+  cleanup, and child scopes.
+- Cached close reports and resumable pending close. When close is driven to
+  completion, every callback is attempted once; repeated or resumed closes do
+  not rerun completed callbacks.
+- Aggregation of returned errors and unwind panics without short-circuiting.
+- Explicit separation from durable external-effect settlement.
+
+Cleanup is executor-neutral and sequential. The current layer does not provide
+deadlines, forced termination, concurrent admission/close, task supervision, or
+proof that cancellation stopped work. Dropping a scope requests cancellation
+but does not run its cleanup.
 
 ### Selene-backed mutation and recovery
 
@@ -88,12 +104,12 @@ plugin SDK, daemon protocol, or promised compatibility surface.
 
 ## Pivot Work
 
-The next useful proof extends the lifecycle core into a narrow vertical slice
+The next useful proof extends the composition core into a narrow vertical slice
 containing:
 
 1. executable component callbacks and a service-dependency graph;
-2. nested local effect scopes and provider recomposition over the existing
-   epoch-fenced lifecycle;
+2. typed services and provider recomposition over the existing epoch-fenced
+   lifecycle and effect scopes;
 3. a small plugin manifest and capability grant;
 4. one Selene graph/memory host capability;
 5. one Wasm component plus one modern Node or Python process plugin;
@@ -107,8 +123,8 @@ crate or protocol boundary in advance.
 
 ## Not Implemented
 
-- Component callback runner, contextual registry, service graph, effect scopes,
-  desired-state reconciler, or isolation realms.
+- Component callback runner, contextual registry, service graph, concurrent
+  scope/task supervisor, desired-state reconciler, or isolation realms.
 - Plugin packages, manifests, admission, installation, updates, SDKs, or
   language conformance tests.
 - Wasmtime/WIT host or sandboxed Node/TypeScript and CPython workers.

@@ -3,8 +3,9 @@ resolver = "3"
 members = ["crates/exp001-harness", "crates/yah-compose", "crates/yah-kernel"]
 
 # Crate boundaries are deliberately provisional during the full-harness pivot.
-# The composition crate is intentionally dependency-free while its live
-# lifecycle semantics are proved beside the retained reliability kernel.
+# The composition crate keeps a narrow dependency surface while its live
+# lifecycle and reversible-cleanup semantics are proved beside the retained
+# reliability kernel.
 
 [workspace.package]
 edition = "2024"
@@ -28,3 +29,5 @@ schemars = "1.2.2"
 serde_json_canonicalizer = "0.3.2"
 ts-rs = { version = "12.0.1", features = ["serde-json-impl"] }
 chrono = { version = "0.4", default-features = false, features = ["std"] }
+tokio = { version = "1", default-features = false }
+tokio-util = { version = "0.7", default-features = false }
