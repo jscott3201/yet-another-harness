@@ -11,13 +11,13 @@
 //! terminal, nothing after it, Usage before Finished) and to the poison
 //! latch (a defect repeats verbatim on every later feed).
 
-use oa_kernel::error::ProviderErrorKind;
-use oa_kernel::provider::fake::{
+use std::collections::BTreeSet;
+use yah_kernel::error::ProviderErrorKind;
+use yah_kernel::provider::fake::{
     CATALOG_FILES, FakeProvider, Fixture, SCENARIO_ROWS, load_catalog,
 };
-use oa_kernel::provider::normalize::{Normalizer, StepOutcome, StreamDefect};
-use oa_kernel::provider::{FinishReason, NormalizedEvent, ServedModelEvidence, Usage};
-use std::collections::BTreeSet;
+use yah_kernel::provider::normalize::{Normalizer, StepOutcome, StreamDefect};
+use yah_kernel::provider::{FinishReason, NormalizedEvent, ServedModelEvidence, Usage};
 
 /// Retry ceiling ratified by R25c (MILE-001 open parameters).
 const RETRY_CEILING: usize = 3;
@@ -214,8 +214,8 @@ fn run_fixture(fixture: &Fixture) -> Vec<TurnObservation> {
 fn catalog_covers_every_row_in_both_dialects() {
     let catalog = load_catalog().expect("catalog decodes");
     for dialect in [
-        oa_kernel::provider::Dialect::AnthropicMessages,
-        oa_kernel::provider::Dialect::Responses,
+        yah_kernel::provider::Dialect::AnthropicMessages,
+        yah_kernel::provider::Dialect::Responses,
     ] {
         let rows: BTreeSet<&str> = catalog
             .iter()

@@ -6,10 +6,10 @@
 mod common;
 
 use common::*;
-use oa_kernel::error::ErrorKind;
-use oa_kernel::funnel::{Command, Funnel, Method, PrincipalKind, ScopeKind, token_from_result};
-use oa_kernel::ids::{AuthorityEpoch, Digest, Uuid7};
-use oa_kernel::store::{AttemptTokenClaims, Store};
+use yah_kernel::error::ErrorKind;
+use yah_kernel::funnel::{Command, Funnel, Method, PrincipalKind, ScopeKind, token_from_result};
+use yah_kernel::ids::{AuthorityEpoch, Digest, Uuid7};
+use yah_kernel::store::{AttemptTokenClaims, Store};
 
 #[test]
 fn dispatch_mints_epoch_attempt_lease_token_and_supersedes() {
@@ -169,8 +169,8 @@ fn cross_unit_and_ghost_tokens_are_fence_rejected() {
     // A token naming a unit that does not exist resolves nowhere.
     let ghost = AttemptTokenClaims {
         unit_id: "u-ghost".into(),
-        attempt_epoch: oa_kernel::ids::AttemptEpoch(1),
-        stamp: oa_kernel::ids::Stamp(0),
+        attempt_epoch: yah_kernel::ids::AttemptEpoch(1),
+        stamp: yah_kernel::ids::Stamp(0),
         authority_epoch: ctx.authority(),
         holder_id: "h1".into(),
         nonce: "ghost-token".into(),
@@ -221,8 +221,8 @@ fn deterministic_rejections_persist_and_replay() {
     let mut with_token = ctx.create_work_item("wi-x");
     with_token.attempt_token = Some(AttemptTokenClaims {
         unit_id: "u".into(),
-        attempt_epoch: oa_kernel::ids::AttemptEpoch(1),
-        stamp: oa_kernel::ids::Stamp(0),
+        attempt_epoch: yah_kernel::ids::AttemptEpoch(1),
+        stamp: yah_kernel::ids::Stamp(0),
         authority_epoch: ctx.authority(),
         holder_id: "h".into(),
         nonce: "malformed-token".into(),

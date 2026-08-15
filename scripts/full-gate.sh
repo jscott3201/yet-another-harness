@@ -19,7 +19,7 @@
 #
 # Invoke the script — do not reconstruct its steps as an inline shell chain.
 # A gate command piped into anything reports the pipe's exit status, not its
-# own, which is how a broken build once got past this gate (OA Defects).
+# own, which is how a broken build once got past this gate (prior defect log).
 #
 # Usage: bash scripts/full-gate.sh
 
@@ -30,25 +30,14 @@ echo "==> cargo clean"
 cargo clean
 cargo clean --manifest-path tools/protocol-codegen/Cargo.toml
 
-echo "==> fmt"
-cargo fmt --all --check
-cargo fmt --manifest-path tools/protocol-codegen/Cargo.toml -- --check
-
-echo "==> generated protocol artifacts"
-cargo clippy --locked --manifest-path tools/protocol-codegen/Cargo.toml -- -D warnings
-cargo run --locked -p oa-kernel --bin generate-protocol -- --check
-
 echo "==> file-size cap"
 bash .github/scripts/check-file-size.sh
 
 echo "==> no-secret scan"
 bash .github/scripts/check-no-secrets.sh
 
-echo "==> clippy (-D warnings, all targets, from scratch)"
-cargo clippy --locked --workspace --all-targets -- -D warnings
-
-echo "==> tests (from scratch)"
-cargo test --locked --workspace
+echo "==> canonical Rust CI lane (from scratch)"
+bash scripts/ci-rust.sh
 
 echo
 echo "FULL GATE GREEN"

@@ -752,24 +752,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "oa-kernel"
-version = "0.0.1"
-dependencies = [
- "blake3",
- "chrono",
- "rand 0.9.5",
- "schemars",
- "selene-db-core",
- "selene-db-graph",
- "selene-db-persist",
- "serde",
- "serde_json",
- "serde_json_canonicalizer",
- "tempfile",
- "ts-rs",
-]
-
-[[package]]
 name = "once_cell"
 version = "1.21.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1758,6 +1740,24 @@ name = "xxhash-rust"
 version = "0.8.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "aee1b19627c7c60102ab80d3a9cbe18de90bfe03bfa6c3715447681f0e8c8af6"
+
+[[package]]
+name = "yah-kernel"
+version = "0.0.1"
+dependencies = [
+ "blake3",
+ "chrono",
+ "rand 0.9.5",
+ "schemars",
+ "selene-db-core",
+ "selene-db-graph",
+ "selene-db-persist",
+ "serde",
+ "serde_json",
+ "serde_json_canonicalizer",
+ "tempfile",
+ "ts-rs",
+]
 
 [[package]]
 name = "zerocopy"

@@ -11,7 +11,9 @@ use std::process::Command;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Manifest {
     pub selene_db_sha: String,
-    pub open_agent_sha: String,
+    // Preserve the original EXP-001 evidence key across the project rename.
+    #[serde(rename = "open_agent_sha")]
+    pub harness_sha: String,
     pub rustc_version: String,
     pub cpu_model: String,
     pub physical_cores: String,
@@ -59,14 +61,14 @@ fn git_head(dir: &str) -> String {
 impl Manifest {
     pub fn capture(
         selene_dir: &str,
-        open_agent_dir: &str,
+        harness_dir: &str,
         seed: u64,
         reps_per_cell: u32,
         samples_per_arm: u32,
     ) -> Manifest {
         Manifest {
             selene_db_sha: git_head(selene_dir),
-            open_agent_sha: git_head(open_agent_dir),
+            harness_sha: git_head(harness_dir),
             rustc_version: probe("rustc", &["--version"]),
             // sysctl keys are macOS-specific; the gate machine is a Mac per
             // R25c ("actual daemon machine"). Other hosts record "unrecorded".

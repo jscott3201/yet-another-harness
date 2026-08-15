@@ -74,7 +74,7 @@ pub fn typescript() -> String {
     ];
     let declarations = declarations.map(export_type);
     format!(
-        "// Generated from oa-kernel Rust protocol types. Do not edit.\n\nexport type JsonValue = null | boolean | number | string | JsonValue[] | {{ [key: string]: JsonValue }};\n\n{}\n",
+        "// Generated from yah-kernel Rust protocol types. Do not edit.\n\nexport type JsonValue = null | boolean | number | string | JsonValue[] | {{ [key: string]: JsonValue }};\n\n{}\n",
         declarations.join("\n\n")
     )
 }
@@ -100,7 +100,7 @@ fn check(path: &Path, expected: &str) -> Result<(), String> {
         .map_err(|e| format!("cannot read generated artifact {}: {e}", path.display()))?;
     if actual != expected {
         return Err(format!(
-            "generated artifact {} differs; run cargo run --locked -p oa-kernel --bin generate-protocol",
+            "generated artifact {} differs; run cargo run --locked -p yah-kernel --bin generate-protocol",
             path.display()
         ));
     }

@@ -1,5 +1,5 @@
-use oa_kernel::protocol::generate;
 use std::path::PathBuf;
+use yah_kernel::protocol::generate;
 
 fn main() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");

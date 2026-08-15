@@ -1,17 +1,17 @@
 mod common;
 
 use common::*;
-use oa_kernel::cancel::{CancelKind, CancelPolicy, CancelReason, DeliveryOutcome};
-use oa_kernel::effect::EffectTerminal;
-use oa_kernel::error::ErrorKind;
-use oa_kernel::funnel::RunOutcome;
-use oa_kernel::funnel::{Funnel, PrincipalKind};
-use oa_kernel::ids::Uuid7;
-use oa_kernel::store::Store;
+use yah_kernel::cancel::{CancelKind, CancelPolicy, CancelReason, DeliveryOutcome};
+use yah_kernel::effect::EffectTerminal;
+use yah_kernel::error::ErrorKind;
+use yah_kernel::funnel::RunOutcome;
+use yah_kernel::funnel::{Funnel, PrincipalKind};
+use yah_kernel::ids::Uuid7;
+use yah_kernel::store::Store;
 
 fn prepare(
     ctx: &mut Ctx,
-    token: &oa_kernel::store::AttemptTokenClaims,
+    token: &yah_kernel::store::AttemptTokenClaims,
     logical_op: Uuid7,
 ) -> (String, Uuid7) {
     let command = ctx.prepare_cmd(
@@ -248,10 +248,10 @@ fn predecessor_cancellation_bars_its_effect_under_a_successor_token() {
     ctx.seed_unit();
     let dispatch = ctx.dispatch_cmd("u-1", "h1", 1);
     let first = completed(ctx.funnel.submit(&dispatch));
-    let first_token = oa_kernel::funnel::token_from_result(&first).unwrap();
+    let first_token = yah_kernel::funnel::token_from_result(&first).unwrap();
     let first_attempt = first["attempt_id"].as_str().unwrap();
     let mut spec = effect_spec(Uuid7::mint(7, 4), "req");
-    spec.reversibility_class = oa_kernel::effect::ReversibilityClass::Irreversible;
+    spec.reversibility_class = yah_kernel::effect::ReversibilityClass::Irreversible;
     let prepare = ctx.prepare_cmd("prepare", "u-1", first_token, spec);
     let prepared = completed(ctx.funnel.submit(&prepare));
     let key = prepared["operation_key"].as_str().unwrap().to_owned();

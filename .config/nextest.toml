@@ -1,0 +1,38 @@
+nextest-version = { required = "0.9.143", recommended = "0.9.143" }
+
+[profile.default]
+# Four workers outperform unconstrained host parallelism for the current
+# Selene-heavy suite and avoid oversubscribing developer laptops.
+test-threads = 4
+fail-fast = true
+retries = 0
+global-timeout = "5m"
+slow-timeout = { period = "10s", terminate-after = 12, grace-period = "10s" }
+leak-timeout = { period = "1s", result = "fail" }
+status-level = "pass"
+final-status-level = "leak"
+failure-output = "immediate-final"
+success-output = "never"
+
+# Start the two known long-pole subscription cases before shorter tests.
+[[profile.default.overrides]]
+filter = 'test(/subscription::(resume_is_bounded_and_subscriptions_are_capped|slow_durable_consumer_closes_without_blocking_producers_and_resumes)$/)'
+priority = 50
+
+[profile.ci]
+inherits = "default"
+fail-fast = false
+retries = { backoff = "fixed", count = 1, delay = "1s" }
+# A retry adds evidence; it must never turn a flaky test green.
+flaky-result = "fail"
+global-timeout = "10m"
+status-level = "leak"
+final-status-level = "leak"
+
+[profile.ci.junit]
+path = "junit.xml"
+report-name = "yet-another-harness"
+store-success-output = false
+store-failure-output = true
+report-skipped = "ignored"
+flaky-fail-status = "failure"

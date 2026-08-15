@@ -5,8 +5,8 @@
 > stable daemon protocol. Useful behavior and tests may be retained while the
 > command surface is reshaped around the new harness architecture.
 
-Open Agent's application protocol separates commands, receipts, views, events,
-and server requests from any transport. Adapter 1 is an in-process adapter that
+YAH's application protocol separates commands, receipts, views, events, and
+server requests from any transport. Adapter 1 is an in-process adapter that
 still serializes and deserializes JSON so tests exercise the wire shapes.
 
 Adapter 1 assumes a trusted caller in the daemon process. It does not establish
@@ -16,7 +16,7 @@ belong to the daemon and transport adapters.
 
 ## Source of Truth
 
-Rust types under `crates/oa-kernel/src/protocol/` are authoritative. They
+Rust types under `crates/yah-kernel/src/protocol/` are authoritative. They
 generate:
 
 - client and server JSON Schemas under `generated/protocol/`;
@@ -25,20 +25,21 @@ generate:
 Regenerate after changing a protocol type:
 
 ```bash
-cargo run --locked -p oa-kernel --bin generate-protocol
+cargo run --locked -p yah-kernel --bin generate-protocol
 ```
 
 Check without writing:
 
 ```bash
-cargo run --locked -p oa-kernel --bin generate-protocol -- --check
+cargo run --locked -p yah-kernel --bin generate-protocol -- --check
 ```
 
 The pre-commit and full local gates run the check. Checked-in artifacts make a
 wire-shape change visible in code review.
 
 Selene is pinned to an exact public Git revision. Hosted CI runs generated-file
-checks, locked workspace Clippy, and locked workspace tests.
+checks, locked workspace Clippy, Nextest, and doctests in a digest-pinned native
+Linux container.
 
 ## Implemented Adapter 1 Slice
 

@@ -1,12 +1,12 @@
-use oa_kernel::funnel::Funnel;
-use oa_kernel::ids::{AuthorityEpoch, Digest, Uuid7};
-use oa_kernel::protocol::{
+use serde_json::{Value, json};
+use yah_kernel::funnel::Funnel;
+use yah_kernel::ids::{AuthorityEpoch, Digest, Uuid7};
+use yah_kernel::protocol::{
     BoundedU32, Command, CommandBody, DEFAULT_DURABLE_QUEUE_CAPACITY, DecimalU64, ErrorKind,
     ExpectedVersion, InProcessAdapter, ReceiptOutcome, Rfc3339Timestamp, Scope, ScopeKind,
     ServerMessage, SubscriptionPoll, Target, request_digest,
 };
-use oa_kernel::store::Store;
-use serde_json::{Value, json};
+use yah_kernel::store::Store;
 
 #[path = "protocol_adapter/receipt.rs"]
 mod receipt;
@@ -239,7 +239,7 @@ fn additive_payload_fields_are_ignored_but_principal_is_rejected() {
     assert_eq!(receipt.outcome, ReceiptOutcome::Rejected);
     assert_eq!(
         receipt.error.unwrap().kind,
-        oa_kernel::protocol::ErrorKind::InvalidRequest
+        yah_kernel::protocol::ErrorKind::InvalidRequest
     );
     assert_eq!(
         adapter.submit(&principal).unwrap().outcome,
@@ -305,7 +305,7 @@ fn authority_command_carrying_a_token_is_an_invalid_envelope() {
     assert_eq!(receipt.outcome, ReceiptOutcome::Rejected);
     assert_eq!(
         receipt.error.unwrap().kind,
-        oa_kernel::protocol::ErrorKind::InvalidRequest
+        yah_kernel::protocol::ErrorKind::InvalidRequest
     );
 }
 
@@ -383,17 +383,17 @@ fn canonical_deadline_round_trips_as_observational_intent() {
 #[test]
 fn future_cursor_is_rejected_instead_of_silently_starving() {
     let (_dir, adapter) = adapter();
-    let request = serde_json::to_vec(&oa_kernel::protocol::ClientMessage::Subscribe {
+    let request = serde_json::to_vec(&yah_kernel::protocol::ClientMessage::Subscribe {
         project_id: "p-1".into(),
         after_cursor: DecimalU64::new(1),
     })
     .unwrap();
-    let response: oa_kernel::protocol::ServerMessage =
+    let response: yah_kernel::protocol::ServerMessage =
         serde_json::from_slice(&adapter.handle_json(&request)).unwrap();
-    let oa_kernel::protocol::ServerMessage::Error(error) = response else {
+    let yah_kernel::protocol::ServerMessage::Error(error) = response else {
         panic!("future cursor must be rejected")
     };
-    assert_eq!(error.kind, oa_kernel::protocol::ErrorKind::InvalidRequest);
+    assert_eq!(error.kind, yah_kernel::protocol::ErrorKind::InvalidRequest);
 }
 
 #[test]
@@ -563,7 +563,7 @@ fn progress_extensions_are_rejected_before_the_semantic_journal() {
         json!({ "unit_id": "u-1" }),
         Some(2),
     );
-    let mut value = serde_json::to_value(oa_kernel::protocol::ClientMessage::Command(Box::new(
+    let mut value = serde_json::to_value(yah_kernel::protocol::ClientMessage::Command(Box::new(
         progress,
     )))
     .unwrap();
@@ -597,7 +597,7 @@ fn decimal_u64_rejects_noncanonical_and_out_of_range_strings() {
 #[test]
 fn checked_in_schema_and_typescript_match_rust_types() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    oa_kernel::protocol::generate::check_checked_in(&root).unwrap();
+    yah_kernel::protocol::generate::check_checked_in(&root).unwrap();
 }
 
 #[test]
@@ -670,6 +670,6 @@ fn opaque_holder_token_is_discarded_on_authority_takeover() {
     let receipt = adapter.submit(&progress).unwrap();
     assert_eq!(receipt.outcome, ReceiptOutcome::Rejected);
     let error = receipt.error.unwrap();
-    assert_eq!(error.kind, oa_kernel::protocol::ErrorKind::FenceRejected);
+    assert_eq!(error.kind, yah_kernel::protocol::ErrorKind::FenceRejected);
     assert!(error.message.contains("stale or unresolvable"));
 }

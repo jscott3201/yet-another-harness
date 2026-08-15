@@ -4,7 +4,7 @@ use super::*;
 fn resume_is_bounded_and_subscriptions_are_capped() {
     let (_dir, adapter) = adapter();
     append_events(&adapter, 1_025);
-    let resume = serde_json::to_vec(&oa_kernel::protocol::ClientMessage::Resume {
+    let resume = serde_json::to_vec(&yah_kernel::protocol::ClientMessage::Resume {
         project_id: "p-1".into(),
         after_cursor: DecimalU64::new(0),
     })
@@ -15,7 +15,7 @@ fn resume_is_bounded_and_subscriptions_are_capped() {
     };
     assert_eq!(error.kind, ErrorKind::ResourceExhausted);
 
-    for _ in 0..oa_kernel::protocol::MAX_DURABLE_SUBSCRIPTIONS {
+    for _ in 0..yah_kernel::protocol::MAX_DURABLE_SUBSCRIPTIONS {
         adapter.subscribe(1_025).unwrap();
     }
     assert_eq!(

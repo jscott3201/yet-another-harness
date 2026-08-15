@@ -1,4 +1,4 @@
-// Generated from oa-kernel Rust protocol types. Do not edit.
+// Generated from yah-kernel Rust protocol types. Do not edit.
 
 export type JsonValue = null | boolean | number | string | JsonValue[] | { [key: string]: JsonValue };
 

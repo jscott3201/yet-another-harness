@@ -1,9 +1,9 @@
 # Architecture
 
-Open Agent is being developed as a Rust-native, graph-backed, plugin-extensible
-agent harness. This document describes the stable direction and marks the
-boundary between the existing reliability kernel and the target harness. It is
-not a frozen crate map or protocol specification.
+Yet Another Harness (YAH) is being developed as a Rust-native, graph-backed,
+plugin-extensible agent harness. This document describes the stable direction
+and marks the boundary between the existing reliability kernel and the target
+harness. It is not a frozen crate map or protocol specification.
 
 ## System Shape
 
@@ -112,7 +112,7 @@ not permanent limits on the target graph.
 
 ## Local and External Effects
 
-Open Agent uses the word *effect* for two related but distinct mechanisms.
+YAH uses the word *effect* for two related but distinct mechanisms.
 
 ### Reversible local effects
 
@@ -141,8 +141,7 @@ therefore preserved beneath the new composition runtime.
 
 ## Plugin Boundary
 
-Open Agent will expose one semantic plugin model through several execution
-drivers:
+YAH will expose one semantic plugin model through several execution drivers:
 
 | Driver | Trust and execution model |
 |---|---|
@@ -180,6 +179,14 @@ admission. No plugin sandbox is implemented or audited yet.
 Node permission flags, Python isolated mode, import controls, and audit hooks
 may be used as defense in depth. They are not substitutes for OS, container, or
 VM isolation when code is untrusted.
+
+[NVIDIA OpenShell](https://github.com/NVIDIA/OpenShell/tree/d51a653f9cedeafa602364df61b74c4bd5a9495e)
+is a candidate implementation behind that backend contract for full-language
+plugins and whole agent workspaces. It is not a replacement for Selene or the
+Rust authority process, and it is unrelated to the trusted container used to
+compile and test YAH. Adoption requires fail-closed capability translation,
+pinned images and policies, crash reconciliation, and negative tests; its
+current alpha, single-player status keeps it an optional spike.
 
 Plugins receive narrow credential handles or brokered operations rather than
 the daemon's ambient environment. All graph mutations and irreversible actions

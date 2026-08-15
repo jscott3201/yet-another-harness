@@ -6,16 +6,16 @@
 mod common;
 
 use common::*;
-use oa_kernel::effect::{EffectTerminal, TargetState};
-use oa_kernel::error::ErrorKind;
-use oa_kernel::funnel::SettleEvidence;
-use oa_kernel::ids::Uuid7;
+use yah_kernel::effect::{EffectTerminal, TargetState};
+use yah_kernel::error::ErrorKind;
+use yah_kernel::funnel::SettleEvidence;
+use yah_kernel::ids::Uuid7;
 
 fn prepare(
     ctx: &mut Ctx,
     digest_src: &str,
-    token: &oa_kernel::store::AttemptTokenClaims,
-    spec: oa_kernel::funnel::EffectSpec,
+    token: &yah_kernel::store::AttemptTokenClaims,
+    spec: yah_kernel::funnel::EffectSpec,
 ) -> String {
     let cmd = ctx.prepare_cmd(digest_src, "u-1", token.clone(), spec);
     let result = completed(ctx.funnel.submit(&cmd));
@@ -78,7 +78,7 @@ fn declared_targets_are_classified_by_digest_never_by_assertion() {
 
     // A row asserting Applied with a wrong digest is reclassified.
     let mut lying = observed.clone();
-    lying[3].observed_digest = Some(oa_kernel::ids::Digest::of_bytes(b"garbled"));
+    lying[3].observed_digest = Some(yah_kernel::ids::Digest::of_bytes(b"garbled"));
     lying[3].state = TargetState::Applied; // ignored
     let lie = ctx.settle_clean("lie", "u-1", &key, v, EffectTerminal::Succeeded, lying, 260);
     assert_eq!(

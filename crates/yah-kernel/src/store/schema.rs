@@ -1,4 +1,4 @@
-//! Closed control-graph schema (`oa.control`) and the Selene value/diff
+//! Closed control-graph schema (`yah.control`) and the Selene value/diff
 //! helpers every store and funnel write path shares.
 
 use selene_core::{
@@ -73,12 +73,12 @@ fn node_type(name: &str, label: &str, properties: Vec<PropertyTypeDef>) -> NodeT
 pub fn graph_type() -> GraphTypeDef {
     use PropertyValueType::{String as PStr, Uint};
     GraphTypeDef {
-        name: db("oa.control"),
+        name: db("yah.control"),
         node_types: vec![
             // §7.3: singleton per control graph; the fixed unique key makes
             // a second row unrepresentable.
             node_type(
-                "oa.authority",
+                "yah.authority",
                 "Authority",
                 vec![
                     prop_def("authority_key", PStr, true, true, true),
@@ -95,7 +95,7 @@ pub fn graph_type() -> GraphTypeDef {
             // none — the fence reads the holder from the lease (§3.3), and a
             // second copy here would invite checking the wrong record.
             node_type(
-                "oa.unit",
+                "yah.unit",
                 "Unit",
                 vec![
                     prop_def("unit_id", PStr, true, true, true),
@@ -114,7 +114,7 @@ pub fn graph_type() -> GraphTypeDef {
                 ],
             ),
             node_type(
-                "oa.attempt",
+                "yah.attempt",
                 "Attempt",
                 vec![
                     // UNIQUE(unit_id, attempt_epoch) as a derived key.
@@ -136,7 +136,7 @@ pub fn graph_type() -> GraphTypeDef {
             // active lease per unit" holds by construction; lease history
             // lives in the journal, not in superseded rows.
             node_type(
-                "oa.lease",
+                "yah.lease",
                 "Lease",
                 vec![
                     prop_def("unit_id", PStr, true, true, true),
@@ -147,7 +147,7 @@ pub fn graph_type() -> GraphTypeDef {
                 ],
             ),
             node_type(
-                "oa.work_item",
+                "yah.work_item",
                 "WorkItem",
                 vec![
                     prop_def("work_item_id", PStr, true, true, true),
@@ -164,7 +164,7 @@ pub fn graph_type() -> GraphTypeDef {
             // §2.3: completed and deterministic-rejection receipts are final.
             // `outcome_unknown` is a transient wire state, never a row (R42b).
             node_type(
-                "oa.receipt",
+                "yah.receipt",
                 "Receipt",
                 vec![
                     prop_def("receipt_key", PStr, true, true, true),
@@ -182,7 +182,7 @@ pub fn graph_type() -> GraphTypeDef {
             // §2.4: every payload-bearing property immutable; deletes are
             // funnel-rejected `journal_immutable`.
             node_type(
-                "oa.event",
+                "yah.event",
                 "Event",
                 vec![
                     prop_def("event_id", PStr, true, true, true),
@@ -204,7 +204,7 @@ pub fn graph_type() -> GraphTypeDef {
                 ],
             ),
             node_type(
-                "oa.effect",
+                "yah.effect",
                 "Effect",
                 vec![
                     prop_def("operation_key", PStr, true, true, true),
@@ -226,7 +226,7 @@ pub fn graph_type() -> GraphTypeDef {
             // that the enclosing run cannot close success while a member is
             // still reconciling.
             node_type(
-                "oa.run",
+                "yah.run",
                 "Run",
                 vec![
                     prop_def("run_id", PStr, true, true, true),
@@ -242,7 +242,7 @@ pub fn graph_type() -> GraphTypeDef {
             // scope even by mistake. `status` stays mutable — the request
             // walks requested -> delivering -> observed_partial -> settled.
             node_type(
-                "oa.cancel_request",
+                "yah.cancel_request",
                 "CancelRequest",
                 vec![
                     prop_def("cancel_request_id", PStr, true, true, true),
@@ -261,7 +261,7 @@ pub fn graph_type() -> GraphTypeDef {
             // observed for one member, and rewriting an observation is how
             // an `unresponsive` member would silently become `stopped`.
             node_type(
-                "oa.cancel_delivery",
+                "yah.cancel_delivery",
                 "CancelDelivery",
                 vec![
                     prop_def("delivery_key", PStr, true, true, true),
@@ -275,7 +275,7 @@ pub fn graph_type() -> GraphTypeDef {
             ),
             // §8.1: immutable once sealed — every property immutable.
             node_type(
-                "oa.evidence",
+                "yah.evidence",
                 "Evidence",
                 vec![
                     prop_def("evidence_key", PStr, true, true, true),

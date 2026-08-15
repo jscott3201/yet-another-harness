@@ -56,7 +56,7 @@ fn raw_payload_limit_counts_encoded_bytes() {
         None,
     );
     let mut value =
-        serde_json::to_value(oa_kernel::protocol::ClientMessage::Command(Box::new(open))).unwrap();
+        serde_json::to_value(yah_kernel::protocol::ClientMessage::Command(Box::new(open))).unwrap();
     value["message"]["payload"]["padding"] = Value::String("x".repeat(256 * 1024));
     let response: ServerMessage =
         serde_json::from_slice(&adapter.handle_json(&serde_json::to_vec_pretty(&value).unwrap()))
@@ -112,7 +112,7 @@ fn non_command_frames_have_a_preparse_size_limit() {
     let (_dir, adapter) = adapter();
     let frame = format!(
         r#"{{"kind":"resume","message":{{"project_id":"p-1","after_cursor":"0","padding":"{}"}}}}"#,
-        "x".repeat(oa_kernel::protocol::MAX_CONTROL_FRAME_BYTES)
+        "x".repeat(yah_kernel::protocol::MAX_CONTROL_FRAME_BYTES)
     );
     let response: ServerMessage =
         serde_json::from_slice(&adapter.handle_json(frame.as_bytes())).unwrap();

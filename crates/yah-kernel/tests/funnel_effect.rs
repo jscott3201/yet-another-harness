@@ -10,18 +10,18 @@
 mod common;
 
 use common::*;
-use oa_kernel::effect::fake::{FakeEffectBackend, Observation, ScriptedOutcome};
-use oa_kernel::effect::{EffectTerminal, RetryClass, ReversibilityClass};
-use oa_kernel::error::ErrorKind;
-use oa_kernel::funnel::{Funnel, Method, PrincipalKind, SettleEvidence};
-use oa_kernel::ids::Uuid7;
-use oa_kernel::store::Store;
+use yah_kernel::effect::fake::{FakeEffectBackend, Observation, ScriptedOutcome};
+use yah_kernel::effect::{EffectTerminal, RetryClass, ReversibilityClass};
+use yah_kernel::error::ErrorKind;
+use yah_kernel::funnel::{Funnel, Method, PrincipalKind, SettleEvidence};
+use yah_kernel::ids::Uuid7;
+use yah_kernel::store::Store;
 
 fn prepare(
     ctx: &mut Ctx,
     digest_src: &str,
-    token: &oa_kernel::store::AttemptTokenClaims,
-    spec: oa_kernel::funnel::EffectSpec,
+    token: &yah_kernel::store::AttemptTokenClaims,
+    spec: yah_kernel::funnel::EffectSpec,
 ) -> (String, Uuid7, bool) {
     let cmd = ctx.prepare_cmd(digest_src, "u-1", token.clone(), spec);
     let result = completed(ctx.funnel.submit(&cmd));
@@ -65,52 +65,52 @@ fn prepare_is_idempotent_and_rejects_every_divergent_axis() {
     // Every declared axis is a divergence, including the two the first
     // review missed: declared_targets and approval_ref.
     let base = effect_spec(logical_op, "req");
-    let variants: Vec<(&str, oa_kernel::funnel::EffectSpec)> = vec![
+    let variants: Vec<(&str, yah_kernel::funnel::EffectSpec)> = vec![
         (
             "adapter_id",
-            oa_kernel::funnel::EffectSpec {
+            yah_kernel::funnel::EffectSpec {
                 adapter_id: "other".into(),
                 ..base.clone()
             },
         ),
         (
             "adapter_version",
-            oa_kernel::funnel::EffectSpec {
+            yah_kernel::funnel::EffectSpec {
                 adapter_version: "9".into(),
                 ..base.clone()
             },
         ),
         (
             "retry_class",
-            oa_kernel::funnel::EffectSpec {
+            yah_kernel::funnel::EffectSpec {
                 retry_class: RetryClass::NoRetry,
                 ..base.clone()
             },
         ),
         (
             "reversibility_class",
-            oa_kernel::funnel::EffectSpec {
+            yah_kernel::funnel::EffectSpec {
                 reversibility_class: ReversibilityClass::Irreversible,
                 ..base.clone()
             },
         ),
         (
             "decomposable",
-            oa_kernel::funnel::EffectSpec {
+            yah_kernel::funnel::EffectSpec {
                 decomposable: true,
                 ..base.clone()
             },
         ),
         (
             "compensation_intent_id",
-            oa_kernel::funnel::EffectSpec {
+            yah_kernel::funnel::EffectSpec {
                 compensation_intent_id: Some(Uuid7::mint(1, 1)),
                 ..base.clone()
             },
         ),
         (
             "approval_ref",
-            oa_kernel::funnel::EffectSpec {
+            yah_kernel::funnel::EffectSpec {
                 approval_ref: Some(Uuid7::mint(2, 2)),
                 ..base.clone()
             },
@@ -731,7 +731,7 @@ fn effect_ownership_binds_to_the_unit_on_every_arm() {
         },
     );
     match ctx.funnel.submit(&foreign) {
-        oa_kernel::funnel::Submission::Rejected { kind, detail, .. } => {
+        yah_kernel::funnel::Submission::Rejected { kind, detail, .. } => {
             assert_eq!(kind, ErrorKind::InvalidRequest);
             assert!(detail.contains("belongs to unit u-1"), "got: {detail}");
             assert!(

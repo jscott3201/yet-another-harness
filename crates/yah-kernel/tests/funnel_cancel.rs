@@ -10,21 +10,21 @@
 mod common;
 
 use common::*;
-use oa_kernel::cancel::{
+use yah_kernel::cancel::{
     CancelKind, CancelPolicy, CancelReason, DeliveryOutcome, MAX_SCOPE_MEMBERS,
 };
-use oa_kernel::effect::EffectTerminal;
-use oa_kernel::error::ErrorKind;
-use oa_kernel::funnel::{Funnel, RunOutcome, SettleEvidence, Submission, token_from_result};
-use oa_kernel::ids::Uuid7;
-use oa_kernel::store::Store;
+use yah_kernel::effect::EffectTerminal;
+use yah_kernel::error::ErrorKind;
+use yah_kernel::funnel::{Funnel, RunOutcome, SettleEvidence, Submission, token_from_result};
+use yah_kernel::ids::Uuid7;
+use yah_kernel::store::Store;
 
 fn prepare(
     ctx: &mut Ctx,
     digest_src: &str,
     unit: &str,
-    token: &oa_kernel::store::AttemptTokenClaims,
-    spec: oa_kernel::funnel::EffectSpec,
+    token: &yah_kernel::store::AttemptTokenClaims,
+    spec: yah_kernel::funnel::EffectSpec,
 ) -> (String, Uuid7, bool) {
     let cmd = ctx.prepare_cmd(digest_src, unit, token.clone(), spec);
     let result = completed(ctx.funnel.submit(&cmd));
