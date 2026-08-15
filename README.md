@@ -137,18 +137,25 @@ The design deliberately separates two concerns:
    prepare, dispatch, settle, and reconciling/parking state machinery; the
    query-before-retry reconciliation worker remains future work.
 
+The current local scope implementation binds cleanup to one activation,
+requests cancellation before teardown, unwinds mixed synchronous/asynchronous
+and nested registrations in deterministic reverse order, and reports every
+returned error or unwind panic without short-circuiting later cleanup.
+Owners must drive an explicit close to completion; dropping a scope requests
+cancellation but does not run registered cleanup. Cancellation is still a
+request, not proof that work or an escaped action stopped.
+
 A clean plugin unload cannot prove that an external action did not happen. That
 distinction is a hard runtime invariant.
 
 ## Existing Foundation
 
-The first pivot implementation is a dependency-free live composition core with
-explicit component definition, instance, and scope identities;
-instance-incarnation-bound activation epochs that fence start completions,
-failure reports, and stop requests or completions; and controlled pending,
-starting, active, failed, stopping, and removed transitions. It is state-machine
-groundwork only: component callbacks, reversible effect scopes, services, and
-reconciliation are not implemented yet.
+The first pivot implementation is a small live composition core with explicit
+component definition, instance, and scope identities; incarnation-bound
+activation epochs that fence start completions, failure reports, and stop
+requests or completions; controlled lifecycle transitions; and activation-owned
+reversible effect scopes. Component callbacks, services, and reconciliation are
+not implemented yet.
 
 The repository already contains a model-free Rust kernel and evidence harness:
 
@@ -236,7 +243,7 @@ projects are evolving independently and do not define YAH compatibility.
 
 | Path | Contents |
 |---|---|
-| `crates/yah-compose/` | Process-local component identity, scope relationships, and epoch-fenced lifecycle transitions |
+| `crates/yah-compose/` | Process-local component identity, epoch-fenced lifecycle transitions, cancellation, and reversible effect scopes |
 | `crates/yah-kernel/` | Current model-free durability, authority, effect, cancellation, provider, and protocol kernel |
 | `crates/exp001-harness/` | Storage fan-in and crash-recovery evidence harness |
 | `generated/protocol/` | Checked-in JSON Schemas and TypeScript bindings for the current protocol experiment |
