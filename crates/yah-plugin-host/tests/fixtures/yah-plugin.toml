@@ -1,0 +1,15 @@
+manifest_version = 1
+id = "acme.issue-context"
+version = "0.1.0"
+sdk = ">=0.1.0, <0.2.0"
+
+[entrypoint]
+driver = "node-process"
+path = "src/plugin.ts"
+
+[services]
+required = ["yah.context/v1", "yah.graph.read/v1"]
+provided = ["acme.issue-context/v1"]
+
+[capabilities]
+requested = ["yah.network.connect/v1", "yah.secrets.read/v1"]

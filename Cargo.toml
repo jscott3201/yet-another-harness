@@ -1,6 +1,11 @@
 [workspace]
 resolver = "3"
-members = ["crates/exp001-harness", "crates/yah-compose", "crates/yah-kernel"]
+members = [
+    "crates/exp001-harness",
+    "crates/yah-compose",
+    "crates/yah-kernel",
+    "crates/yah-plugin-host",
+]
 
 # Crate boundaries are deliberately provisional during the full-harness pivot.
 # The composition crate keeps a narrow dependency surface while its live
@@ -31,3 +36,7 @@ ts-rs = { version = "12.0.1", features = ["serde-json-impl"] }
 chrono = { version = "0.4", default-features = false, features = ["std"] }
 tokio = { version = "1", default-features = false }
 tokio-util = { version = "0.7", default-features = false }
+# Strict plugin-manifest parsing uses the community SemVer and TOML reference
+# implementations rather than growing security-sensitive ad hoc parsers.
+semver = "1.0.28"
+toml = "1.1.4"

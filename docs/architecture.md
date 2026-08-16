@@ -234,6 +234,12 @@ Python, and native code does not run inside the authority process. Process
 protocols and WIT may encode values differently while conforming to the same
 plugin lifecycle and capability behavior.
 
+The implemented `yah-plugin-host` boundary currently stops at strict manifest
+and revision data. It validates canonical versioned identities, one tagged
+entrypoint, bounded service/capability requests, and a host-supplied digest.
+Those values do not load or verify a package, authorize a reserved namespace
+or built-in registration, choose providers, or grant authority.
+
 Each plugin revision has a content identity, manifest, requested capabilities,
 configuration, and execution driver. Admission separates:
 

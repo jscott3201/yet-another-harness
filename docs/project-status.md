@@ -8,8 +8,9 @@ There is no usable release. The repository contains a tested reliability
 foundation and the first process-local composition lifecycle, cleanup, typed
 service-binding, exact-assignment dependency reconciliation, and fenced desired
 component-revision primitives, plus an independently authored semantic
-and concurrency/fault-injection corpus; it does not yet contain a runnable
-composition host, plugin host, agent loop, sandbox, daemon, or client.
+and concurrency/fault-injection corpus and the first strict plugin manifest
+data contract; it does not yet contain a runnable composition host, executable
+plugin driver, agent loop, sandbox, daemon, or client.
 
 ## Evidence Status
 
@@ -18,7 +19,8 @@ composition host, plugin host, agent loop, sandbox, daemon, or client.
 | G02 storage fan-in and crash recovery | Atomic state, receipt, and journal commits under kill/reopen, writer takeover, and corruption drills | Passed across 1,440 scored trials: [report](gates/G02-storage-fanin-recovery.md) |
 | Current model-free kernel | Deterministic tests for command, fencing, cancellation, effect, provider, recovery, and Adapter 1 behavior | Available for reuse; pivot integration has not started |
 | Contextual composition runtime | Component definition/instance/scope identities, immutable ancestor-scoped service visibility, epoch-fenced lifecycle, reversible nested effects, typed requirements, exact revocable bindings, exact-assignment recomposition, fenced desired revisions, six cross-layer semantic cases, and four concurrent fault cases | Initial slices with deterministic conformance evidence; no callbacks, task supervisor, provider-ranking policy, shared/named realms, or host-wide scheduler |
-| Plugin manifest, SDK, and conformance suite | No implementation in this repository | Not started |
+| Plugin manifest and revision vocabulary | Strict bounded TOML, canonical package/service/capability/version/path types, typed driver entrypoints, request-only declarations, and host-supplied revision identity | Initial data-contract slice; no loading, admission, grants, or execution |
+| Plugin driver, capability broker, SDK, and conformance suite | No implementation in this repository | Not started |
 | Wasm, Node/TypeScript, and Python plugin drivers | No implementation in this repository | Not started |
 | Selene work, session, memory, evidence, and plugin-lineage domains | Only the current kernel graph exists | Design/spike stage |
 | Full harness vertical slice | No live model, tool execution, memory loop, or subagent | Not started |
@@ -170,6 +172,30 @@ fault corpus covers synchronous mediated service calls, not async tasks,
 deadlines, reentrant self-close, escaped authority, executor or waker failure,
 or concurrent effect registration.
 
+### Plugin manifest and revision vocabulary
+
+- A data-only `yah-plugin-host` crate with no direct async-runtime, Selene,
+  Wasm, or process-driver dependency.
+- A strict, 64 KiB-bounded `yah-plugin.toml` decoder with an explicit schema
+  version and unknown-field rejection at every table.
+- Canonical namespaced package IDs and independently versioned service and
+  capability contract IDs, exact package SemVer, and explicit SDK version
+  requirements.
+- One tagged entrypoint for built-in Rust, Wasm Component, Node process, or
+  Python process; guest paths are portable package-relative logical paths.
+- Distinct capability-request values and service declarations that make no
+  grant, namespace-ownership, provider-selection, or publication-authority
+  claim.
+- Immutable package revision values built from package ID, exact version, and
+  a host-supplied canonical digest; digest computation and verification remain
+  outside this layer.
+
+Manifest parsing is not installation or admission. In particular, a built-in
+lane declaration cannot name a linked factory and still requires out-of-band
+trusted provenance plus exact host registration. Package extraction,
+signatures, configuration snapshots, effective grants, driver lifecycle,
+WIT/IPC bindings, and cross-driver conformance are not implemented.
+
 ### Selene-backed mutation and recovery
 
 - A single mutation funnel for aggregate state, semantic events, and durable
@@ -216,10 +242,10 @@ plugin SDK, daemon protocol, or promised compatibility surface.
 The next useful proof extends the composition core into a narrow vertical slice
 containing:
 
-1. executable component callbacks over the dependency reconciler;
-2. provider policy and contextual recomposition over the existing exact
-   assignments, typed bindings, epoch-fenced lifecycle, and effect scopes;
-3. a small plugin manifest and capability grant;
+1. an executable host `PluginDriver` over the epoch-fenced composition
+   lifecycle;
+2. an activation-scoped capability broker and effective grant model;
+3. a semantic driver conformance harness with a deterministic fake;
 4. one Selene graph/memory host capability;
 5. one Wasm component plus one modern Node or Python process plugin;
 6. a durable external action demonstrating that plugin unload and action
@@ -235,8 +261,8 @@ crate or protocol boundary in advance.
 - Component callback runner, shared/named realms and dynamic visibility,
   automatic provider ranking or registry watches, concurrent effect-registration
   or task supervisor, or host-wide desired-graph scheduler.
-- Plugin packages, manifests, admission, installation, updates, SDKs, or
-  language conformance tests.
+- Plugin package loading, verification, admission, installation, updates,
+  executable drivers, effective grants, SDKs, or language conformance tests.
 - Wasmtime/WIT host or sandboxed Node/TypeScript and CPython workers.
 - Durable memory capture, retrieval, ranking, summaries, or evidence lineage.
 - Live model providers, prompt assembly, tool execution, workflows, schedules,
