@@ -15,3 +15,8 @@ yah-compose = { path = "../yah-compose" }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt"] }
+
+[[example]]
+name = "local-capability"
+path = "examples/local_capability/main.rs"
+test = true

@@ -6,10 +6,11 @@ test supplies a trusted `DriverConformanceTarget`; the harness creates fresh
 composition, registry, capability-broker, and activation ownership for every
 case and drives the subject only through public host APIs.
 
-The first corpus is reference-proven by a deterministic built-in fake. That is
-evidence that another driver can use the harness without the agent, daemon, or
-private permit constructors. It is not yet evidence that Wasm, Node, Python,
-or any two real backends are equivalent.
+The first corpus is reference-proven by a deterministic built-in fake and is
+also passed by the trusted [local authoring driver](plugin-authoring.md). That
+is evidence that another driver family can use the harness without the agent,
+daemon, or private permit constructors. It is not evidence that a production
+Wasm, Node, or Python backend works, or that any two runtimes are equivalent.
 
 ## Target contract
 
@@ -75,6 +76,10 @@ does not claim capability transport or guest resource-table conformance.
 Process-local activation IDs and Rust trait objects in reports are diagnostic
 live values, not serialized fixtures or a guest ABI.
 
+The local authoring example separately exercises one nonempty process-local
+typed grant. That exact Rust-trait round trip is not part of the portable
+corpus and does not define guest capability transport.
+
 ## Separate evidence profiles
 
 The existing host-only adversarial tests retain Rust unwind, future-destructor,
@@ -84,7 +89,7 @@ worker. Backend implementations will also need their own containment corpora.
 
 Deferred profiles include:
 
-- nonempty capability round trips and a canonical fixture capability;
+- portable nonempty capability round trips and a guest-safe fixture contract;
 - guest SDK, WIT, or process-IPC encoding and malformed-message cases;
 - package loading, SDK negotiation, configuration, and real-composition smoke;
 - worker loss, deadlines, forced termination, output or resource exhaustion;

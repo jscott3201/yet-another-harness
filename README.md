@@ -214,16 +214,21 @@ registrations. The driver receives its weak, revocable context only in the
 post-cleanup-admission start permit. Synchronous capability calls participate in
 the activation's pre-cleanup drain, and stale contexts never follow provider or
 activation replacement. This is an in-process authority seam, not package
-admission or a hostile-code sandbox. No real built-in, Wasm, or process driver,
-policy engine, durable attempt binding, scheduler, or sandbox exists yet.
+admission or a hostile-code sandbox. A runnable
+[local authoring example](docs/plugin-authoring.md) now exercises one
+example-only synchronous capability through denial, exact grant, stop, and
+provider replacement with a trusted built-in driver. It is not a production
+capability family or execution backend; no policy engine, durable attempt
+binding, scheduler, guest runtime, or sandbox exists yet.
 
 A reusable [driver conformance testkit](docs/plugin-driver-conformance.md) now
 drives independently described `PluginDriver` subjects through five portable
 host-lifecycle cases without the agent or daemon. Its private instrumentation
 records exact boundary calls, cancellation, cleanup, and activation isolation;
 a trusted fixture probe confirms resource state. The deterministic reference
-fake passes. No real backend has passed yet, so this is not a cross-runtime,
-guest-ABI, loader, sandbox, or capability-transport certification.
+fake and the trusted local authoring driver pass. No production Wasm or process
+backend has passed yet, so this is not a cross-runtime, guest-ABI, loader,
+sandbox, or portable capability-transport certification.
 
 The repository already contains a model-free Rust kernel and evidence harness:
 

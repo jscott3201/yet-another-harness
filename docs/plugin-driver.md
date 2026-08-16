@@ -98,12 +98,13 @@ The adjacent capability slice implements immutable activation-scoped effective
 grant bindings and mediated synchronous handles. The reusable
 [host-side conformance testkit](plugin-driver-conformance.md) now exercises five
 portable lifecycle cases against an independently described driver subject; a
-deterministic reference fake passes, but no second or concrete backend exists.
-These layers do not implement
+deterministic reference fake and the trusted
+[local authoring driver](plugin-authoring.md) pass, but no production Wasm or
+process backend exists. These layers do not implement
 package loading or admission, policy/approval evaluation, configuration
 delivery, general component callbacks, async invocation
 draining, recurring health checks, restart/backoff policy, deadlines, forced
 termination, task supervision, WIT, worker IPC, sandboxing, or durable
-activation identity or work-attempt fencing. Nonempty capability transport,
-guest ABI behavior, backend containment, and multi-driver equivalence remain
-later evidence profiles.
+activation identity or work-attempt fencing. Portable nonempty capability
+transport, guest ABI behavior, backend containment, and multi-runtime
+equivalence remain later evidence profiles.

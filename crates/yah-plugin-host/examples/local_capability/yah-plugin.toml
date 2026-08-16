@@ -1,0 +1,14 @@
+manifest_version = 1
+id = "example.local-capability"
+version = "0.1.0"
+sdk = ">=0.1.0, <0.2.0"
+
+[entrypoint]
+driver = "builtin-rust"
+
+[services]
+required = []
+provided = []
+
+[capabilities]
+requested = ["example.local-greeting/v1"]

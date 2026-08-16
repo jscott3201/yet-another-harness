@@ -247,10 +247,13 @@ permit exposes the resulting weak context only after cleanup admission, and
 synchronous calls join the activation cleanup drain. The object-safe driver
 futures choose no executor. An executor-neutral host-side conformance runner
 decorates a trusted subject and drives five stable lifecycle cases through
-these public APIs; its reference fake is evidence for the harness, not for
-multi-backend equivalence. These values and interfaces do not load or verify a
-package, authorize a reserved namespace or built-in registration, compute
-policy/approval, or implement a concrete execution backend. See the
+these public APIs; its reference fake and one trusted local authoring driver
+are evidence for the harness, not for multi-runtime equivalence. That runnable
+example also exercises one example-only process-local capability through exact
+grant, revocation, and provider replacement. These values and interfaces do
+not load or verify a package, authorize a reserved namespace or built-in
+registration, compute policy/approval, or implement a production execution
+backend. See the
 [driver lifecycle contract](plugin-driver.md) and
 [capability contract](plugin-capabilities.md), plus the separate
 [conformance boundary](plugin-driver-conformance.md).
@@ -308,15 +311,17 @@ future session, work, memory, and evidence identities survive process loss.
 Today the repository contains the initial process-local component lifecycle,
 effect-scope core, typed revocable service registry, strict plugin manifest,
 runtime-neutral prepared-driver lifecycle, and exact activation-scoped
-capability broker, plus the reusable host-side driver conformance testkit; the
-Selene-backed reliability
+capability broker, plus the reusable host-side driver conformance testkit and a
+trusted local authoring example; the Selene-backed reliability
 kernel; provider normalization fixtures; an in-process protocol experiment;
 and the G02 storage evidence harness. General component callbacks,
 shared/named service realms, policy interception, automatic registry watches
-and provider ranking, concrete capability families, dynamic grant policy,
-durable attempt handles, concrete
-built-in/Wasm/process drivers, graph memory domains, sandbox, live agent loop,
-daemon, and clients described above are not implemented yet.
+and provider ranking, production capability families, dynamic grant policy,
+durable attempt handles, production Wasm/process drivers, plugin service
+contributions, graph memory domains, sandbox, live agent loop, daemon, and
+clients described above are not implemented yet. The example's built-in driver
+and greeting trait are local evidence, not production extension or capability
+surfaces.
 
 See [project status](project-status.md) for the exact current boundary and
 [protocol](protocol.md) for the existing Adapter 1 experiment.
