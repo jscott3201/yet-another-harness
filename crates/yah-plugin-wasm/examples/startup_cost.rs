@@ -16,19 +16,22 @@
 use std::time::Instant;
 
 use wasmtime::{
-    Config, Engine, ResourceLimiter, Store,
+    ResourceLimiter, Store,
     component::{Component, HasSelf, Linker},
 };
 use yah_plugin_wasm::{GuestProgram, HostObserver, HostState, WasmLimits, bindings::Conformance};
 
 fn main() -> wasmtime::Result<()> {
     let limits = WasmLimits::default();
-    let mut config = Config::new();
-    config.epoch_interruption(true);
-    config.memory_reservation(limits.memory_reservation_bytes);
-    config.memory_reservation_for_growth(limits.memory_reservation_bytes);
-    config.memory_guard_size(limits.memory_guard_bytes);
-    let engine = Engine::new(&config)?;
+    // The driver's own engine, built from the same bounds by the same code, and
+    // instantiated the way an activation instantiates, so these figures cannot
+    // drift from what an activation costs.
+    let engine = limits.engine().map_err(wasmtime::Error::msg)?;
+
+    // A current-thread runtime is the smallest thing that can resume a fiber.
+    // The example measures what an activation costs, and an activation's
+    // instantiation is a guest call.
+    let runtime = tokio::runtime::Builder::new_current_thread().build()?;
 
     // One compile before any measurement. The first compilation in a process
     // pays for engine state every later one reuses, and reporting that as the
@@ -78,7 +81,17 @@ fn main() -> wasmtime::Result<()> {
             store.limiter(|state: &mut HostState| state.limiter() as &mut dyn ResourceLimiter);
             store.set_hostcall_fuel(limits.host_call_bytes);
             store.set_epoch_deadline(1);
-            if Conformance::instantiate(&mut store, &component, &linker).is_ok() {
+            // `instantiate_async`, because that is what an activation calls. A
+            // guest call runs on a fiber, and the fiber is allocated and
+            // switched to on this path and not on the synchronous one, so
+            // timing the synchronous call would report a cost no activation
+            // pays.
+            if runtime
+                .block_on(Conformance::instantiate_async(
+                    &mut store, &component, &linker,
+                ))
+                .is_ok()
+            {
                 instantiated += 1;
             }
         }

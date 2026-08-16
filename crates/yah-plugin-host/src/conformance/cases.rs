@@ -247,6 +247,22 @@ async fn ready_lifecycle(
     Ok(rig.report(vec![observation], DriverConformanceTeardown::Clean))
 }
 
+/// Polls the pending-start case will spend waiting for a driver to acquire.
+///
+/// Sized for a driver that yields its way there. Each pass polls once and does
+/// not wait, so this rescues a driver that hands the thread back repeatedly -
+/// the wasm driver's guest yields once per epoch tick while it instantiates,
+/// and how many that is depends on how fast the machine runs the guest. It is
+/// generous because a poll costs nothing and the bound is a backstop, not a
+/// schedule.
+///
+/// It does not rescue a driver parked on a waker: nothing here wakes anything,
+/// so such a driver spends every pass and fails. That is the intended answer -
+/// this case is about a start that stays pending, and a driver that cannot make
+/// progress under repeated polling has a different problem than this case can
+/// describe.
+const PENDING_START_ACQUIRE_POLLS: u64 = 512;
+
 async fn pending_start_cancellation(
     rig: CaseRig,
 ) -> Result<DriverConformanceCaseReport, DriverConformanceFailure> {
@@ -255,9 +271,51 @@ async fn pending_start_cancellation(
     let removed = DesiredComponentState::removed(slot.generation(2));
     let mut activation = rig.prepare(&mut slot, epoch, &broker)?;
     let id = activation.id().clone();
-    let mut first = Box::pin(activation.activate(&registry));
-    let first_poll = poll_once(first.as_mut());
-    drop(first);
+    // Poll to the state this case is about rather than assuming one poll
+    // reaches it. A driver may return `Pending` for reasons of its own before
+    // it has acquired anything: the wasm driver runs instantiation as a guest
+    // call on its own stack, and that call yields whenever the host's epoch
+    // ticks, so a tick landing mid-instantiation returns `Pending` with nothing
+    // acquired yet. What this case tests is what a *retained* pending start
+    // does when its waiter is dropped, which is a different question from how
+    // many polls a driver takes to get there.
+    //
+    // Each pass drops the waiter, not the driver's operation - that retention
+    // is the property under test, and the count assertions below still hold
+    // across any number of passes. The bound is what keeps a driver that never
+    // acquires a failure rather than a hang.
+    //
+    // The observation the loop stops on is the one the case goes on to check.
+    // Probing again afterwards would consult the target twice for one decision,
+    // and a probe is allowed to answer differently the second time: a probe
+    // that failed once would have its failure read by the loop, discarded as
+    // "not acquired yet", and replaced by whatever the next call returned. That
+    // is why a failed probe stops the loop rather than retrying it, and why a
+    // poll that came back `Ready` does not probe at all - that is not this
+    // case's shape, and the requirement below reports it from an observation of
+    // its own.
+    let mut first_poll;
+    let mut passes = 0u64;
+    let mut acquired = false;
+    let mut before_cancel = None;
+    loop {
+        let mut first = Box::pin(activation.activate(&registry));
+        first_poll = poll_once(first.as_mut());
+        drop(first);
+        passes += 1;
+        if first_poll.is_ready() {
+            break;
+        }
+        let seen = rig.observation(&id, DriverConformanceTeardown::NotStarted);
+        acquired = seen
+            .as_ref()
+            .is_ok_and(|seen| seen.resource_state() == Some(DriverConformanceResourceState::Live));
+        let stop = seen.is_err() || acquired || passes >= PENDING_START_ACQUIRE_POLLS;
+        before_cancel = Some(seen);
+        if stop {
+            break;
+        }
+    }
     if let Err(primary) = require(
         first_poll.is_pending(),
         &rig,
@@ -274,21 +332,57 @@ async fn pending_start_cancellation(
         )
         .await);
     }
-    let before_cancel = match rig.observation(&id, DriverConformanceTeardown::NotStarted) {
-        Ok(observation) => observation,
-        Err(primary) => {
-            return Err(teardown::activation_failure(
-                &rig,
-                &mut activation,
-                primary,
-                std::slice::from_ref(&id),
-            )
-            .await);
-        }
-    };
+    // A probe that could not answer is reported before anything is concluded
+    // from what it did not say: `acquired` is false whenever the probe failed,
+    // so checking the bound first would report every probe failure as a driver
+    // that never acquired.
+    // `expect` rather than a fresh observation: the only way to leave the loop
+    // without one is a `Ready` first poll, which the requirement above has
+    // already returned on. Probing again here would consult the target twice
+    // for one decision, which is what the loop is careful not to do.
+    let before_cancel =
+        match before_cancel.expect("a pending first poll always leaves an observation") {
+            Ok(observation) => observation,
+            Err(primary) => {
+                return Err(teardown::activation_failure(
+                    &rig,
+                    &mut activation,
+                    primary,
+                    std::slice::from_ref(&id),
+                )
+                .await);
+            }
+        };
+    // Named separately from the retention check below, which is about something
+    // else entirely. A driver that spent every poll without acquiring has not
+    // failed to retain its operation, and reporting it as though it had would
+    // send an author looking in the wrong place.
+    if let Err(primary) = require(
+        acquired,
+        &rig,
+        DriverConformancePhase::Start,
+        format!(
+            "start returned pending without acquiring its resource, after {passes} poll{}",
+            if passes == 1 { "" } else { "s" }
+        ),
+        std::slice::from_ref(&id),
+        DriverConformanceTeardown::NotStarted,
+    ) {
+        return Err(teardown::activation_failure(
+            &rig,
+            &mut activation,
+            primary,
+            std::slice::from_ref(&id),
+        )
+        .await);
+    }
     if let Err(primary) = require(
         before_cancel.start_factory_calls() == 1
-            && before_cancel.start_pending_polls() == 1
+            // One pending poll per pass, no more: the host must drive the
+            // driver's operation once per poll and must not restart it. The
+            // factory count says the operation was not rebuilt; this says it
+            // was not polled behind the case's back.
+            && before_cancel.start_pending_polls() == passes
             && before_cancel.start_drops() == 0
             && before_cancel.resource_state() == Some(DriverConformanceResourceState::Live),
         &rig,

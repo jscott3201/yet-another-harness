@@ -11,7 +11,7 @@ use std::sync::{
 };
 
 use wasmtime::{
-    Engine, Store,
+    Store,
     component::{Component, HasSelf, Linker},
 };
 use yah_plugin_wasm::{
@@ -73,21 +73,30 @@ fn advisory_cancel_is_independent_of_the_host_signal() {
     assert!(state.is_cancelled());
 }
 
-#[test]
-fn fixture_allocator_traps_instead_of_returning_an_out_of_range_pointer() {
-    let engine = Engine::default();
+#[tokio::test]
+async fn fixture_allocator_traps_instead_of_returning_an_out_of_range_pointer() {
+    // The driver's engine, not a default one: this drives a real guest call, so
+    // it should run under the bounds an activation runs under.
+    let engine = WasmLimits::default().engine().expect("engine builds");
     let component = Component::new(&engine, GuestProgram::Conformant.text()).expect("compiles");
     let mut linker: Linker<HostState> = Linker::new(&engine);
     Conformance::add_to_linker::<HostState, HasSelf<HostState>>(&mut linker, |state| state)
         .expect("host imports link");
     let mut store = Store::new(&engine, HostState::new(HostObserver::new()));
-    let bindings = Conformance::instantiate(&mut store, &component, &linker).expect("instantiates");
+    // The driver's engine interrupts on epochs, so a store that never arms a
+    // deadline is already past one. Nothing advances the epoch here, so this
+    // arms a deadline the guest cannot reach.
+    store.set_epoch_deadline(1);
+    let bindings = Conformance::instantiate_async(&mut store, &component, &linker)
+        .await
+        .expect("instantiates");
 
     // The fixture owns one 64KiB page, so lowering this string cannot fit.
     let oversized = "x".repeat(100_000);
     let refused = bindings
         .yah_plugin_fixture_tool()
         .call_invoke(&mut store, &oversized)
+        .await
         .expect_err("an unsatisfiable allocation cannot succeed");
 
     // The point is *where* the refusal comes from. The allocator traps inside
@@ -171,9 +180,7 @@ fn log_values_are_clipped_to_the_byte_ceiling_and_the_loss_is_counted() {
 
 #[test]
 fn the_epoch_ticker_thread_stops_when_its_ticker_is_dropped() {
-    let mut config = wasmtime::Config::new();
-    config.epoch_interruption(true);
-    let engine = Engine::new(&config).expect("engine accepts epoch interruption");
+    let engine = WasmLimits::default().engine().expect("engine builds");
 
     let tick = std::time::Duration::from_millis(5);
     let ticker = yah_plugin_wasm::EpochTicker::start(&engine, tick);

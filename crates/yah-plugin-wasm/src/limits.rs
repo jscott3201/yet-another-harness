@@ -21,7 +21,34 @@ use std::{
     time::Duration,
 };
 
-use wasmtime::{Engine, ResourceLimiter, UpdateDeadline};
+use wasmtime::{Config, Engine, ResourceLimiter, UpdateDeadline};
+
+/// Default stack reserved above guest code on the same fiber.
+///
+/// A guest call runs on a fiber carrying two things: the guest's own frames,
+/// bounded by [`WasmLimits::guest_stack_bytes`], and the host frames above
+/// them, which are the trampoline, the canonical ABI's lift and lower, and
+/// whatever a host import does when the guest calls one. Wasmtime refuses only
+/// when the guest bound *exceeds* the fiber, so two numbers that are merely
+/// close are accepted at build time and then overflow the fiber during a call
+/// that runs deep enough to use its whole depth bound, which aborts the
+/// process. Every other bound in this crate either refuses the guest or fails
+/// the driver build, so this one is checked rather than left as a caution.
+///
+/// Measured demand above the guest region is far smaller. Recursion alone needs
+/// about 10 KiB on aarch64 in a debug host build, where frames are fattest, and
+/// about 3 KiB in release. Review measured about 9 KiB with the cancellation
+/// import called at maximum depth and 11 KiB with the logging import there,
+/// using fixtures built outside the tree - no checked-in fixture imports
+/// anything, so those two are not reproducible from this repo and the recursion
+/// figure is the one to trust here. This default is more than twenty times the
+/// worst of them, because being wrong one way costs address space and being
+/// wrong the other way aborts the process. It is a default rather than a constant of the crate precisely
+/// because the right number is a property of the host: it moves with target,
+/// optimisation level, and what an import does above the guest, so
+/// [`WasmLimits::host_stack_headroom_bytes`] carries it and a host that has
+/// measured its own can say so.
+pub const HOST_STACK_HEADROOM_BYTES: usize = 256 * 1024;
 
 /// Bounds applied to every activation one driver runs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -57,6 +84,37 @@ pub struct WasmLimits {
     /// alone gets memories that outgrow their reservation and are re-mapped,
     /// which costs more address space, not less.
     pub memory_reservation_bytes: u64,
+    /// Stack a guest call runs on, in bytes.
+    ///
+    /// A guest call runs on a stack of its own so it can yield the thread back
+    /// to the executor mid-call. The cost is per *activation*, not per call in
+    /// flight: Wasmtime parks a finished call's stack in its store and reuses
+    /// it, releasing it only when the store is dropped. Since instantiation is
+    /// itself a guest call, every live activation holds one of these from its
+    /// first call until teardown, idle or not. A host sizing this is pricing
+    /// how many plugins it will keep alive, not how many are working.
+    ///
+    /// This sizes the stack; it does not bound how deep the guest may recurse
+    /// on it. That is [`Self::guest_stack_bytes`], and the two move together:
+    /// this must exceed it by at least [`Self::host_stack_headroom_bytes`],
+    /// which [`Self::engine`] checks.
+    pub call_stack_bytes: usize,
+    /// How deep guest code may recurse before it is trapped, in bytes.
+    ///
+    /// This is the bound that actually stops a runaway recursion, and it is
+    /// separate from the stack the call runs on: the fiber must hold this plus
+    /// [`Self::host_stack_headroom_bytes`] of host frames above it. Wasmtime
+    /// defaults it to 512 KiB whether or not a host thinks about it, so leaving
+    /// it unset would mean the guest's depth bound was Wasmtime's choice rather
+    /// than the host's.
+    pub guest_stack_bytes: usize,
+    /// Fiber a guest call may not use, held for the host frames above it.
+    ///
+    /// Defaults to [`HOST_STACK_HEADROOM_BYTES`]; see it for what runs there
+    /// and what it was measured against. A host that has measured its own
+    /// target may lower this, at the risk the constant's doc describes, and one
+    /// whose imports do more work above the guest than these should raise it.
+    pub host_stack_headroom_bytes: usize,
     /// Address space reserved on each side of a linear memory.
     ///
     /// The guard is what lets Wasmtime turn an out-of-bounds guest access into
@@ -100,6 +158,71 @@ impl WasmLimits {
             self.call_budget_ticks as u32
         };
         self.epoch_tick.saturating_mul(ticks)
+    }
+
+    /// An engine carrying these bounds, or a sentence saying why not.
+    ///
+    /// Every engine in this crate is built here. That is not tidiness: these
+    /// knobs were set in three places once, and the recursion bound was missing
+    /// from all three, because a setting that has to be repeated is a setting
+    /// that will eventually be applied to only some of them.
+    ///
+    /// The bounds a `Config` cannot express (counts, totals, the call deadline)
+    /// are enforced per store instead, by [`Self::limiter`] and the epoch
+    /// deadline. This covers only what the engine itself owns.
+    pub fn engine(&self) -> Result<Engine, String> {
+        // Checked here because Wasmtime does not check it: it rejects a guest
+        // bound larger than the fiber and accepts one a page smaller, and the
+        // second aborts the process on the first call that runs deep rather
+        // than failing anything the host can report.
+        //
+        // The two directions are reported separately because "leaves N" is only
+        // meaningful when there is something left; a fiber smaller than the
+        // bound it carries leaves less than nothing, and saying "leaves 0"
+        // would describe the boundary case rather than this one.
+        if self.call_stack_bytes < self.guest_stack_bytes {
+            return Err(format!(
+                "call_stack_bytes ({}) must be larger than guest_stack_bytes ({}), \
+                 with {} bytes over it for host frames",
+                self.call_stack_bytes, self.guest_stack_bytes, self.host_stack_headroom_bytes
+            ));
+        }
+        let headroom = self.call_stack_bytes - self.guest_stack_bytes;
+        if headroom < self.host_stack_headroom_bytes {
+            return Err(format!(
+                "call_stack_bytes ({}) must exceed guest_stack_bytes ({}) by at least {} \
+                 bytes for host frames, but leaves {headroom}",
+                self.call_stack_bytes, self.guest_stack_bytes, self.host_stack_headroom_bytes
+            ));
+        }
+        let mut config = Config::new();
+        config.epoch_interruption(true);
+        // Wasmtime reserves 4 GiB per linear memory by default so a memory can
+        // grow without moving. That trade is only worth its address space when
+        // a memory may actually reach 4 GiB, and the host's own ceiling is far
+        // lower. Sizing the reservation to the ceiling is what stops a guest
+        // from claiming address space the byte ceiling never charges it for.
+        config.memory_reservation(self.memory_reservation_bytes);
+        // A memory that outgrows its reservation is re-mapped with a *new*
+        // reservation, and that one defaults to 2 GiB - so leaving it alone
+        // would let a guest reopen a multi-gigabyte window simply by growing.
+        config.memory_reservation_for_growth(self.memory_reservation_bytes);
+        // Wasmtime brackets every memory with a 32 MiB guard on each side, so
+        // the address space one memory costs is the reservation plus 64 MiB
+        // unless this is set too. The guard exists to turn out-of-bounds
+        // accesses into faults without a bounds check; it stays, but sized to
+        // something proportionate to the ceiling rather than to a 4 GiB memory.
+        config.memory_guard_size(self.memory_guard_bytes);
+        // Wasmtime parks a finished call's stack in its store and reuses it,
+        // so this is one allocation per live activation rather than per call
+        // in flight. Its 2 MiB default is sized for arbitrary guest code.
+        config.async_stack_size(self.call_stack_bytes);
+        // The stack size is not the recursion bound - this is. Left unset it
+        // would sit at Wasmtime's 512 KiB, which would make how deep a guest
+        // may recurse Wasmtime's decision rather than the host's.
+        config.max_wasm_stack(self.guest_stack_bytes);
+        Engine::new(&config)
+            .map_err(|error| format!("engine did not accept its configuration: {error}"))
     }
 
     /// A fresh limiter enforcing these ceilings for one activation.
@@ -199,6 +322,9 @@ impl Default for WasmLimits {
             max_instances: 16,
             memory_reservation_bytes: 16 * 1024 * 1024,
             memory_guard_bytes: 1024 * 1024,
+            call_stack_bytes: 1024 * 1024,
+            guest_stack_bytes: 512 * 1024,
+            host_stack_headroom_bytes: HOST_STACK_HEADROOM_BYTES,
             host_call_bytes: 4 * 1024 * 1024,
             epoch_tick: Duration::from_millis(10),
             call_budget_ticks: 100,
@@ -293,10 +419,12 @@ impl GuestInterrupt {
     /// Stop this activation, in flight and on entry.
     ///
     /// A call already running ends at its next epoch deadline, so its latency
-    /// is bounded by one tick rather than by anything the guest does. A call
-    /// that has not started yet is refused outright, which matters because a
-    /// short call can return without ever reaching a deadline and would
-    /// otherwise never see this flag at all.
+    /// is bounded by one tick rather than by anything the guest does - provided
+    /// something is still polling that call, since a guest call runs on a fiber
+    /// and reaches a deadline only when resumed. A call that has not started
+    /// yet is refused outright, which matters because a short call can return
+    /// without ever reaching a deadline and would otherwise never see this flag
+    /// at all.
     ///
     /// The flag is deliberately sticky: [`Self::begin_call`] resets the tick
     /// budget, but nothing resets a kill.
@@ -323,6 +451,14 @@ impl GuestInterrupt {
     /// Extending by a single tick rather than the whole remaining budget is
     /// deliberate: it is what makes [`Self::kill`] take effect within one tick
     /// instead of whenever the budget happens to run out.
+    ///
+    /// Continuing *yields* rather than resuming in place. A guest call runs on
+    /// its own stack, but a stack only gives the executor back when something
+    /// hands it back, and a guest that computes without calling a host import
+    /// never would: it would hold the thread until it finished or trapped, and
+    /// running on a fiber would have moved the blocking rather than removed
+    /// it. Yielding here is the point at which a compute-bound guest becomes
+    /// cooperative, and it costs one scheduling round-trip per tick.
     pub fn on_deadline(&self, budget_ticks: u64) -> UpdateDeadline {
         if self.is_killed() {
             return UpdateDeadline::Interrupt;
@@ -335,7 +471,7 @@ impl GuestInterrupt {
         if used >= budget_ticks {
             UpdateDeadline::Interrupt
         } else {
-            UpdateDeadline::Continue(1)
+            UpdateDeadline::Yield(1)
         }
     }
 }
@@ -391,6 +527,81 @@ mod tests {
         assert_eq!(limits.memory_growing(900, 2048, None).ok(), Some(false));
         assert_eq!(limits.memory_bytes(), 900);
         assert_eq!(limits.memory_growing(900, 1024, None).ok(), Some(true));
+    }
+
+    /// The pair Wasmtime accepts and then aborts on. A fiber the same size as
+    /// the guest bound it carries passes `Engine::new` and overflows on the
+    /// first call that runs deep enough to use that bound - the fixtures that
+    /// stay shallow complete under it, which is what makes the pair dangerous
+    /// rather than obviously broken. A host that got this wrong would lose the
+    /// process rather than see an error. There is no test for the abort itself,
+    /// for the obvious reason.
+    ///
+    /// The pair is equal-sized rather than inverted so that it reaches the
+    /// headroom comparison: an inverted pair is refused for its direction
+    /// before the headroom is ever looked at.
+    #[test]
+    fn a_stack_pair_with_no_room_for_host_frames_is_refused() {
+        let limits = WasmLimits {
+            call_stack_bytes: 512 * 1024,
+            guest_stack_bytes: 512 * 1024,
+            ..WasmLimits::default()
+        };
+        let refusal = limits
+            .engine()
+            .expect_err("a fiber with no headroom must be refused");
+        assert!(
+            refusal.contains("host frames"),
+            "the refusal must name what the headroom is for: {refusal}"
+        );
+    }
+
+    /// The other half: the refusal must not be reachable by every pair, or it
+    /// would be a check that no configuration passes.
+    #[test]
+    fn a_stack_pair_with_room_to_spare_is_accepted() {
+        assert!(WasmLimits::default().engine().is_ok());
+    }
+
+    /// A fiber smaller than the bound it carries is a different mistake, and
+    /// subtracting would report it as the boundary case rather than as itself.
+    #[test]
+    fn a_fiber_smaller_than_its_guest_bound_is_refused_as_that() {
+        let limits = WasmLimits {
+            call_stack_bytes: 512 * 1024,
+            guest_stack_bytes: 1024 * 1024,
+            ..WasmLimits::default()
+        };
+        let refusal = limits
+            .engine()
+            .expect_err("a fiber under its own guest bound must be refused");
+        assert!(
+            refusal.contains("must be larger than"),
+            "the refusal must name the direction it failed in: {refusal}"
+        );
+    }
+
+    /// The headroom is the host's number, so a host that has measured its own
+    /// target can spend less on it. Without this the check would be a floor the
+    /// crate imposes rather than a bound the host owns.
+    #[test]
+    fn a_host_may_lower_the_headroom_it_owns() {
+        let limits = WasmLimits {
+            call_stack_bytes: 576 * 1024,
+            guest_stack_bytes: 512 * 1024,
+            host_stack_headroom_bytes: 64 * 1024,
+            ..WasmLimits::default()
+        };
+        assert!(limits.engine().is_ok());
+        assert!(
+            WasmLimits {
+                host_stack_headroom_bytes: HOST_STACK_HEADROOM_BYTES,
+                ..limits
+            }
+            .engine()
+            .is_err(),
+            "the same pair must fail under the default headroom, or this proves nothing"
+        );
     }
 
     /// `call_deadline` multiplies a `u64` budget into a `Duration`, which takes

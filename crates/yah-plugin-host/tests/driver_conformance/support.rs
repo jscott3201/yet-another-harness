@@ -33,6 +33,14 @@ impl ReferenceTarget {
         Self::with_violation(Violation::RevisionMismatch)
     }
 
+    pub(super) fn with_early_completion_and_a_one_shot_probe_failure() -> Self {
+        Self::with_violation(Violation::PendingStartCompletesWithTransientProbeFailure)
+    }
+
+    pub(super) fn with_pending_start_that_never_acquires() -> Self {
+        Self::with_violation(Violation::PendingStartNeverAcquires)
+    }
+
     pub(super) fn with_pending_start_completion() -> Self {
         Self::with_violation(Violation::PendingStartCompletes)
     }
@@ -112,6 +120,8 @@ enum Violation {
     None,
     RevisionMismatch,
     PendingStartCompletes,
+    PendingStartNeverAcquires,
+    PendingStartCompletesWithTransientProbeFailure,
     UnhealthyReady,
     ProbeFailureAfterAcquire,
     TransientProbeFailureAfterAcquire,
@@ -130,6 +140,10 @@ impl DriverConformanceTarget for ReferenceTarget {
             Violation::None => "reference-scripted-driver",
             Violation::RevisionMismatch => "reference-metadata-mismatch",
             Violation::PendingStartCompletes => "reference-pending-completes",
+            Violation::PendingStartNeverAcquires => "reference-pending-never-acquires",
+            Violation::PendingStartCompletesWithTransientProbeFailure => {
+                "reference-pending-completes-with-transient-probe-failure"
+            }
             Violation::UnhealthyReady => "reference-unhealthy-ready",
             Violation::ProbeFailureAfterAcquire => "reference-probe-failure",
             Violation::TransientProbeFailureAfterAcquire => "reference-transient-probe-failure",
@@ -200,6 +214,18 @@ impl DriverConformanceTarget for ReferenceTarget {
             (Violation::PendingStartCompletes, DriverConformanceCase::PendingStartCancellation) => {
                 plans[0].start = StartBehavior::Ready;
             }
+            (
+                Violation::PendingStartNeverAcquires,
+                DriverConformanceCase::PendingStartCancellation,
+            ) => {
+                plans[0].start = StartBehavior::PendingWithoutAcquire;
+            }
+            (
+                Violation::PendingStartCompletesWithTransientProbeFailure,
+                DriverConformanceCase::PendingStartCancellation,
+            ) => {
+                plans[0].start = StartBehavior::Ready;
+            }
             (Violation::UnhealthyReady, DriverConformanceCase::ReadyLifecycle) => {
                 plans[0].health = HealthBehavior::Unhealthy;
             }
@@ -239,9 +265,11 @@ impl DriverConformanceTarget for ReferenceTarget {
         let probe = Arc::new(ReferenceProbe {
             states: Arc::clone(&states),
             fail_after_acquire: self.violation == Violation::ProbeFailureAfterAcquire,
-            fail_once_after_acquire: AtomicBool::new(
-                self.violation == Violation::TransientProbeFailureAfterAcquire,
-            ),
+            fail_once_after_acquire: AtomicBool::new(matches!(
+                self.violation,
+                Violation::TransientProbeFailureAfterAcquire
+                    | Violation::PendingStartCompletesWithTransientProbeFailure
+            )),
         });
         Ok(DriverConformanceSubject::new(expected, driver, probe))
     }
@@ -298,6 +326,12 @@ impl Plan {
 enum StartBehavior {
     Ready,
     Pending,
+    /// Pends without ever acquiring, which no conforming driver does.
+    ///
+    /// The pending-start case polls until the driver acquires, so this is what
+    /// makes that loop's bound reachable: without it nothing distinguishes a
+    /// bounded loop from one that would spin forever.
+    PendingWithoutAcquire,
     Failure,
 }
 
@@ -398,9 +432,11 @@ impl PreparedDriverActivation for ReferencePrepared {
 
     fn start(&self, permit: DriverStartPermit) -> DriverFuture<Result<(), DriverActivationError>> {
         debug_assert_eq!(permit.id(), &self.id);
-        self.state
-            .resource
-            .store(ResourceState::Live as u8, Ordering::Release);
+        if !matches!(self.plan.start, StartBehavior::PendingWithoutAcquire) {
+            self.state
+                .resource
+                .store(ResourceState::Live as u8, Ordering::Release);
+        }
         Box::pin(StartFuture {
             behavior: self.plan.start,
         })
@@ -439,7 +475,7 @@ impl Future for StartFuture {
     fn poll(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Self::Output> {
         match self.behavior {
             StartBehavior::Ready => Poll::Ready(Ok(())),
-            StartBehavior::Pending => Poll::Pending,
+            StartBehavior::Pending | StartBehavior::PendingWithoutAcquire => Poll::Pending,
             StartBehavior::Failure => Poll::Ready(Err(DriverActivationError::failed(
                 "reference start failure",
             ))),

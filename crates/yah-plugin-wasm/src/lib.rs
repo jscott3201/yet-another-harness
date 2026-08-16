@@ -8,8 +8,12 @@
 //!
 //! Activations run under host-owned bounds ([`limits`]): ceilings on total
 //! memory and table size and on how many memories, tables, and instances one
-//! activation may hold, a call deadline, and caps on what a guest-to-host call
-//! may transfer and what the host retains from it.
+//! activation may hold, the stack one call runs on and how deep the guest may
+//! recurse on it, a call deadline, and caps on what a guest-to-host call may
+//! transfer and what the host retains from it.
+//!
+//! Guest calls run on their own stack and yield the thread at each epoch tick,
+//! so one guest cannot starve another by computing.
 //!
 //! This crate does not load plugin packages, meter fuel, transport capability
 //! grants across the ABI, or contain hostile guest code. Bounding what a guest
@@ -27,7 +31,7 @@ pub use driver::{
 };
 pub use guest::GuestProgram;
 pub use host::{HostObserver, HostState, LogRecord, RETAINED_LOG_RECORDS};
-pub use limits::{EpochTicker, GuestInterrupt, WasmLimits};
+pub use limits::{EpochTicker, GuestInterrupt, HOST_STACK_HEADROOM_BYTES, WasmLimits};
 
 /// Fully versioned WIT package the driver and contract tests share.
 pub const WIT_PACKAGE: &str = "yah:plugin@0.1.0";

@@ -45,11 +45,12 @@ either. So a loader here will own identity, versioning, and verification
 itself. That is a real cost of this path and it lands on a later slice.
 
 Two consequences already apply. A loader must cache compiled artifacts:
-compilation costs roughly one hundred and twenty to two hundred and thirty
-times instantiation for the fixtures here, and around sixteen hundred times for
-a JavaScript guest, so compiling per activation is not viable. And Component Model async stays off —
-it works end to end under this pin, but the JavaScript toolchain cannot compile
-a world that uses it, and enabling it would make async a Rust-only capability.
+compilation costs roughly seventy-five to two hundred and seventy times
+instantiation for the fixtures here, and around sixteen hundred times for a
+JavaScript guest, so compiling per activation is not viable. And Component
+Model async stays off — it works end to end under this pin, but the JavaScript
+toolchain cannot compile a world that uses it, and enabling it would make async
+a Rust-only capability.
 
 Run `cargo run -p yah-plugin-wasm --example startup_cost --release` for the
 compile-versus-instantiate figures on the checked-in fixtures.
@@ -185,6 +186,29 @@ gets when it outgrows the first one, which otherwise defaults to 2 GiB, and the
 guard region on each side, which otherwise defaults to 32 MiB and would dominate
 what a memory costs at this ceiling.
 
+A guest call also runs on a stack of its own. That is what lets the deadline
+tick do something other than trap: with budget left the guest yields the thread
+back to the host's executor and resumes, so a guest that computes without ever
+calling a host import cannot starve its neighbours. The world stays
+synchronous — nothing in it declares `async func` — so this is Wasmtime's fiber
+support and not Component Model async, which the JavaScript toolchain cannot
+yet compile.
+
+Two host-owned numbers govern that stack, and they are not the same. One sizes
+the stack a call runs on; the other bounds how deep the guest may recurse on
+it. Setting only the first would leave the recursion bound at Wasmtime's
+default rather than the host's. The driver also requires room between them:
+Wasmtime rejects a recursion bound larger than the stack but accepts one a page
+smaller, and that pair aborts the process on the first guest call that runs
+deep enough to use its bound — rather than failing anything a host could
+handle — so the driver refuses it at build time instead. How much room is the
+host's number too, defaulting to twenty times the deepest host frames measured
+above a guest here. The stack is charged per *activation*, not per call in flight:
+Wasmtime parks a finished call's stack in its store and reuses it, releasing it
+only when the store is dropped, and since instantiation is itself a guest call
+every live activation holds one from its first call until teardown. A host
+sizing this is pricing how many plugins it keeps alive.
+
 A call deadline *terminates*. The world's cancellation import is advisory, so a
 guest that never asks whether it should stop would otherwise run forever. The
 driver advances its engine's epoch on a timer, and a guest that outlives its
@@ -197,11 +221,12 @@ already past the one it was given, and its next call would be charged for time
 it never ran. Because each store carries its own deadline, one timer bounds
 every activation without coupling them: the tick that kills a call out of
 budget leaves a sibling with budget untouched. Kill isolation is demonstrated —
-one activation's stop does not reach another's, on one engine under one ticker
-— but no case yet has two guest calls live at once, so the budget half of that
-sentence is a claim about the code. Deactivation uses the same mechanism to
-stop an in-flight call before waiting on the lock that call holds, which is
-what bounds teardown behind a runaway guest.
+one activation's stop does not reach another's, on one engine under one ticker.
+Two guest calls now do run at once in one case, which shows they interleave;
+what that case does not show is budget isolation, since the healthy guest
+finishes within a tick and never approaches a budget of its own. Deactivation
+uses the same mechanism to stop an in-flight call before waiting on the lock
+that call holds, which is what bounds teardown behind a runaway guest.
 
 The host also bounds what it retains from one `logging` call — record count,
 message bytes, and field count — and counts what it dropped or clipped, so the

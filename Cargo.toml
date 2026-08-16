@@ -45,6 +45,6 @@ toml = "1.1.4"
 # executable driver. `cranelift` is what makes `Component::new` exist at all:
 # `runtime` alone can only load a precompiled artifact. `wat` lets the test
 # corpus carry its guest as reviewable text instead of a checked-in binary.
-wasmtime = { version = "=47.0.3", default-features = false, features = ["component-model", "cranelift", "runtime", "std", "wat"] }
+wasmtime = { version = "=47.0.3", default-features = false, features = ["async", "component-model", "cranelift", "runtime", "std", "wat"] }
 wit-bindgen = { version = "=0.57.1", default-features = false, features = ["macros", "realloc", "std"] }
 wit-parser = { version = "=0.252.0", default-features = false, features = ["std"] }
