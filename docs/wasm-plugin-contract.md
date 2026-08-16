@@ -1,9 +1,9 @@
 # Wasm Plugin Contract
 
-YAH's first WebAssembly Component Model contract is a compile-checked,
-pre-1.0 conformance world. It fixes the smallest host/guest shape needed for
-the first driver spike without claiming that a component can yet be loaded or
-executed.
+YAH's first WebAssembly Component Model contract is a pre-1.0 conformance
+world. It fixes the smallest host/guest shape needed for the first driver, and
+a Wasmtime-backed driver now compiles, instantiates, and calls components
+against it. Packaging, resource limits, and containment are not part of it.
 
 The canonical source is
 [`crates/yah-plugin-wasm/wit/yah-plugin.wit`](../crates/yah-plugin-wasm/wit/yah-plugin.wit):
@@ -40,8 +40,8 @@ caller-supplied IDs or tokens within it as authority.
 
 `fixture-tool` is only the first portable call shape for the driver and guest
 examples. Its input and output strings are intended to contain one UTF-8 JSON
-value, but this compile-only slice does not parse or bound them. They do not
-define the production tool registry or authorize actions. Typed domain
+value, but neither the driver nor this contract parses or bounds them. They do
+not define the production tool registry or authorize actions. Typed domain
 contracts and bounded resource handles will be added only when their host
 owners exist.
 
@@ -65,33 +65,76 @@ The manifest remains the package descriptor. Guests do not repeat package or
 revision identity in this world, and matching the WIT package name is not
 package provenance or admission.
 
-## Compile evidence
+## Contract evidence
 
-`yah-plugin-wasm` owns no normal dependency yet. Tests compile Wasmtime host
-bindings and `wit-bindgen` guest bindings directly from the canonical WIT, then
-use `wit-parser` to assert the exact package, world, directional interface set,
-and function inventory. The workspace pins these three development tools so a
-toolchain change is deliberate. Generated Rust is not checked in, and the
+Tests compile Wasmtime host bindings and `wit-bindgen` guest bindings directly
+from the canonical WIT, then use `wit-parser` to assert the exact package,
+world, directional interface set, and function inventory. The workspace pins
+all three exactly so a toolchain change is deliberate. Wasmtime is now a normal
+dependency of the crate because the driver executes; `wit-bindgen` and
+`wit-parser` remain development-only. Generated Rust is not checked in, and the
 existing Adapter 1 schema generator remains a separate protocol experiment.
 
-This evidence proves that the native Rust binding generators agree on the
-source contract. It does not compile a guest component, instantiate Wasmtime,
-link SDK-003 resources, or run the portable driver corpus.
+Three independent consumers agree on one source: the host generator, the guest
+generator, and a neutral reader. They are not independent implementations -
+all three reach `wit-parser`, two of them at the same version - so this shows
+the generators agree, not that the grammar has been cross-checked.
+
+## The driver
+
+`yah-plugin-wasm` owns a `WasmComponentDriver` implementing the host's
+`PluginDriver`. One driver object holds an engine and its compiled components;
+each activation owns a store and instance keyed by exact activation identity,
+so deactivating one activation cannot disturb another on the same driver.
+
+Compilation happens when the driver is built, which is what keeps `prepare`
+inert: by the time the host prepares an activation, nothing remains to compile
+or load. The store is reachable from the prepared control rather than only from
+the start future, because the host destroys that future to cancel a pending
+start and anything held solely inside it would never be released.
+
+Deactivation drops the store. That releases the instance, its memories, and
+every host binding the linker installed, and it does not consult guest code:
+the world exports no guest deactivation hook, so a faulty guest is never asked
+to agree to its own shutdown.
+
+That is not yet the same as being unable to delay it. The store lock is held
+for the duration of a guest call, so a guest that never returns from `activate`
+also blocks that activation's deactivation. Nothing here can interrupt running
+guest code; only the deadline and interruption limits below can, and they are
+not implemented.
+
+The driver passes the five portable host lifecycle cases, and a separate smoke
+test compiles a component, activates it, calls `fixture-tool.invoke`, and drops
+the store.
+
+### Fixture components
+
+The corpus carries its guests as component text under
+`crates/yah-plugin-wasm/guests/`. Text keeps the canonical-ABI shape reviewable
+in a diff, and building guests from a real language toolchain would need a
+second Rust target in the gate container. Those belong with the guest SDK work,
+so these files are corpus rather than an authoring example.
+
+The fixtures import nothing. Host logging and cancellation are linked and
+proved linkable, but no guest here calls back through them.
 
 ## Deliberate limits
 
 This slice does not provide:
 
-- a `PluginDriver`, Wasmtime engine/store/linker, package loader, or executed
-  component;
+- a package loader, admission path, or any execution of code that did not come
+  from the checked-in fixture corpus;
 - guest SDK artifacts or a Rust/TypeScript component build;
 - capability-resource tables or graph, memory, artifact, tool-registry, or
-  durable-effect host APIs;
-- WIT async/streams, deadlines, interruption, fuel, memory/table limits, or
-  bounded host-call output;
+  durable-effect host APIs, and no route for a guest to reach a granted
+  capability;
+- WIT async/streams, deadlines, epoch interruption, fuel, memory/table limits,
+  or bounded host-call output;
 - WASI ambient authority, sandbox enforcement, malformed-component coverage,
   or cross-runtime equivalence.
 
-WIT strings and lists are not byte-bounded by this draft. Until the Wasm driver
+WIT strings and lists are not byte-bounded by this draft, and the host retains
+only a fixed number of guest log records before dropping them. Until the driver
 enforces memory, call, deadline, and output limits, this world is unsuitable
 for executing untrusted input.

@@ -5,9 +5,13 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 publish = false
-description = "Provisional WIT contract and future Wasmtime driver boundary for YAH"
+description = "Provisional WIT contract and Wasmtime component driver for YAH"
+
+[dependencies]
+wasmtime.workspace = true
+yah-plugin-host = { path = "../yah-plugin-host" }
 
 [dev-dependencies]
-wasmtime.workspace = true
+tokio = { workspace = true, features = ["macros", "rt"] }
 wit-bindgen.workspace = true
 wit-parser.workspace = true

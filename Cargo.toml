@@ -41,8 +41,10 @@ tokio-util = { version = "0.7", default-features = false }
 # implementations rather than growing security-sensitive ad hoc parsers.
 semver = "1.0.28"
 toml = "1.1.4"
-# WSM-001 compile-time compatibility probes. Wasmtime remains test-only until
-# yah-plugin-wasm owns an executable driver in WSM-002.
-wasmtime = { version = "=47.0.3", default-features = false, features = ["component-model", "runtime", "std"] }
+# WSM-001 compile-time compatibility probes, extended in WSM-002 to an
+# executable driver. `cranelift` is what makes `Component::new` exist at all:
+# `runtime` alone can only load a precompiled artifact. `wat` lets the test
+# corpus carry its guest as reviewable text instead of a checked-in binary.
+wasmtime = { version = "=47.0.3", default-features = false, features = ["component-model", "cranelift", "runtime", "std", "wat"] }
 wit-bindgen = { version = "=0.57.1", default-features = false, features = ["macros", "realloc", "std"] }
 wit-parser = { version = "=0.252.0", default-features = false, features = ["std"] }

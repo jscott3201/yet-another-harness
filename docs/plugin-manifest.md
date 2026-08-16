@@ -100,7 +100,8 @@ implemented layer over these values. Package loading and verification,
 configuration binding, production capability families, and production driver
 backends remain later roadmap slices. The host-side driver conformance testkit
 is implemented separately from this data contract. A
-[compile-checked provisional WIT world](wasm-plugin-contract.md) now exists,
-but component building/loading, WIT capability resources, process IPC, sandbox
-enforcement, persistence, and actual multi-backend equivalence remain later
-roadmap slices.
+[provisional WIT world](wasm-plugin-contract.md) and a driver that executes
+fixture components against it now exist, but a `wasm-component` entrypoint
+path is still never resolved or loaded: component building and loading, WIT
+capability resources, process IPC, sandbox enforcement, persistence, and
+actual multi-backend equivalence remain later roadmap slices.

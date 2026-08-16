@@ -7,10 +7,13 @@ composition, registry, capability-broker, and activation ownership for every
 case and drives the subject only through public host APIs.
 
 The first corpus is reference-proven by a deterministic built-in fake and is
-also passed by the trusted [local authoring driver](plugin-authoring.md). That
-is evidence that another driver family can use the harness without the agent,
-daemon, or private permit constructors. It is not evidence that a production
-Wasm, Node, or Python backend works, or that any two runtimes are equivalent.
+also passed by the trusted [local authoring driver](plugin-authoring.md) and by
+the [Wasmtime component driver](wasm-plugin-contract.md), which runs it against
+components Wasmtime compiles and instantiates. That is evidence that other
+driver families can use the harness without the agent, daemon, or private
+permit constructors. It is not evidence that a production Node or Python
+backend works, that guest semantics are covered, or that any two runtimes are
+equivalent.
 
 ## Target contract
 
@@ -91,8 +94,8 @@ Deferred profiles include:
 
 - executed nonempty capability round trips and capability-bearing guest
   fixture semantics;
-- built guest components, WIT execution/resource transport, process-IPC
-  encoding, and malformed-message cases;
+- guest components built from a language toolchain, WIT resource transport,
+  process-IPC encoding, and malformed-message cases;
 - package loading, SDK negotiation, configuration, and real-composition smoke;
 - worker loss, deadlines, forced termination, output or resource exhaustion;
 - filesystem, network, process, secret, raw-Selene, and sandbox negatives;
