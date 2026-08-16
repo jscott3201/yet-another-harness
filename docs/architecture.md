@@ -234,11 +234,17 @@ Python, and native code does not run inside the authority process. Process
 protocols and WIT may encode values differently while conforming to the same
 plugin lifecycle and capability behavior.
 
-The implemented `yah-plugin-host` boundary currently stops at strict manifest
-and revision data. It validates canonical versioned identities, one tagged
-entrypoint, bounded service/capability requests, and a host-supplied digest.
-Those values do not load or verify a package, authorize a reserved namespace
-or built-in registration, choose providers, or grant authority.
+The implemented `yah-plugin-host` boundary validates strict manifest and
+revision data and defines a runtime-neutral driver lifecycle. A host-owned
+prepared-activation guard binds an exact package revision to a process-local
+provider-selection epoch, transfers deactivation into that component's effect
+scope before the first start poll, contains ordinary start unwind failures,
+revalidates composition readiness before publishing active, and exposes
+exact-activation advisory health. The object-safe driver futures choose no
+executor. These values and interfaces do not load or verify a package,
+authorize a reserved namespace or built-in registration, choose providers,
+grant authority, or implement a concrete execution backend. See the
+[driver lifecycle contract](plugin-driver.md).
 
 Each plugin revision has a content identity, manifest, requested capabilities,
 configuration, and execution driver. Admission separates:
@@ -291,13 +297,14 @@ future session, work, memory, and evidence identities survive process loss.
 ## Implemented Boundary
 
 Today the repository contains the initial process-local component lifecycle,
-effect-scope core, and typed revocable service registry; the Selene-backed
-reliability kernel; provider normalization fixtures; an in-process protocol
-experiment; and the G02 storage evidence harness. Component callbacks,
+effect-scope core, typed revocable service registry, strict plugin manifest,
+and runtime-neutral prepared-driver lifecycle; the Selene-backed reliability
+kernel; provider normalization fixtures; an in-process protocol experiment;
+and the G02 storage evidence harness. General component callbacks,
 shared/named service realms, policy interception, automatic registry watches
-and provider ranking, the plugin SDK, Wasm and process drivers, graph memory
-domains, sandbox, live agent loop, daemon, and clients described above are not
-implemented yet.
+and provider ranking, effective plugin grants and SDK handles, concrete
+built-in/Wasm/process drivers, graph memory domains, sandbox, live agent loop,
+daemon, and clients described above are not implemented yet.
 
 See [project status](project-status.md) for the exact current boundary and
 [protocol](protocol.md) for the existing Adapter 1 experiment.

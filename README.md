@@ -192,7 +192,7 @@ hierarchical call draining, callback unwind, resumable close, and final
 provider-value destructor panic containment. The corpora do not claim
 shared/named realms, automatic injection, file HMR, or task supervision.
 
-A data-only `yah-plugin-host` crate now validates the first
+A `yah-plugin-host` crate now validates the first
 `yah-plugin.toml` contract: canonical package, service, and capability
 identities; exact package and SDK version vocabulary; typed built-in, Wasm,
 Node, and Python entrypoints; bounded request-only declarations; and
@@ -200,6 +200,15 @@ host-supplied package revision digests. Parsing is not admission: no package is
 loaded or verified, no namespace or built-in code is authorized, and no
 capability is granted by this layer. See the
 [manifest contract](docs/plugin-manifest.md).
+
+The same crate now defines an object-safe, runtime-neutral
+[`PluginDriver` lifecycle](docs/plugin-driver.md). A host-owned activation guard
+binds one package revision to one exact composition epoch, admits deactivation
+cleanup before constructing driver start, preserves pending start across
+dropped waiters, contains ordinary unwind failures, revalidates composition
+readiness before publishing active, and fences advisory health after stop.
+The deterministic fake proves this lifecycle; no package loader, real built-in,
+Wasm, or process driver, capability broker, scheduler, or sandbox exists yet.
 
 The repository already contains a model-free Rust kernel and evidence harness:
 

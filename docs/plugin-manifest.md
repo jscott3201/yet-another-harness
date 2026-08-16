@@ -93,6 +93,8 @@ digest. Constructing the value does not verify bytes or admit the package, and
 configuration, grants, scope, provider assignments, and activation epochs are
 not part of package revision identity.
 
-Driver lifecycle, package loading and verification, configuration binding,
-effective grants, WIT, process IPC, sandbox enforcement, persistence, and
-cross-driver conformance remain separate roadmap slices.
+The runtime-neutral [driver lifecycle](plugin-driver.md) is now a separate
+implemented layer over these values. Package loading and verification,
+configuration binding, effective grants, concrete driver backends, WIT,
+process IPC, sandbox enforcement, persistence, and cross-driver conformance
+remain later roadmap slices.

@@ -1849,6 +1849,7 @@ version = "0.0.1"
 dependencies = [
  "semver",
  "serde",
+ "tokio",
  "toml",
  "yah-compose",
 ]

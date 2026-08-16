@@ -1,14 +1,22 @@
-//! Runtime-neutral plugin package vocabulary.
+//! Runtime-neutral plugin package and driver contracts.
 //!
 //! This crate validates declarative package manifests and immutable revision
-//! identities. It intentionally does not load code, grant capabilities, run a
-//! driver, or persist plugin state. Those authority boundaries remain owned by
-//! later host layers.
+//! identities, and defines the runtime-neutral host/driver lifecycle. It does
+//! not load code, grant capabilities, choose restart policy, or persist plugin
+//! state. Those authority boundaries remain owned by later host layers.
 
+mod driver;
 mod identity;
 mod manifest;
 mod revision;
 
+pub use driver::{
+    ActivatePlugin, DriverActivationError, DriverActivationErrorKind, DriverDeactivationError,
+    DriverFuture, DriverHealthError, DriverPrepareError, DriverStartPermit, DriverStopPermit,
+    HostPluginActivation, HostPluginActivationError, PluginActivationHandle, PluginActivationId,
+    PluginActivationRequest, PluginDriver, PluginHealth, PluginHealthError, PluginStartError,
+    PreparedDriverActivation,
+};
 pub use identity::{
     CapabilityId, IdentityError, PackageDigest, PackageRelativePath, PluginPackageId,
     PluginVersion, SdkVersion, SdkVersionRequirement, ServiceContractId,
