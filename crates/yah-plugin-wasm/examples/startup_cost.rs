@@ -16,21 +16,16 @@
 use std::time::Instant;
 
 use wasmtime::{
-    Config, Engine, ResourceLimiter, Store,
+    ResourceLimiter, Store,
     component::{Component, HasSelf, Linker},
 };
 use yah_plugin_wasm::{GuestProgram, HostObserver, HostState, WasmLimits, bindings::Conformance};
 
 fn main() -> wasmtime::Result<()> {
     let limits = WasmLimits::default();
-    let mut config = Config::new();
-    config.epoch_interruption(true);
-    config.memory_reservation(limits.memory_reservation_bytes);
-    config.memory_reservation_for_growth(limits.memory_reservation_bytes);
-    config.memory_guard_size(limits.memory_guard_bytes);
-    config.async_stack_size(limits.call_stack_bytes);
-    config.max_wasm_stack(limits.guest_stack_bytes);
-    let engine = Engine::new(&config)?;
+    // The driver's own engine, built from the same bounds by the same code, so
+    // these figures cannot drift from what an activation actually costs.
+    let engine = limits.engine().map_err(wasmtime::Error::msg)?;
 
     // One compile before any measurement. The first compilation in a process
     // pays for engine state every later one reuses, and reporting that as the

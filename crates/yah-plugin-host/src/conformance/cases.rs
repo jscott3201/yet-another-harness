@@ -247,6 +247,13 @@ async fn ready_lifecycle(
     Ok(rig.report(vec![observation], DriverConformanceTeardown::Clean))
 }
 
+/// Polls the pending-start case will spend waiting for a driver to acquire.
+///
+/// Sized for a driver that yields on its way there, not for one that is slow:
+/// each pass resumes whatever the driver parked, so a driver making progress
+/// needs a handful and one that is not will not be rescued by more.
+const PENDING_START_ACQUIRE_POLLS: usize = 64;
+
 async fn pending_start_cancellation(
     rig: CaseRig,
 ) -> Result<DriverConformanceCaseReport, DriverConformanceFailure> {
@@ -255,9 +262,45 @@ async fn pending_start_cancellation(
     let removed = DesiredComponentState::removed(slot.generation(2));
     let mut activation = rig.prepare(&mut slot, epoch, &broker)?;
     let id = activation.id().clone();
-    let mut first = Box::pin(activation.activate(&registry));
-    let first_poll = poll_once(first.as_mut());
-    drop(first);
+    // Poll to the state this case is about rather than assuming one poll
+    // reaches it. A driver may return `Pending` for reasons of its own before
+    // it has acquired anything: the wasm driver runs instantiation as a guest
+    // call on its own stack, and that call yields whenever the host's epoch
+    // ticks, so a tick landing mid-instantiation returns `Pending` with nothing
+    // acquired yet. What this case tests is what a *retained* pending start
+    // does when its waiter is dropped, which is a different question from how
+    // many polls a driver takes to get there.
+    //
+    // Each pass drops the waiter, not the driver's operation - that retention
+    // is the property under test, and the count assertions below still hold
+    // across any number of passes. The bound is what keeps a driver that never
+    // acquires a failure rather than a hang.
+    //
+    // The observation the loop stops on is the one the case goes on to check.
+    // Probing again afterwards would consult the target twice for one decision,
+    // and a probe is allowed to answer differently the second time: a probe
+    // that failed once would have its failure read by the loop, discarded as
+    // "not acquired yet", and replaced by whatever the next call returned. That
+    // is why a failed probe stops the loop rather than retrying it.
+    let mut first_poll;
+    let mut passes = 0;
+    let before_cancel = loop {
+        let mut first = Box::pin(activation.activate(&registry));
+        first_poll = poll_once(first.as_mut());
+        drop(first);
+        passes += 1;
+        let seen = rig.observation(&id, DriverConformanceTeardown::NotStarted);
+        let acquired = seen
+            .as_ref()
+            .is_ok_and(|seen| seen.resource_state() == Some(DriverConformanceResourceState::Live));
+        if first_poll.is_ready()
+            || seen.is_err()
+            || acquired
+            || passes >= PENDING_START_ACQUIRE_POLLS
+        {
+            break seen;
+        }
+    };
     if let Err(primary) = require(
         first_poll.is_pending(),
         &rig,
@@ -274,7 +317,7 @@ async fn pending_start_cancellation(
         )
         .await);
     }
-    let before_cancel = match rig.observation(&id, DriverConformanceTeardown::NotStarted) {
+    let before_cancel = match before_cancel {
         Ok(observation) => observation,
         Err(primary) => {
             return Err(teardown::activation_failure(
@@ -288,7 +331,11 @@ async fn pending_start_cancellation(
     };
     if let Err(primary) = require(
         before_cancel.start_factory_calls() == 1
-            && before_cancel.start_pending_polls() == 1
+            // At least one, not exactly one: a driver that yields on its way to
+            // acquiring spends a poll per yield, and the loop above polls until
+            // it gets there. What must not move is the factory count - the
+            // operation is retained across every one of those polls.
+            && before_cancel.start_pending_polls() >= 1
             && before_cancel.start_drops() == 0
             && before_cancel.resource_state() == Some(DriverConformanceResourceState::Live),
         &rig,

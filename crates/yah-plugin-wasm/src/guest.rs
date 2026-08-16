@@ -26,7 +26,7 @@ pub enum GuestProgram {
     MultiMemory,
     /// Declares many empty memories, which cost bytes nothing and space plenty.
     ManyMemories,
-    /// Recurses without a base case, to test the host's depth bound.
+    /// Descends a fixed number of frames, deep enough to reach a tight bound.
     DeepRecursion,
 }
 

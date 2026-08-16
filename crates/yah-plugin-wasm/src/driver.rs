@@ -8,8 +8,11 @@
 //!
 //! Every activation runs under the host-owned bounds in [`crate::limits`]:
 //! ceilings on its total memory and table size and on how many memories,
-//! tables, and instances it may hold, a call deadline that stops a guest which
-//! will not stop itself, and a cap on what one guest-to-host call may transfer.
+//! tables, and instances it may hold, the stack a call runs on and how deep the
+//! guest may recurse on it, a call deadline that stops a guest which will not
+//! stop itself, and a cap on what one guest-to-host call may transfer. The
+//! engine carrying them is built by `WasmLimits::engine`, so a bound cannot be
+//! set here and forgotten elsewhere.
 //!
 //! A guest call runs on a stack of its own, so a call that will not return no
 //! longer holds the thread polling its future: at each epoch tick the guest
@@ -40,7 +43,7 @@ use std::{
 };
 
 use wasmtime::{
-    Config, Engine, ResourceLimiter, Store,
+    Engine, ResourceLimiter, Store,
     component::{Component, HasSelf, Linker},
 };
 use yah_plugin_host::{
@@ -282,35 +285,10 @@ impl WasmComponentDriver {
         limits: WasmLimits,
     ) -> Result<(Arc<dyn PluginDriver>, WasmObserver), WasmDriverBuildError> {
         let plans: VecDeque<WasmActivationPlan> = plans.into_iter().collect();
-        let mut config = Config::new();
-        config.epoch_interruption(true);
-        // Wasmtime reserves 4 GiB per linear memory by default so a memory can
-        // grow without moving. That trade is only worth its address space when
-        // a memory may actually reach 4 GiB, and the host's own ceiling is far
-        // lower. Sizing the reservation to the ceiling is what stops a guest
-        // from claiming address space the byte ceiling never charges it for.
-        config.memory_reservation(limits.memory_reservation_bytes);
-        // A memory that outgrows its reservation is re-mapped with a *new*
-        // reservation, and that one defaults to 2 GiB - so leaving it alone
-        // would let a guest reopen a multi-gigabyte window simply by growing.
-        config.memory_reservation_for_growth(limits.memory_reservation_bytes);
-        // Wasmtime brackets every memory with a 32 MiB guard on each side, so
-        // the address space one memory costs is the reservation plus 64 MiB
-        // unless this is set too. The guard exists to turn out-of-bounds
-        // accesses into faults without a bounds check; it stays, but sized to
-        // something proportionate to the ceiling rather than to a 4 GiB memory.
-        config.memory_guard_size(limits.memory_guard_bytes);
-        // Wasmtime parks a finished call's stack in its store and reuses it,
-        // so this is one allocation per live activation rather than per call
-        // in flight. Its 2 MiB default is sized for arbitrary guest code.
-        config.async_stack_size(limits.call_stack_bytes);
-        // The stack size is not the recursion bound - this is. Left unset it
-        // would sit at Wasmtime's 512 KiB, which would make how deep a guest
-        // may recurse Wasmtime's decision rather than the host's.
-        config.max_wasm_stack(limits.guest_stack_bytes);
-        let engine = Engine::new(&config).map_err(|error| {
-            WasmDriverBuildError::new(format!("engine did not accept its configuration: {error}"))
-        })?;
+        // The engine's bounds live with the bounds, not here. Setting them at
+        // each construction site is how the recursion bound came to be unset at
+        // all of them.
+        let engine = limits.engine().map_err(WasmDriverBuildError::new)?;
         let ticker = EpochTicker::start(&engine, limits.epoch_tick);
         let mut components = HashMap::new();
         for plan in &plans {
@@ -789,14 +767,7 @@ mod interrupt_tests {
     /// falsify an engine-scoped or ticker-scoped kill, which is the only way
     /// "one activation's kill reaches another" could plausibly go wrong.
     fn engine(limits: WasmLimits) -> Engine {
-        let mut config = Config::new();
-        config.epoch_interruption(true);
-        config.memory_reservation(limits.memory_reservation_bytes);
-        config.memory_reservation_for_growth(limits.memory_reservation_bytes);
-        config.memory_guard_size(limits.memory_guard_bytes);
-        config.async_stack_size(limits.call_stack_bytes);
-        config.max_wasm_stack(limits.guest_stack_bytes);
-        Engine::new(&config).expect("engine accepts its configuration")
+        limits.engine().expect("engine accepts its configuration")
     }
 
     /// Drive one future to completion on this thread.
@@ -926,7 +897,14 @@ mod interrupt_tests {
         let engine = engine(limits);
         let spinner = core(&engine, GuestProgram::Runaway, limits);
         let healthy = core(&engine, GuestProgram::Conformant, limits);
-        let _ticker = EpochTicker::start(&engine, limits.epoch_tick);
+        let ticker = EpochTicker::start(&engine, limits.epoch_tick);
+        // The assertion below counts ticks the ticker actually delivered rather
+        // than milliseconds. The two agree on an idle machine and diverge on a
+        // loaded one: the ticker's sleeps stretch under load, so a wall-clock
+        // bound tightens exactly when the machine is least able to meet it,
+        // while the property being claimed - the sibling gets in within a tick
+        // or two - is about ticks and holds at any speed.
+        let ticks = ticker.tick_counter();
 
         let runtime = tokio::runtime::Builder::new_current_thread()
             .build()
@@ -942,10 +920,14 @@ mod interrupt_tests {
                 .expect("the healthy guest instantiates");
 
             let started = Instant::now();
-            let mut healthy_took = None;
+            let started_ticks = ticks.load(Ordering::Acquire);
+            let mut healthy_waited = None;
             let (spun, _) = tokio::join!(spinner.call_activate(), async {
                 let outcome = healthy.call_activate().await;
-                healthy_took = Some(started.elapsed());
+                healthy_waited = Some((
+                    ticks.load(Ordering::Acquire).saturating_sub(started_ticks),
+                    started.elapsed(),
+                ));
                 outcome.expect("a healthy guest activates while a sibling spins");
             });
             let spinner_took = started.elapsed();
@@ -957,17 +939,18 @@ mod interrupt_tests {
                 spun.summary()
             );
 
-            let healthy_took = healthy_took.expect("the healthy guest completed");
+            let (healthy_ticks, healthy_took) =
+                healthy_waited.expect("the healthy guest completed");
             // Measured against the mechanism's own unit, not against the
             // runaway's total. A ratio would accept a sibling that waited
             // dozens of ticks as long as the runaway ran longer still; the
             // property being claimed is that the sibling gets in within about
-            // one tick. The shipped code lands near 1.5 ticks, so this leaves
-            // several times that in headroom and still fails anything that
-            // yields rarely instead of every tick.
+            // one tick. The shipped code lands on exactly one, idle or loaded,
+            // so this leaves an order of magnitude of headroom and still fails
+            // anything that yields rarely instead of every tick.
             assert!(
-                healthy_took < limits.epoch_tick * 10,
-                "the healthy guest took {healthy_took:?}, more than ten ticks, \
+                healthy_ticks < 10,
+                "the healthy guest waited {healthy_ticks} ticks ({healthy_took:?}) \
                  against the runaway's {spinner_took:?}; it is not interleaving \
                  per tick"
             );

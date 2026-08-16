@@ -196,11 +196,15 @@ yet compile.
 Two host-owned numbers govern that stack, and they are not the same. One sizes
 the stack a call runs on; the other bounds how deep the guest may recurse on
 it. Setting only the first would leave the recursion bound at Wasmtime's
-default rather than the host's. The stack is charged per *activation*, not per
-call in flight: Wasmtime parks a finished call's stack in its store and reuses
-it, releasing it only when the store is dropped, and since instantiation is
-itself a guest call every live activation holds one from its first call until
-teardown. A host sizing this is pricing how many plugins it keeps alive.
+default rather than the host's. The driver also requires room between them:
+Wasmtime rejects a recursion bound larger than the stack but accepts one a page
+smaller, and that pair aborts the process on the first guest call rather than
+failing anything a host could handle, so the driver refuses it at build time
+instead. The stack is charged per *activation*, not per call in flight:
+Wasmtime parks a finished call's stack in its store and reuses it, releasing it
+only when the store is dropped, and since instantiation is itself a guest call
+every live activation holds one from its first call until teardown. A host
+sizing this is pricing how many plugins it keeps alive.
 
 A call deadline *terminates*. The world's cancellation import is advisory, so a
 guest that never asks whether it should stop would otherwise run forever. The
@@ -217,9 +221,9 @@ budget leaves a sibling with budget untouched. Kill isolation is demonstrated �
 one activation's stop does not reach another's, on one engine under one ticker.
 Two guest calls now do run at once in one case, which shows they interleave;
 what that case does not show is budget isolation, since the healthy guest
-finishes within a couple of ticks and never approaches a budget of its own. Deactivation uses the same mechanism to
-stop an in-flight call before waiting on the lock that call holds, which is
-what bounds teardown behind a runaway guest.
+finishes within a tick and never approaches a budget of its own. Deactivation
+uses the same mechanism to stop an in-flight call before waiting on the lock
+that call holds, which is what bounds teardown behind a runaway guest.
 
 The host also bounds what it retains from one `logging` call — record count,
 message bytes, and field count — and counts what it dropped or clipped, so the

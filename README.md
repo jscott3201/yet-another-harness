@@ -246,12 +246,11 @@ call runs on and how deep that guest may recurse, a call deadline that stops a
 guest which will not stop itself, and caps on what one guest-to-host call may
 transfer and what the host retains from it. Guest calls run on their own stack
 and hand the thread back at every tick, so one guest cannot starve another by
-computing. Ceilings are proved in
-pairs — the same guest refused under a tight ceiling and admitted under a
-generous one — so a failure is attributable to the ceiling rather than to the
-fixture. Those bound a guest's cost, not its authority: guest code still runs in
-the host process, so the driver runs only its own fixtures and makes no
-capability-transport, WASI, or sandbox claim.
+computing. Ceilings are proved in pairs — the same guest refused under a tight
+ceiling and admitted under a generous one — so a failure is attributable to the
+ceiling rather than to the fixture. Those bound a guest's cost, not its
+authority: guest code still runs in the host process, so the driver runs only
+its own fixtures and makes no capability-transport, WASI, or sandbox claim.
 
 The repository already contains a model-free Rust kernel and evidence harness:
 

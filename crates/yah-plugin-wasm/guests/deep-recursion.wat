@@ -1,13 +1,17 @@
-;; Fixture guest: recurses until the host's stack bound stops it.
+;; Fixture guest: descends a fixed number of frames.
 ;;
 ;; The recursion bound is not the stack size. Wasmtime sizes the stack a call
 ;; runs on and bounds how deep the guest may go on it with a separate number,
 ;; and a host that set only the first would be leaving the second at Wasmtime's
 ;; default. This guest exists so the difference is testable: it does nothing but
-;; call itself, so the only thing that can stop it is the depth bound.
+;; call itself, deep enough that a tight depth bound refuses it and shallow
+;; enough that a generous one does not.
 ;;
-;; Each frame carries a few locals so a frame costs more than a return address,
-;; which keeps the test from needing millions of calls to reach the bound.
+;; The depth is chosen for margin on both sides. A frame here measures 48 bytes
+;; on aarch64, so a 512 KiB bound admits about 10,900 frames and an 8 MiB bound
+;; about 174,000; 50,000 sits roughly three times clear of each. No mainstream
+;; ABI puts a non-leaf frame holding a value across a call below about 32 bytes,
+;; which is the worst case the refused side has to survive on another target.
 ;;
 ;; See `conformant.wat` for the ABI and named-type rules.
 
@@ -24,18 +28,18 @@
 
     ;; Descend a fixed number of frames. Nothing here traps on its own: either
     ;; the host's depth bound stops it, or it returns.
+    ;;
+    ;; The add after the call is what makes this a real frame: it keeps a value
+    ;; live across the call, so the frame cannot be folded away.
     (func $descend (param $remaining i64) (result i64)
-      (local $a i64) (local $b i64) (local $c i64) (local $d i64)
       (if (i64.le_s (local.get $remaining) (i64.const 0))
         (then (return (i64.const 0))))
-      (local.set $a (i64.sub (local.get $remaining) (i64.const 1)))
-      (local.set $b (i64.add (local.get $a) (i64.const 1)))
-      (local.set $c (i64.add (local.get $b) (i64.const 1)))
-      (local.set $d (i64.add (local.get $c) (i64.const 1)))
-      (i64.add (local.get $d) (call $descend (local.get $a))))
+      (i64.add
+        (local.get $remaining)
+        (call $descend (i64.sub (local.get $remaining) (i64.const 1)))))
 
     (func (export "activate") (result i32)
-      (drop (call $descend (i64.const 20000)))
+      (drop (call $descend (i64.const 50000)))
       ;; Every frame was granted: return ok so a generous bound is observable.
       (i32.store8 (i32.const 1024) (i32.const 0))
       (i32.const 1024))
