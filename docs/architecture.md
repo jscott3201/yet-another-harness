@@ -259,11 +259,13 @@ backend. See the
 [conformance boundary](plugin-driver-conformance.md).
 
 The `yah-plugin-wasm` crate separately owns a
-[versioned WIT conformance world](wasm-plugin-contract.md). Development-only
-host and guest generators compile bindings from that single source, and parser
-tests fix the exact baseline logging/cancellation imports and lifecycle/tool
-fixture exports. This is an ABI draft, not a component loader, capability
-resource bridge, execution backend, or sandbox.
+[versioned WIT conformance world](wasm-plugin-contract.md) and the first driver
+to execute against it. Parser tests fix the exact baseline
+logging/cancellation imports and lifecycle/tool fixture exports, while a
+Wasmtime-backed driver compiles fixture components, instantiates one store per
+activation, and passes the portable lifecycle corpus. Deactivation drops the
+store without consulting guest code. This is an executable ABI draft, not a
+package loader, capability resource bridge, or sandbox.
 
 Each plugin revision has a content identity, manifest, requested capabilities,
 configuration, and execution driver. Admission separates:
@@ -278,10 +280,12 @@ be repaired by optimistic labeling.
 
 ## Sandbox and Credentials
 
-The compile-checked WIT draft contains only explicitly named baseline
-interfaces and no WASI imports. The planned Wasm driver must link only the
-interfaces admitted for its fixed profile and enforce resource limits before
-running untrusted code. Full-language workers will be launched through
+The WIT draft contains only explicitly named baseline interfaces and no WASI
+imports, and the Wasm driver links exactly those, though its checked-in
+fixtures import nothing and so never call back. It does not yet enforce
+memory, deadline, fuel, or host-call limits, so it may run only the
+checked-in fixture corpus and not untrusted code. Full-language workers will be
+launched through
 a selected sandbox backend. Each backend must advertise and be tested for the
 controls it actually enforces; unsupported required controls must fail
 admission. No plugin sandbox is implemented or audited yet.
@@ -321,8 +325,9 @@ Today the repository contains the initial process-local component lifecycle,
 effect-scope core, typed revocable service registry, strict plugin manifest,
 runtime-neutral prepared-driver lifecycle, and exact activation-scoped
 capability broker, plus the reusable host-side driver conformance testkit and a
-trusted local authoring example; a compile-checked provisional WIT conformance
-world with no runtime; the Selene-backed reliability
+trusted local authoring example; a provisional WIT conformance world and the
+Wasmtime driver that executes fixture components against it; the
+Selene-backed reliability
 kernel; provider normalization fixtures; an in-process protocol experiment;
 and the G02 storage evidence harness. General component callbacks,
 shared/named service realms, policy interception, automatic registry watches

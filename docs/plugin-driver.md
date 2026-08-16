@@ -98,9 +98,9 @@ The adjacent capability slice implements immutable activation-scoped effective
 grant bindings and mediated synchronous handles. The reusable
 [host-side conformance testkit](plugin-driver-conformance.md) now exercises five
 portable lifecycle cases against an independently described driver subject; a
-deterministic reference fake and the trusted
-[local authoring driver](plugin-authoring.md) pass, but no production Wasm or
-process backend exists. These layers do not implement
+deterministic reference fake, the trusted
+[local authoring driver](plugin-authoring.md), and the Wasmtime component
+driver pass, but no process backend exists and no package is ever loaded. These layers do not implement
 package loading or admission, policy/approval evaluation, configuration
 delivery, general component callbacks, async invocation
 draining, recurring health checks, restart/backoff policy, deadlines, forced
@@ -109,5 +109,5 @@ sandboxing, or durable
 activation identity or work-attempt fencing. Portable nonempty capability
 transport, guest ABI behavior, backend containment, and multi-runtime
 equivalence remain later evidence profiles. A separate
-[compile-checked WIT draft](wasm-plugin-contract.md) now fixes the first
-host/guest binding shape without implementing a driver or runtime.
+[WIT draft](wasm-plugin-contract.md) fixes the first host/guest binding shape,
+and a Wasmtime driver now passes this same corpus against it.

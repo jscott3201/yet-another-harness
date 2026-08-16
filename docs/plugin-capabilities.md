@@ -108,5 +108,5 @@ changes likewise require a fresh activation until later security policy defines
 audited revocation and dependent scheduling.
 
 The separate [WIT conformance world](wasm-plugin-contract.md) imports only
-baseline logging and cancellation for a fixed compile profile. It does not yet
+baseline logging and cancellation for one fixed profile. It does not yet
 transport these capability handles or turn static imports into grants.

@@ -3,7 +3,32 @@ use std::collections::BTreeSet;
 use wit_parser::{InterfaceId, Resolve, WorldItem, WorldKey};
 
 const WIT_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/wit");
-const WIT_SOURCE: &str = include_str!("../wit/yah-plugin.wit");
+
+/// Every `.wit` file in the canonical directory, with comments stripped.
+///
+/// Reading the directory rather than one included file keeps a second source
+/// from slipping a deferred name past the regression below. Comments are
+/// dropped so the contract can explain itself in prose without tripping its own
+/// tripwire.
+fn declared_source() -> String {
+    let mut declared = String::new();
+    let mut files = 0usize;
+    let entries = std::fs::read_dir(WIT_PATH).expect("canonical WIT directory is readable");
+    for entry in entries {
+        let path = entry.expect("WIT directory entry is readable").path();
+        if path.extension().is_none_or(|extension| extension != "wit") {
+            continue;
+        }
+        files += 1;
+        let text = std::fs::read_to_string(&path).expect("WIT source is readable");
+        for line in text.lines() {
+            declared.push_str(line.split("//").next().unwrap_or_default());
+            declared.push('\n');
+        }
+    }
+    assert!(files > 0, "the canonical WIT directory declares no source");
+    declared
+}
 
 fn interface_identity(resolve: &Resolve, key: &WorldKey, item: &WorldItem) -> String {
     let WorldItem::Interface { id, .. } = item else {
@@ -88,6 +113,7 @@ fn world_has_one_versioned_package_and_exact_directional_interfaces() {
 
 #[test]
 fn source_declares_no_deferred_interface_or_identifier_names() {
+    let declared = declared_source();
     for forbidden in [
         "wasi:",
         "filesystem",
@@ -103,7 +129,7 @@ fn source_declares_no_deferred_interface_or_identifier_names() {
         "artifact",
     ] {
         assert!(
-            !WIT_SOURCE.contains(forbidden),
+            !declared.contains(forbidden),
             "canonical source unexpectedly declares `{forbidden}`"
         );
     }
