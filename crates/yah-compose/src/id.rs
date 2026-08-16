@@ -44,6 +44,10 @@ macro_rules! string_id {
 
 string_id!(ComponentId, "Identity of a component definition.");
 string_id!(
+    ComponentRevisionId,
+    "Identity of one immutable component definition, scope, and configuration revision."
+);
+string_id!(
     ComponentInstanceId,
     "Identity of one mounted component instance."
 );

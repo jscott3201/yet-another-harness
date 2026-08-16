@@ -6,9 +6,9 @@ graph-backed, plugin-extensible agent harness.
 
 There is no usable release. The repository contains a tested reliability
 foundation and the first process-local composition lifecycle, cleanup, typed
-service-binding, and exact-assignment dependency-reconciliation primitives; it
-does not yet contain a runnable composition host, plugin host, agent loop,
-sandbox, daemon, or client.
+service-binding, exact-assignment dependency reconciliation, and fenced desired
+component-revision primitives; it does not yet contain a runnable composition
+host, plugin host, agent loop, sandbox, daemon, or client.
 
 ## Evidence Status
 
@@ -16,7 +16,7 @@ sandbox, daemon, or client.
 |---|---|---|
 | G02 storage fan-in and crash recovery | Atomic state, receipt, and journal commits under kill/reopen, writer takeover, and corruption drills | Passed across 1,440 scored trials: [report](gates/G02-storage-fanin-recovery.md) |
 | Current model-free kernel | Deterministic tests for command, fencing, cancellation, effect, provider, recovery, and Adapter 1 behavior | Available for reuse; pivot integration has not started |
-| Contextual composition runtime | Component definition/instance/scope identities, epoch-fenced lifecycle, reversible nested effects, typed requirements, exact revocable bindings, and level-triggered exact-assignment recomposition | Initial slices; no callbacks, provider-ranking policy, contextual visibility, or host-wide reconciler |
+| Contextual composition runtime | Component definition/instance/scope identities, epoch-fenced lifecycle, reversible nested effects, typed requirements, exact revocable bindings, exact-assignment recomposition, and fenced desired revisions | Initial slices; no callbacks, provider-ranking policy, contextual visibility, or host-wide scheduler |
 | Plugin manifest, SDK, and conformance suite | No implementation in this repository | Not started |
 | Wasm, Node/TypeScript, and Python plugin drivers | No implementation in this repository | Not started |
 | Selene work, session, memory, evidence, and plugin-lineage domains | Only the current kernel graph exists | Design/spike stage |
@@ -101,8 +101,33 @@ Live service values are not serialized or stored in Selene.
 This layer deliberately supplies no implicit first-provider policy. Additional
 candidates do not disturb an explicit live assignment. Registry watches,
 background convergence, callback execution, contextual inheritance/isolation,
-provider ranking, cycles, retry policy, and desired component/config changes
-remain future work.
+provider ranking, cycles, and retry policy remain future work.
+
+### Desired component revisions
+
+- A stable component slot mints process-incarnation-bound tokens around
+  caller-sequenced, level-triggered desired generations for enabled, disabled,
+  or removed state.
+- Opaque component revision IDs freeze one definition, scope, and loader-owned
+  configuration/factory identity. Reusing an ID with different modeled content
+  is rejected without touching the live revision.
+- Assignment-only changes reactivate the same mounted instance. Revision
+  changes, disable, and removal synchronously seal the old activation and reach
+  terminal removal before any replacement mounts.
+- Disabled intent retains its desired revision but owns no mounted component;
+  re-enabling therefore creates a fresh instance incarnation.
+- Desired changes received during teardown replace the stored desired state but
+  never reverse the frozen stop already in progress. The next pass applies only
+  the latest accepted generation.
+- Terminal cleanup errors preserve the old applied revision and block progress.
+  An explicit epoch-fenced abandonment records the non-clean report and may
+  advance the frozen stop target without rerunning consumed cleanup.
+
+This is a process-local single-component mechanism. Whole-graph scheduling,
+callback execution, durable configuration payloads, automatic watches,
+concurrent desired writers, rollback, retry/backoff, and persistence remain
+unimplemented. Exact provider registration IDs are live values and are not
+durable desired state.
 
 ### Selene-backed mutation and recovery
 
@@ -168,7 +193,7 @@ crate or protocol boundary in advance.
 
 - Component callback runner, contextual service inheritance/isolation,
   automatic provider ranking or registry watches, concurrent scope/task
-  supervisor, desired-state reconciler, or isolation realms.
+  supervisor, host-wide desired-graph scheduler, or isolation realms.
 - Plugin packages, manifests, admission, installation, updates, SDKs, or
   language conformance tests.
 - Wasmtime/WIT host or sandboxed Node/TypeScript and CPython workers.

@@ -86,11 +86,29 @@ clean teardown must finish before a later pass can start a fresh activation.
 A failed cleanup report leaves the component blocked in `stopping` rather than
 risk duplicating a resource that may still be live.
 
+One stable desired-state slot adds a caller-sequenced generation token bound to
+that slot's process-unique incarnation. A revision freezes one exact
+definition and scope; the loader remains responsible for the configuration and
+factory inputs named by its opaque revision ID. Assignment-only changes reuse
+the mounted instance and follow dependency recomposition, while a revision
+change removes the old instance before mounting a fresh incarnation. Disabled
+intent retains the desired revision for inspection but owns no mounted
+component, and removed intent retains neither. Repeated identical generations
+remain level-triggered; older generations and conflicting generation or
+revision reuse fail without touching live state.
+
+Desired invalidation synchronously seals starting or active effects before the
+reconciliation call returns. Cleanup is driven separately and remains
+resumable if its future is dropped. A non-clean terminal report blocks disable,
+replacement, and removal by default. An explicit epoch-fenced abandonment can
+advance the already-recorded target without rerunning cleanup, but records that
+policy decision because a reported resource may still be live.
+
 Reconciliation is level-triggered by its composition authority. The initial
 registry is one flat visibility domain and installs no watches or background
 loop. Additional candidates do not override an explicit assignment. This
 layer does not yet execute activation callbacks, rank providers, implement
-contextual inheritance or isolation, or reconcile a desired component graph.
+contextual inheritance or isolation, or schedule a desired component graph.
 
 Live service values, futures, closures, guest resources, and process handles
 are not durable graph values. They remain in an in-memory registry whose state

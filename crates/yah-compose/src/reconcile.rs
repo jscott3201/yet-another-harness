@@ -5,15 +5,15 @@
 //! effect scope. Provider choice remains explicit policy input. Changing or
 //! losing an assigned provider seals and tears down the old activation before a
 //! fresh selection can start; handles never switch providers in place.
-//! Provider ranking, requested removal, activation callbacks/failures, and
-//! host-wide desired-state scheduling remain higher-layer responsibilities.
+//! Provider ranking, activation callbacks/failures, and host-wide scheduling
+//! remain higher-layer responsibilities.
 
 mod model;
 mod reconciled_component;
 
 pub use model::{
-    DependencyIssue, DependencyReadiness, DependencyStopReason, ProviderAssignments,
-    ProviderChange, ProviderSelection, ProviderSelectionEpoch, ReconcileError, ReconcileOutcome,
-    StopCompletion,
+    ComponentStopReason, DependencyIssue, DependencyReadiness, DependencyStopReason,
+    DesiredStopReason, ProviderAssignments, ProviderChange, ProviderSelection,
+    ProviderSelectionEpoch, ReconcileError, ReconcileOutcome, StopCompletion,
 };
 pub use reconciled_component::ReconciledComponent;

@@ -161,8 +161,16 @@ scope is cancelled. A level-triggered reconciled component freezes its mounted
 definition and one explicit, exact provider assignment per activation; changing
 or losing an assigned provider cancels and tears down the old activation before
 a replacement can start. Component callbacks, registry watches, contextual
-service visibility, automatic provider ranking, and desired-state graph
-reconciliation are not implemented yet.
+service visibility, and automatic provider ranking are not implemented yet.
+
+A stable desired component slot now fences caller-sequenced generations bound
+to a process-unique slot incarnation and immutable component/configuration
+revision identities. It creates enabled
+revisions, replaces changed revisions only after controlled removal, and keeps
+disabled or removed intent unmounted. Stale generations and revision-ID reuse
+fail without disturbing the live instance; cleanups that report failure remain
+blocked unless the owning authority explicitly records abandonment. This is a
+single-component mechanism, not a host-wide scheduler or durable desired graph.
 
 The repository already contains a model-free Rust kernel and evidence harness:
 
@@ -250,7 +258,7 @@ projects are evolving independently and do not define YAH compatibility.
 
 | Path | Contents |
 |---|---|
-| `crates/yah-compose/` | Process-local component identity, epoch-fenced lifecycle, reversible effect scopes, typed revocable services, and exact-assignment dependency reconciliation |
+| `crates/yah-compose/` | Process-local component identity, epoch-fenced lifecycle, reversible effect scopes, typed revocable services, exact-assignment dependency reconciliation, and fenced desired component revisions |
 | `crates/yah-kernel/` | Current model-free durability, authority, effect, cancellation, provider, and protocol kernel |
 | `crates/exp001-harness/` | Storage fan-in and crash-recovery evidence harness |
 | `generated/protocol/` | Checked-in JSON Schemas and TypeScript bindings for the current protocol experiment |

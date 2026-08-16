@@ -5,9 +5,9 @@ use std::{
 
 use tokio::sync::Notify;
 use yah_compose::{
-    CleanupError, ComponentDefinition, ComponentInstance, ComponentStateKind, DependencyStopReason,
-    EffectScope, ProviderAssignments, ProviderCandidate, ReconcileOutcome, ReconciledComponent,
-    Scope, ServiceDefinition, ServiceRegistry, StopCompletion,
+    CleanupError, ComponentDefinition, ComponentInstance, ComponentStateKind, ComponentStopReason,
+    DependencyStopReason, EffectScope, ProviderAssignments, ProviderCandidate, ReconcileOutcome,
+    ReconciledComponent, Scope, ServiceDefinition, ServiceRegistry, StopCompletion,
 };
 
 #[derive(Debug)]
@@ -72,7 +72,7 @@ async fn dropped_pending_finish_resumes_the_same_cleanup_once() {
     assert!(matches!(
         consumer.reconcile(&registry, &desired).unwrap(),
         ReconcileOutcome::StopBegun {
-            reason: DependencyStopReason::AssignmentChanged(_),
+            reason: ComponentStopReason::Dependency(DependencyStopReason::AssignmentChanged(_)),
             ..
         }
     ));
