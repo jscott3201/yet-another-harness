@@ -73,10 +73,24 @@ switch a provider.
 Provider publication is admitted into an active component's effect scope before
 it becomes discoverable. Each handle is fenced by both provider and consumer
 scope cancellation, limits provider access to a checked callback, and fails
-closed rather than following a replacement. The initial registry is one flat
-visibility domain. It does not yet execute activation callbacks, implement
-contextual inheritance or isolation, select providers, or perform
-reconciliation.
+closed rather than following a replacement.
+
+The dependency reconciler consumes and freezes one mounted definition, live
+instance, activation effect scope, and immutable provider selection as one
+owned aggregate. Provider choice is explicit input: every declared requirement
+must map to one exact live registration, and extra assignments are rejected.
+The selection epoch is the activation epoch because a selection never changes
+in place. Losing an assigned provider or submitting a different assignment
+begins an epoch-fenced stop and synchronously seals the consumer effect scope;
+clean teardown must finish before a later pass can start a fresh activation.
+A failed cleanup report leaves the component blocked in `stopping` rather than
+risk duplicating a resource that may still be live.
+
+Reconciliation is level-triggered by its composition authority. The initial
+registry is one flat visibility domain and installs no watches or background
+loop. Additional candidates do not override an explicit assignment. This
+layer does not yet execute activation callbacks, rank providers, implement
+contextual inheritance or isolation, or reconcile a desired component graph.
 
 Live service values, futures, closures, guest resources, and process handles
 are not durable graph values. They remain in an in-memory registry whose state

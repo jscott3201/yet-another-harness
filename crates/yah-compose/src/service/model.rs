@@ -236,6 +236,26 @@ pub struct ProviderCandidate {
     pub(crate) contract_name: &'static str,
 }
 
+/// One declared requirement and its currently discoverable providers.
+///
+/// Inventories preserve component-declaration order. Each candidate slice is
+/// ordered by [`ProviderRegistrationId`], but that order is not a ranking.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RequirementCandidates {
+    pub(crate) requirement: RequiredService,
+    pub(crate) candidates: Vec<ProviderCandidate>,
+}
+
+impl RequirementCandidates {
+    pub fn requirement(&self) -> &RequiredService {
+        &self.requirement
+    }
+
+    pub fn candidates(&self) -> &[ProviderCandidate] {
+        &self.candidates
+    }
+}
+
 impl ProviderCandidate {
     pub const fn id(&self) -> ProviderRegistrationId {
         self.id

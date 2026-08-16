@@ -11,9 +11,9 @@ use crate::{
 };
 
 use super::{
-    ProviderCandidate, ProviderRegistrationId, RequiredService, RequirementStatus, ServiceHandle,
-    ServiceProvider, ServiceRegistryError, ServiceRequirement, handle::ProviderGate,
-    model::ContractType,
+    ProviderCandidate, ProviderRegistrationId, RequiredService, RequirementCandidates,
+    RequirementStatus, ServiceHandle, ServiceProvider, ServiceRegistryError, ServiceRequirement,
+    handle::ProviderGate, model::ContractType,
 };
 
 /// One process-local visibility domain for typed service providers.
@@ -21,7 +21,8 @@ use super::{
 /// The registry is intentionally not `Clone`: provider publication remains
 /// under one composition authority. It may inventory multiple candidates for
 /// a service, but callers must bind an exact [`ProviderRegistrationId`]. Scope
-/// inheritance, selection policy, and reactive reconciliation are later layers.
+/// inheritance and selection policy are later layers. Level-triggered exact
+/// assignment reconciliation is owned by [`crate::ReconciledComponent`].
 /// The first declaration, discovery, or publication of a [`ServiceId`] fixes
 /// its exact Rust contract type for this registry's lifetime.
 pub struct ServiceRegistry {
@@ -114,25 +115,48 @@ impl ServiceRegistry {
             .candidates(requirement.service_id(), requirement.contract())
     }
 
+    /// Snapshot every declared requirement and its visible candidates under
+    /// one registry lock.
+    ///
+    /// Requirement groups retain declaration order. Candidate order is exact
+    /// provider-registration-ID order and carries no implicit preference.
+    pub fn inventory(
+        &self,
+        definition: &ComponentDefinition,
+    ) -> Result<Vec<RequirementCandidates>, ServiceRegistryError> {
+        self.core.inventory(definition.requirements())
+    }
+
     /// Check whether every required service declared by `definition` has at
     /// least one discoverable provider candidate.
     ///
-    /// This reports readiness without mutating component lifecycle. The future
-    /// reconciler will keep missing consumers pending and start ready ones.
+    /// This reports readiness without mutating component lifecycle. The
+    /// reconciled aggregate uses the richer one-lock inventory plus explicit
+    /// assignments to control start and teardown.
     pub fn requirement_status(
         &self,
         definition: &ComponentDefinition,
     ) -> Result<RequirementStatus, ServiceRegistryError> {
-        self.core.requirement_status(definition.requirements())
+        let inventory = self.core.inventory(definition.requirements())?;
+        let missing = inventory
+            .into_iter()
+            .filter(|group| group.candidates.is_empty())
+            .map(|group| group.requirement.service_id().clone())
+            .collect::<Vec<_>>();
+        if missing.is_empty() {
+            Ok(RequirementStatus::Ready)
+        } else {
+            Ok(RequirementStatus::Missing(missing))
+        }
     }
 
     /// Bind one starting consumer activation to one exact provider candidate.
     ///
     /// Ordinary handles never switch to a replacement provider. Both provider
     /// and consumer effect-scope cancellation fence every subsequent call.
-    /// Until the callback runner exists, composition authority must supply a
-    /// requirement declared by the consumer's definition; this low-level bind
-    /// operation cannot verify membership from the instance's definition ID.
+    /// This is a low-level trusted-authority primitive and cannot verify that
+    /// the requirement was declared or selected from the instance's definition
+    /// ID. Normal reconciled code should use [`crate::ReconciledComponent::bind`].
     pub fn bind<T: ?Sized + Send + Sync + 'static>(
         &self,
         consumer: &ComponentInstance,
@@ -248,31 +272,31 @@ impl RegistryCore {
             .collect())
     }
 
-    fn requirement_status(
+    fn inventory(
         &self,
         requirements: &[RequiredService],
-    ) -> Result<RequirementStatus, ServiceRegistryError> {
+    ) -> Result<Vec<RequirementCandidates>, ServiceRegistryError> {
         let mut state = self.lock();
         for requirement in requirements {
             ensure_contract(&mut state, requirement.service_id(), requirement.contract())?;
         }
 
-        let missing = requirements
+        Ok(requirements
             .iter()
-            .filter(|requirement| {
-                !state.providers.values().any(|entry| {
-                    entry.candidate.service_id() == requirement.service_id()
-                        && entry.contract == requirement.contract()
-                        && entry.gate.is_available()
-                })
+            .map(|requirement| RequirementCandidates {
+                requirement: requirement.clone(),
+                candidates: state
+                    .providers
+                    .values()
+                    .filter(|entry| {
+                        entry.candidate.service_id() == requirement.service_id()
+                            && entry.contract == requirement.contract()
+                            && entry.gate.is_available()
+                    })
+                    .map(|entry| entry.candidate.clone())
+                    .collect(),
             })
-            .map(|requirement| requirement.service_id().clone())
-            .collect::<Vec<_>>();
-        if missing.is_empty() {
-            Ok(RequirementStatus::Ready)
-        } else {
-            Ok(RequirementStatus::Missing(missing))
-        }
+            .collect())
     }
 
     fn binding<T: ?Sized + Send + Sync + 'static>(

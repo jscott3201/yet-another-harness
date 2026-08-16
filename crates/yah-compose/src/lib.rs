@@ -7,13 +7,16 @@
 //! desired-state reconciler may decide *which* components should exist; this
 //! crate governs a live instance while it exists.
 //!
-//! The current slice is intentionally narrow. It does not yet run component
-//! callbacks, select providers, or reconcile a component graph.
+//! The dependency layer owns one frozen mounted component and converges it
+//! toward caller-selected exact providers through fenced start and teardown.
+//! It does not yet run component callbacks, choose provider policy, watch the
+//! registry, or reconcile a desired component graph.
 
 mod component;
 mod effect_scope;
 mod id;
 mod lifecycle;
+mod reconcile;
 mod scope;
 mod service;
 
@@ -28,9 +31,14 @@ pub use lifecycle::{
     ActivationEpoch, ComponentFailure, ComponentState, ComponentStateKind, FailurePhase,
     LifecycleAction, LifecycleError, StopTarget,
 };
+pub use reconcile::{
+    DependencyIssue, DependencyReadiness, DependencyStopReason, ProviderAssignments,
+    ProviderChange, ProviderSelection, ProviderSelectionEpoch, ReconcileError, ReconcileOutcome,
+    ReconciledComponent, StopCompletion,
+};
 pub use scope::{Scope, ScopeError};
 pub use service::{
-    ProviderCandidate, ProviderRegistrationId, RequiredService, RequirementStatus,
-    ServiceDefinition, ServiceHandle, ServiceHandleError, ServiceProvider, ServiceRegistry,
-    ServiceRegistryError, ServiceRequirement,
+    ProviderCandidate, ProviderRegistrationId, RequiredService, RequirementCandidates,
+    RequirementStatus, ServiceDefinition, ServiceHandle, ServiceHandleError, ServiceProvider,
+    ServiceRegistry, ServiceRegistryError, ServiceRequirement,
 };
