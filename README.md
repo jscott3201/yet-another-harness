@@ -192,6 +192,15 @@ hierarchical call draining, callback unwind, resumable close, and final
 provider-value destructor panic containment. The corpora do not claim
 shared/named realms, automatic injection, file HMR, or task supervision.
 
+A data-only `yah-plugin-host` crate now validates the first
+`yah-plugin.toml` contract: canonical package, service, and capability
+identities; exact package and SDK version vocabulary; typed built-in, Wasm,
+Node, and Python entrypoints; bounded request-only declarations; and
+host-supplied package revision digests. Parsing is not admission: no package is
+loaded or verified, no namespace or built-in code is authorized, and no
+capability is granted by this layer. See the
+[manifest contract](docs/plugin-manifest.md).
+
 The repository already contains a model-free Rust kernel and evidence harness:
 
 - atomic Selene commits for current state, semantic events, and command
@@ -217,8 +226,8 @@ up-front specification:
 
 1. Build the Rust composition kernel and an independent semantic conformance
    corpus informed by Cordis lifecycle behavior.
-2. Define the plugin manifest, capability model, lifecycle, and SDK
-   conformance suite.
+2. Extend the landed plugin manifest vocabulary with driver lifecycle,
+   effective capability grants, and a cross-driver SDK conformance suite.
 3. Connect scoped local effects to the existing durable external-effect and
    recovery machinery.
 4. Establish Selene-native work, session, memory, evidence, and plugin-lineage
@@ -279,6 +288,7 @@ projects are evolving independently and do not define YAH compatibility.
 | Path | Contents |
 |---|---|
 | `crates/yah-compose/` | Process-local component identity, epoch-fenced lifecycle, reversible effect scopes, typed revocable services, exact-assignment dependency reconciliation, and fenced desired component revisions |
+| `crates/yah-plugin-host/` | Strict runtime-neutral plugin manifest, contract identities, entrypoints, capability requests, and package revision values |
 | `crates/yah-kernel/` | Current model-free durability, authority, effect, cancellation, provider, and protocol kernel |
 | `crates/exp001-harness/` | Storage fan-in and crash-recovery evidence harness |
 | `generated/protocol/` | Checked-in JSON Schemas and TypeScript bindings for the current protocol experiment |

@@ -11,6 +11,7 @@ proved.
 |---|---|
 | [Project status](project-status.md) | Current evidence, reusable kernel foundation, and unimplemented pivot work |
 | [Architecture](architecture.md) | Target composition, graph, plugin, effect, sandbox, and recovery boundaries |
+| [Plugin manifest](plugin-manifest.md) | Implemented manifest v1 identities, entrypoints, requests, revision values, and authority limits |
 | [Application protocol](protocol.md) | Current Adapter 1 experiment; not the future plugin SDK or a stable public protocol |
 | [Development](development.md) | Workspace setup, local gates, file-size policy, and pull request checklist |
 
