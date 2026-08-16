@@ -136,7 +136,10 @@ memory holds any pages. A memory declared with zero pages therefore costs the
 byte ceiling nothing and costs the host a reservation, so a guest bounded only
 by bytes could exhaust the host's address space without ever exceeding its
 "memory ceiling". The driver bounds the number of memories, tables, and
-instances, and sizes the per-memory reservation to the byte ceiling rather than
+instances — but not globals, which Wasmtime exposes no limiter hook for and
+which therefore have no host bound; they cost sixteen bytes apiece per core
+instance, so a component may spend them freely up to whatever the validator
+allows. The driver sizes the per-memory reservation to the byte ceiling rather than
 leaving it at Wasmtime's 4 GiB default — including the reservation a memory
 gets when it outgrows the first one, which otherwise defaults to 2 GiB, and the
 guard region on each side, which otherwise defaults to 32 MiB and would dominate
@@ -153,12 +156,12 @@ bearing: a deadline is absolute, so a store left idle since instantiation is
 already past the one it was given, and its next call would be charged for time
 it never ran. Because each store carries its own deadline, one timer bounds
 every activation without coupling them: the tick that kills a call out of
-budget leaves a sibling with budget untouched. Kill isolation is demonstrated — one
-activation's stop does not reach another's — but no case yet has two guest
-calls live at once under one ticker, so the budget half of that sentence is a
-claim about the code. Deactivation uses
-the same mechanism to stop an in-flight call before waiting on the lock that
-call holds, which is what bounds teardown behind a runaway guest.
+budget leaves a sibling with budget untouched. Kill isolation is demonstrated —
+one activation's stop does not reach another's, on one engine under one ticker
+— but no case yet has two guest calls live at once, so the budget half of that
+sentence is a claim about the code. Deactivation uses the same mechanism to
+stop an in-flight call before waiting on the lock that call holds, which is
+what bounds teardown behind a runaway guest.
 
 The host also bounds what it retains from one `logging` call — record count,
 message bytes, and field count — and counts what it dropped or clipped, so the
@@ -199,9 +202,16 @@ buffer, so a small guest memory can name a very large lifted value. Two other
 things bound them. The driver sets a per-host-call byte budget on the store
 (`host_call_bytes`), charged as the canonical ABI copies a value out of guest
 memory. It bounds one call, not a store's lifetime: Wasmtime copies the
-allowance into each lift and never writes it back, so it refills per call. and the host clips and counts what it keeps from a `logging`
-call — record count, message bytes, and field count — copying the clipped text
-into its own allocation so a clipped record does not retain the guest's.
+allowance into each lift and never writes it back, so it refills per call.
+
+The host also clips and counts what it keeps from a `logging` call — record
+count, message bytes, and field count — and copies what it keeps into its own
+allocations. The copy is the point. A lifted value carries whatever capacity
+the guest's chosen string encoding produced, and a vector of fields collected
+in place would be the guest's own buffer, so retaining either as it arrived
+would retain far more than the ceiling names. This holds on the path where
+nothing is clipped as well: a value under the ceiling by length can still have
+arrived in a much larger allocation.
 
 The host-call budget is enforced but unexercised: no checked-in fixture imports
 anything, so no guest-to-host call happens anywhere in the corpus. The

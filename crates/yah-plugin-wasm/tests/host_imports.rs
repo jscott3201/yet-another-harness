@@ -235,3 +235,49 @@ fn a_flood_of_empty_fields_does_not_leave_the_host_holding_the_guest_vector() {
         observer.retained_bytes()
     );
 }
+
+#[test]
+fn values_under_the_ceiling_do_not_retain_the_allocation_they_arrived_in() {
+    // A string can sit under the byte ceiling and still carry a large
+    // allocation: the canonical ABI sizes the buffer from the guest's chosen
+    // string encoding, and decoding `latin1+utf16` allocates about twice the
+    // byte length. Nothing here is clipped - `truncated_values` stays zero -
+    // so this exercises the path where the host does no work and must still
+    // not keep what it was handed.
+    let limits = WasmLimits {
+        max_log_message_bytes: 4096,
+        max_log_fields: 4,
+        ..WasmLimits::default()
+    };
+    let observer = HostObserver::new();
+    let mut state = HostState::with_limits(observer.clone(), limits);
+
+    let slack = 1024 * 1024;
+    let roomy = || {
+        let mut value = String::with_capacity(slack);
+        value.push_str("under the ceiling");
+        value
+    };
+    state.log(
+        LogLevel::Info,
+        roomy(),
+        (0..limits.max_log_fields)
+            .map(|_| LogField {
+                key: roomy(),
+                value: roomy(),
+            })
+            .collect(),
+    );
+
+    assert_eq!(
+        observer.truncated_values(),
+        0,
+        "nothing here exceeds the byte ceiling by length"
+    );
+    let arrived_in = (1 + 2 * limits.max_log_fields) * slack;
+    assert!(
+        observer.retained_bytes() < arrived_in / 100,
+        "host retains {} bytes of the {arrived_in} it was handed",
+        observer.retained_bytes()
+    );
+}

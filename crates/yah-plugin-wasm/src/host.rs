@@ -232,8 +232,16 @@ impl logging::Host for HostState {
 /// 1 MiB message clipped to 4 KiB would still hold 1 MiB of host heap, and the
 /// ceiling would bound only the length field. Since the point of the ceiling is
 /// what the host *keeps*, the copy is the ceiling.
-fn truncate_utf8(value: String, limit: usize, observer: &HostObserver) -> String {
+fn truncate_utf8(mut value: String, limit: usize, observer: &HostObserver) -> String {
     if value.len() <= limit {
+        // Under the ceiling by length, but not necessarily by allocation. The
+        // capacity comes from the canonical ABI's lift, and a guest chooses its
+        // own `string-encoding` on `canon lower`: decoding `latin1+utf16`
+        // allocates about twice the byte length. Returning the string as it
+        // arrived would leave the host holding that slack, so a bound that only
+        // applied when something was clipped would not be a bound at all.
+        // `shrink_to_fit` is a no-op when the allocation already fits.
+        value.shrink_to_fit();
         return value;
     }
     observer.truncated.fetch_add(1, Ordering::AcqRel);
