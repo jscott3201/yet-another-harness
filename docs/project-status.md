@@ -7,10 +7,10 @@ graph-backed, plugin-extensible agent harness.
 There is no usable release. The repository contains a tested reliability
 foundation and the first process-local composition lifecycle, cleanup, typed
 service-binding, exact-assignment dependency reconciliation, and fenced desired
-component-revision primitives, plus an independently authored semantic
-and concurrency/fault-injection corpus and the first strict plugin manifest
-data contract; it does not yet contain a runnable composition host, executable
-plugin driver, agent loop, sandbox, daemon, or client.
+component-revision primitives, plus independently authored semantic and fault
+corpora, a strict plugin manifest, and a runtime-neutral prepared-driver
+lifecycle. It does not yet contain a general callback host, concrete executable
+driver, agent loop, sandbox, daemon, or client.
 
 ## Evidence Status
 
@@ -20,7 +20,8 @@ plugin driver, agent loop, sandbox, daemon, or client.
 | Current model-free kernel | Deterministic tests for command, fencing, cancellation, effect, provider, recovery, and Adapter 1 behavior | Available for reuse; pivot integration has not started |
 | Contextual composition runtime | Component definition/instance/scope identities, immutable ancestor-scoped service visibility, epoch-fenced lifecycle, reversible nested effects, typed requirements, exact revocable bindings, exact-assignment recomposition, fenced desired revisions, six cross-layer semantic cases, and four concurrent fault cases | Initial slices with deterministic conformance evidence; no callbacks, task supervisor, provider-ranking policy, shared/named realms, or host-wide scheduler |
 | Plugin manifest and revision vocabulary | Strict bounded TOML, canonical package/service/capability/version/path types, typed driver entrypoints, request-only declarations, and host-supplied revision identity | Initial data-contract slice; no loading, admission, grants, or execution |
-| Plugin driver, capability broker, SDK, and conformance suite | No implementation in this repository | Not started |
+| Plugin driver lifecycle | Dyn-compatible exact-revision driver preparation, cancellation-safe host start ownership, effect-owned deactivation, readiness revalidation, panic containment, and fenced advisory health | Runtime-neutral deterministic fake passes; no concrete backend, loader, scheduler, grants, or general callback runner |
+| Capability broker, SDK handles, and cross-driver conformance suite | No implementation in this repository | Not started |
 | Wasm, Node/TypeScript, and Python plugin drivers | No implementation in this repository | Not started |
 | Selene work, session, memory, evidence, and plugin-lineage domains | Only the current kernel graph exists | Design/spike stage |
 | Full harness vertical slice | No live model, tool execution, memory loop, or subagent | Not started |
@@ -172,9 +173,9 @@ fault corpus covers synchronous mediated service calls, not async tasks,
 deadlines, reentrant self-close, escaped authority, executor or waker failure,
 or concurrent effect registration.
 
-### Plugin manifest and revision vocabulary
+### Plugin manifest, revision, and driver lifecycle
 
-- A data-only `yah-plugin-host` crate with no direct async-runtime, Selene,
+- A `yah-plugin-host` crate with no direct production async-runtime, Selene,
   Wasm, or process-driver dependency.
 - A strict, 64 KiB-bounded `yah-plugin.toml` decoder with an explicit schema
   version and unknown-field rejection at every table.
@@ -189,12 +190,25 @@ or concurrent effect registration.
 - Immutable package revision values built from package ID, exact version, and
   a host-supplied canonical digest; digest computation and verification remain
   outside this layer.
+- An object-safe shared `PluginDriver` that prepares inert per-activation
+  controls and returns owned executor-neutral `Send` futures.
+- An exact activation identity plus host-only start/stop permits binding one
+  package revision to one provider-selection epoch. The host registers
+  deactivation in the component effect scope before any start future can be
+  constructed or polled; health uses a cancellation-fenced handle.
+- A cancellation-safe start waiter, exact readiness revalidation, contained
+  start construction/poll/drop panics, exactly-once resumable deactivation,
+  and close-report aggregation for teardown failures.
+- Cloneable exact-activation health handles whose nonblocking healthy,
+  degraded, unhealthy, error, and panic observations never mutate lifecycle.
 
 Manifest parsing is not installation or admission. In particular, a built-in
 lane declaration cannot name a linked factory and still requires out-of-band
 trusted provenance plus exact host registration. Package extraction,
-signatures, configuration snapshots, effective grants, driver lifecycle,
-WIT/IPC bindings, and cross-driver conformance are not implemented.
+signatures, configuration snapshots, effective grants, concrete driver
+backends, WIT/IPC bindings, and cross-driver conformance are not implemented.
+See the [driver lifecycle contract](plugin-driver.md) for cleanup, Drop, panic,
+and health boundaries.
 
 ### Selene-backed mutation and recovery
 
@@ -242,15 +256,15 @@ plugin SDK, daemon protocol, or promised compatibility surface.
 The next useful proof extends the composition core into a narrow vertical slice
 containing:
 
-1. an executable host `PluginDriver` over the epoch-fenced composition
-   lifecycle;
-2. an activation-scoped capability broker and effective grant model;
-3. a semantic driver conformance harness with a deterministic fake;
-4. one Selene graph/memory host capability;
-5. one Wasm component plus one modern Node or Python process plugin;
-6. a durable external action demonstrating that plugin unload and action
+1. an activation-scoped capability broker and effective grant model over the
+   landed runtime-neutral `PluginDriver` lifecycle;
+2. a reusable semantic driver conformance harness extracted from the current
+   deterministic fake;
+3. one Selene graph/memory host capability;
+4. one Wasm component plus one modern Node or Python process plugin;
+5. a durable external action demonstrating that plugin unload and action
    settlement remain distinct; and
-7. crash/restart reconstruction with behavioral conformance tests.
+6. crash/restart reconstruction with behavioral conformance tests.
 
 After that slice, the harness can grow model, prompt, tool, session, workflow,
 subagent, sandbox, daemon, and client components without fixing every final
@@ -262,7 +276,8 @@ crate or protocol boundary in advance.
   automatic provider ranking or registry watches, concurrent effect-registration
   or task supervisor, or host-wide desired-graph scheduler.
 - Plugin package loading, verification, admission, installation, updates,
-  executable drivers, effective grants, SDKs, or language conformance tests.
+  concrete executable drivers, effective grants, language SDKs, or cross-driver
+  conformance tests.
 - Wasmtime/WIT host or sandboxed Node/TypeScript and CPython workers.
 - Durable memory capture, retrieval, ranking, summaries, or evidence lineage.
 - Live model providers, prompt assembly, tool execution, workflows, schedules,

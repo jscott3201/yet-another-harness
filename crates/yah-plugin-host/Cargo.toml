@@ -5,10 +5,13 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 publish = false
-description = "Validated plugin manifest and revision vocabulary for YAH"
+description = "Validated plugin contracts and runtime-neutral driver lifecycle for YAH"
 
 [dependencies]
 semver.workspace = true
 serde.workspace = true
 toml.workspace = true
 yah-compose = { path = "../yah-compose" }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt"] }
