@@ -459,7 +459,7 @@ impl ActivationCore {
             .map_err(|error| {
                 self.fault(format!(
                     "component did not instantiate: {}",
-                    describe_guest_failure("instantiation", &error)
+                    self.describe_stop("instantiation", &error)
                 ))
             })?;
         *self
@@ -493,7 +493,7 @@ impl ActivationCore {
                     .yah_plugin_lifecycle()
                     .call_activate(&mut live.store)
             })
-            .map_err(|error| self.fault(describe_guest_failure("activate", &error)))?;
+            .map_err(|error| self.fault(self.describe_stop("activate", &error)))?;
         // A returned `guest-error` is an ordinary ABI return: the guest chose to
         // refuse, nothing trapped, and the store is still usable. Recording it
         // as a fault would make `health` report a store that cannot be entered
@@ -504,6 +504,25 @@ impl ActivationCore {
                 error.code, error.message
             ))
         })
+    }
+
+    /// Name a guest failure, separating a host-ordered stop from an overrun.
+    ///
+    /// Wasmtime cannot make this distinction: a kill and a spent tick budget
+    /// both leave [`GuestInterrupt::on_deadline`] returning `Interrupt`, and
+    /// both arrive here as `Trap::Interrupt`. Only the driver knows which,
+    /// because only the driver raised the kill. Reporting them identically
+    /// would tell an operator that a guest overran when the host stopped it.
+    fn describe_stop(&self, call: &str, error: &wasmtime::Error) -> String {
+        if self.interrupt.is_killed()
+            && matches!(
+                error.downcast_ref::<wasmtime::Trap>(),
+                Some(wasmtime::Trap::Interrupt)
+            )
+        {
+            return format!("guest {call} was stopped by the host and did not return");
+        }
+        describe_guest_failure(call, error)
     }
 
     /// Run one guest call so a panic cannot escape into the host.
@@ -789,9 +808,12 @@ mod interrupt_tests {
         drop(ticker);
 
         let failure = outcome.expect_err("a killed call must not report success");
+        // A host-ordered stop must not be reported as a guest overrun. The
+        // budget here is effectively infinite, so "exceeded its call deadline"
+        // would be a false statement about why the call ended.
         assert!(
-            failure.summary().contains("call deadline"),
-            "a kill surfaces through the deadline mechanism: {}",
+            failure.summary().contains("stopped by the host"),
+            "a kill must be named as a kill, not as a deadline: {}",
             failure.summary()
         );
         // The mechanism's claim is one tick. The receive above already bounds

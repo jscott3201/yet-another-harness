@@ -14,6 +14,46 @@ The canonical source is
 - imports `logging` and `cancellation`; and
 - exports `lifecycle` and `fixture-tool`.
 
+## Why components rather than a byte ABI
+
+The guest path is the Component Model and WIT, driven from Wasmtime directly,
+rather than a plugin framework layered over it. The alternative considered was
+Extism, and the comparison was settled by measurement rather than preference.
+
+Extism is not a different runtime — it embeds Wasmtime, and it embeds a line
+that has already left support by the time it ships: its current release carries
+a major whose two-month support window closed weeks earlier. Its ABI passes
+bytes rather than types, so the compile-checked world described below would
+become a convention that nothing enforces: a host and guest that disagree about
+a signature link successfully and fail at call time, or, with compatible
+widths, do not fail at all. It has no per-activation store, no ceilings on
+memory, table, or instance counts, and — for plugins built from a shared
+compiled plugin — one engine whose deadline timer traps every concurrent call
+when any one of them times out or is cancelled. Each of those is something the
+driver here deliberately does the other way, with a test that fails if it stops
+doing so.
+
+What that buys Extism is reach this path does not have: maintained guest
+toolkits for roughly ten languages, against Rust and TypeScript here. That is
+the cost of this choice, and it is a real one.
+
+Extism also has a packaging convention this path lacks — a manifest format and
+an artifact shape. Neither has verification: Extism's manifest carries an
+optional content hash and no signatures, and the Component Model's registry
+effort was archived with its OCI-based successor offering no verification
+either. So a loader here will own identity, versioning, and verification
+itself. That is a real cost of this path and it lands on a later slice.
+
+Two consequences already apply. A loader must cache compiled artifacts:
+compilation costs roughly one hundred and twenty to two hundred and thirty
+times instantiation for the fixtures here, and around sixteen hundred times for
+a JavaScript guest, so compiling per activation is not viable. And Component Model async stays off —
+it works end to end under this pin, but the JavaScript toolchain cannot compile
+a world that uses it, and enabling it would make async a Rust-only capability.
+
+Run `cargo run -p yah-plugin-wasm --example startup_cost --release` for the
+compile-versus-instantiate figures on the checked-in fixtures.
+
 ## World boundary
 
 | Direction | Interface | Initial purpose |
