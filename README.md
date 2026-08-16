@@ -230,6 +230,14 @@ fake and the trusted local authoring driver pass. No production Wasm or process
 backend has passed yet, so this is not a cross-runtime, guest-ABI, loader,
 sandbox, or portable capability-transport certification.
 
+A separate `yah-plugin-wasm` crate now owns a
+[compile-checked WIT conformance world](docs/wasm-plugin-contract.md). Pinned
+development-only Wasmtime and `wit-bindgen` macros compile host and guest Rust
+bindings from the same versioned source, while parser tests freeze its two
+baseline imports and two fixture exports. No component is built, loaded, or
+executed, and the draft provides no runtime, resource limits, capability
+transport, WASI access, or sandbox claim.
+
 The repository already contains a model-free Rust kernel and evidence harness:
 
 - atomic Selene commits for current state, semantic events, and command
@@ -319,6 +327,7 @@ projects are evolving independently and do not define YAH compatibility.
 |---|---|
 | `crates/yah-compose/` | Process-local component identity, epoch-fenced lifecycle, reversible effect scopes, typed revocable services, exact-assignment dependency reconciliation, and fenced desired component revisions |
 | `crates/yah-plugin-host/` | Strict plugin manifest/revision contracts, runtime-neutral driver lifecycle, exact activation-scoped capability grants/handles, and reusable host-side conformance cases |
+| `crates/yah-plugin-wasm/` | Provisional versioned WIT conformance world with compile-checked host and guest binding probes; no runtime yet |
 | `crates/yah-kernel/` | Current model-free durability, authority, effect, cancellation, provider, and protocol kernel |
 | `crates/exp001-harness/` | Storage fan-in and crash-recovery evidence harness |
 | `generated/protocol/` | Checked-in JSON Schemas and TypeScript bindings for the current protocol experiment |

@@ -89,8 +89,10 @@ worker. Backend implementations will also need their own containment corpora.
 
 Deferred profiles include:
 
-- portable nonempty capability round trips and a guest-safe fixture contract;
-- guest SDK, WIT, or process-IPC encoding and malformed-message cases;
+- executed nonempty capability round trips and capability-bearing guest
+  fixture semantics;
+- built guest components, WIT execution/resource transport, process-IPC
+  encoding, and malformed-message cases;
 - package loading, SDK negotiation, configuration, and real-composition smoke;
 - worker loss, deadlines, forced termination, output or resource exhaustion;
 - filesystem, network, process, secret, raw-Selene, and sandbox negatives;
