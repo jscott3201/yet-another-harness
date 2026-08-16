@@ -336,20 +336,23 @@ async fn pending_start_cancellation(
     // from what it did not say: `acquired` is false whenever the probe failed,
     // so checking the bound first would report every probe failure as a driver
     // that never acquired.
-    let before_cancel = match before_cancel
-        .unwrap_or_else(|| rig.observation(&id, DriverConformanceTeardown::NotStarted))
-    {
-        Ok(observation) => observation,
-        Err(primary) => {
-            return Err(teardown::activation_failure(
-                &rig,
-                &mut activation,
-                primary,
-                std::slice::from_ref(&id),
-            )
-            .await);
-        }
-    };
+    // `expect` rather than a fresh observation: the only way to leave the loop
+    // without one is a `Ready` first poll, which the requirement above has
+    // already returned on. Probing again here would consult the target twice
+    // for one decision, which is what the loop is careful not to do.
+    let before_cancel =
+        match before_cancel.expect("a pending first poll always leaves an observation") {
+            Ok(observation) => observation,
+            Err(primary) => {
+                return Err(teardown::activation_failure(
+                    &rig,
+                    &mut activation,
+                    primary,
+                    std::slice::from_ref(&id),
+                )
+                .await);
+            }
+        };
     // Named separately from the retention check below, which is about something
     // else entirely. A driver that spent every poll without acquiring has not
     // failed to retain its operation, and reporting it as though it had would

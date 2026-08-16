@@ -12,13 +12,17 @@
 ;; way silently stops testing anything. Here the guest holds the fiber for
 ;; milliseconds, so the yield happens on every run and a test may assert it.
 ;;
-;; The iteration count is sized against two bounds at once. It must exceed one
+;; The iteration count is sized against two bounds at once: it must exceed one
 ;; epoch tick by enough that a fast machine still yields at least once, and stay
 ;; far enough under the conformance harness's poll bound that a slow machine
-;; does not exhaust it: at the 1ms tick its case uses, this lands around ten
-;; yields here, which leaves room for a machine several times slower or faster
-;; in either direction. It burns a fixed number of iterations rather than
-;; watching a clock because a guest has no clock.
+;; does not exhaust it. Measured on aarch64, this burns about 2.9ms of guest
+;; time against the 250us tick its case sets - about seven yields, where the
+;; assertion needs one and the 512-poll bound would need about 510. It stops
+;; yielding at all somewhere around a 6ms effective tick, so the low end has
+;; roughly eight times the margin it needs and the high end sixty.
+;;
+;; It burns a fixed number of iterations rather than watching a clock because a
+;; guest has no clock.
 ;;
 ;; Apart from the start section this is `conformant.wat`. See it for the ABI and
 ;; named-type rules.

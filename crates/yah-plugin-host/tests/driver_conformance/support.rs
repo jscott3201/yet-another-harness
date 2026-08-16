@@ -33,6 +33,10 @@ impl ReferenceTarget {
         Self::with_violation(Violation::RevisionMismatch)
     }
 
+    pub(super) fn with_early_completion_and_a_one_shot_probe_failure() -> Self {
+        Self::with_violation(Violation::PendingStartCompletesWithTransientProbeFailure)
+    }
+
     pub(super) fn with_pending_start_that_never_acquires() -> Self {
         Self::with_violation(Violation::PendingStartNeverAcquires)
     }
@@ -117,6 +121,7 @@ enum Violation {
     RevisionMismatch,
     PendingStartCompletes,
     PendingStartNeverAcquires,
+    PendingStartCompletesWithTransientProbeFailure,
     UnhealthyReady,
     ProbeFailureAfterAcquire,
     TransientProbeFailureAfterAcquire,
@@ -136,6 +141,9 @@ impl DriverConformanceTarget for ReferenceTarget {
             Violation::RevisionMismatch => "reference-metadata-mismatch",
             Violation::PendingStartCompletes => "reference-pending-completes",
             Violation::PendingStartNeverAcquires => "reference-pending-never-acquires",
+            Violation::PendingStartCompletesWithTransientProbeFailure => {
+                "reference-pending-completes-with-transient-probe-failure"
+            }
             Violation::UnhealthyReady => "reference-unhealthy-ready",
             Violation::ProbeFailureAfterAcquire => "reference-probe-failure",
             Violation::TransientProbeFailureAfterAcquire => "reference-transient-probe-failure",
@@ -212,6 +220,12 @@ impl DriverConformanceTarget for ReferenceTarget {
             ) => {
                 plans[0].start = StartBehavior::PendingWithoutAcquire;
             }
+            (
+                Violation::PendingStartCompletesWithTransientProbeFailure,
+                DriverConformanceCase::PendingStartCancellation,
+            ) => {
+                plans[0].start = StartBehavior::Ready;
+            }
             (Violation::UnhealthyReady, DriverConformanceCase::ReadyLifecycle) => {
                 plans[0].health = HealthBehavior::Unhealthy;
             }
@@ -251,9 +265,11 @@ impl DriverConformanceTarget for ReferenceTarget {
         let probe = Arc::new(ReferenceProbe {
             states: Arc::clone(&states),
             fail_after_acquire: self.violation == Violation::ProbeFailureAfterAcquire,
-            fail_once_after_acquire: AtomicBool::new(
-                self.violation == Violation::TransientProbeFailureAfterAcquire,
-            ),
+            fail_once_after_acquire: AtomicBool::new(matches!(
+                self.violation,
+                Violation::TransientProbeFailureAfterAcquire
+                    | Violation::PendingStartCompletesWithTransientProbeFailure
+            )),
         });
         Ok(DriverConformanceSubject::new(expected, driver, probe))
     }

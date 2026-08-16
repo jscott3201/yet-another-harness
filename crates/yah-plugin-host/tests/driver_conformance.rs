@@ -149,6 +149,30 @@ async fn a_pending_start_that_never_acquires_is_failed_by_the_poll_bound() {
     assert_eq!(failure.teardown(), DriverConformanceTeardown::Clean);
 }
 
+/// A probe that answers once is not spent by the case's own polling.
+///
+/// The pending-start case polls until the driver acquires, and each pass could
+/// consult the probe. A start that completes early is not this case's shape, so
+/// it must not cost a probe answer on the way to saying so - a driver whose
+/// probe fails once would otherwise have that failure read by the loop and
+/// replaced by whatever a later, recovered probe returned.
+#[tokio::test]
+async fn an_early_completion_does_not_spend_a_one_shot_probe_answer() {
+    let failure = case_failure(
+        &ReferenceTarget::with_early_completion_and_a_one_shot_probe_failure(),
+        DriverConformanceCase::PendingStartCancellation,
+    )
+    .await;
+    assert_eq!(failure.phase(), DriverConformancePhase::Start);
+    let observation = &failure.observations()[0];
+    assert!(
+        observation
+            .resource_probe_error()
+            .is_some_and(|error| error.contains("injected transient probe failure")),
+        "the one-shot probe failure must survive to the report: {observation:?}"
+    );
+}
+
 #[tokio::test]
 async fn transient_probe_failure_remains_in_final_structured_evidence() {
     let failure = case_failure(

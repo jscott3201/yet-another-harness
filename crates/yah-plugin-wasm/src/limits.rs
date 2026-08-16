@@ -35,12 +35,15 @@ use wasmtime::{Config, Engine, ResourceLimiter, UpdateDeadline};
 /// process. Every other bound in this crate either refuses the guest or fails
 /// the driver build, so this one is checked rather than left as a caution.
 ///
-/// Measured demand above the guest region is far smaller: about 4 KiB for
-/// recursion alone, 9 KiB with the cancellation import called at maximum depth,
-/// and 11 KiB with the logging import there, all in a debug host build where
-/// frames are fattest. This default is roughly twenty times that, because being
-/// wrong one way costs address space and being wrong the other way aborts the
-/// process. It is a default rather than a constant of the crate precisely
+/// Measured demand above the guest region is far smaller. Recursion alone needs
+/// about 10 KiB on aarch64 in a debug host build, where frames are fattest, and
+/// about 3 KiB in release. Review measured about 9 KiB with the cancellation
+/// import called at maximum depth and 11 KiB with the logging import there,
+/// using fixtures built outside the tree - no checked-in fixture imports
+/// anything, so those two are not reproducible from this repo and the recursion
+/// figure is the one to trust here. This default is more than twenty times the
+/// worst of them, because being wrong one way costs address space and being
+/// wrong the other way aborts the process. It is a default rather than a constant of the crate precisely
 /// because the right number is a property of the host: it moves with target,
 /// optimisation level, and what an import does above the guest, so
 /// [`WasmLimits::host_stack_headroom_bytes`] carries it and a host that has
@@ -177,7 +180,7 @@ impl WasmLimits {
         // meaningful when there is something left; a fiber smaller than the
         // bound it carries leaves less than nothing, and saying "leaves 0"
         // would describe the boundary case rather than this one.
-        if self.call_stack_bytes <= self.guest_stack_bytes {
+        if self.call_stack_bytes < self.guest_stack_bytes {
             return Err(format!(
                 "call_stack_bytes ({}) must be larger than guest_stack_bytes ({}), \
                  with {} bytes over it for host frames",
@@ -528,9 +531,15 @@ mod tests {
 
     /// The pair Wasmtime accepts and then aborts on. A fiber the same size as
     /// the guest bound it carries passes `Engine::new` and overflows on the
-    /// first guest call, so a host that got this wrong would lose the process
-    /// rather than see an error. There is no test for the abort itself, for the
-    /// obvious reason.
+    /// first call that runs deep enough to use that bound - the fixtures that
+    /// stay shallow complete under it, which is what makes the pair dangerous
+    /// rather than obviously broken. A host that got this wrong would lose the
+    /// process rather than see an error. There is no test for the abort itself,
+    /// for the obvious reason.
+    ///
+    /// The pair is equal-sized rather than inverted so that it reaches the
+    /// headroom comparison: an inverted pair is refused for its direction
+    /// before the headroom is ever looked at.
     #[test]
     fn a_stack_pair_with_no_room_for_host_frames_is_refused() {
         let limits = WasmLimits {
