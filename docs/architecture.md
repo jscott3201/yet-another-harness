@@ -245,11 +245,15 @@ exact-activation advisory health. A trusted effective grant snapshot selects an
 immutable subset of manifest requests and exact broker registrations; the start
 permit exposes the resulting weak context only after cleanup admission, and
 synchronous calls join the activation cleanup drain. The object-safe driver
-futures choose no executor. These values and interfaces do not load or verify a
+futures choose no executor. An executor-neutral host-side conformance runner
+decorates a trusted subject and drives five stable lifecycle cases through
+these public APIs; its reference fake is evidence for the harness, not for
+multi-backend equivalence. These values and interfaces do not load or verify a
 package, authorize a reserved namespace or built-in registration, compute
 policy/approval, or implement a concrete execution backend. See the
 [driver lifecycle contract](plugin-driver.md) and
-[capability contract](plugin-capabilities.md).
+[capability contract](plugin-capabilities.md), plus the separate
+[conformance boundary](plugin-driver-conformance.md).
 
 Each plugin revision has a content identity, manifest, requested capabilities,
 configuration, and execution driver. Admission separates:
@@ -304,7 +308,8 @@ future session, work, memory, and evidence identities survive process loss.
 Today the repository contains the initial process-local component lifecycle,
 effect-scope core, typed revocable service registry, strict plugin manifest,
 runtime-neutral prepared-driver lifecycle, and exact activation-scoped
-capability broker; the Selene-backed reliability
+capability broker, plus the reusable host-side driver conformance testkit; the
+Selene-backed reliability
 kernel; provider normalization fixtures; an in-process protocol experiment;
 and the G02 storage evidence harness. General component callbacks,
 shared/named service realms, policy interception, automatic registry watches

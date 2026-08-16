@@ -295,6 +295,18 @@ impl<'slot> HostPluginActivation<'slot> {
         self.slot_mut().finish_stop(epoch).await
     }
 
+    /// Explicitly accept this activation's terminal non-clean teardown.
+    ///
+    /// This delegates the same exact-epoch owner decision exposed by
+    /// [`ComponentSlot::abandon_failed_cleanup`] while this guard still owns
+    /// the slot. It never retries a consumed cleanup callback and can permit a
+    /// later activation to duplicate a resource whose cleanup reported
+    /// failure.
+    pub fn abandon_failed_cleanup(&mut self) -> Result<StopRecord, ComponentSlotError> {
+        let epoch = self.id.selection_epoch();
+        self.slot_mut().abandon_failed_cleanup(epoch)
+    }
+
     /// Release a successfully active slot and return its exact health handle.
     ///
     /// Calling this before a successful `activate` consumes the guard; its Drop
@@ -650,7 +662,7 @@ fn panic_summary(payload: &(dyn Any + Send)) -> String {
     }
 }
 
-pub(super) fn consume_panic_payload(payload: Box<dyn Any + Send>) -> String {
+pub(crate) fn consume_panic_payload(payload: Box<dyn Any + Send>) -> String {
     let summary = panic_summary(payload.as_ref());
     match catch_unwind(AssertUnwindSafe(|| drop(payload))) {
         Ok(()) => summary,

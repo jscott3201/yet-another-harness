@@ -12,6 +12,8 @@ mod control;
 mod health;
 mod model;
 
+pub(crate) use activation::consume_panic_payload;
+
 pub use activation::{ActivatePlugin, HostPluginActivation};
 pub use health::PluginActivationHandle;
 pub use model::{

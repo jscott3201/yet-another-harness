@@ -217,6 +217,14 @@ activation replacement. This is an in-process authority seam, not package
 admission or a hostile-code sandbox. No real built-in, Wasm, or process driver,
 policy engine, durable attempt binding, scheduler, or sandbox exists yet.
 
+A reusable [driver conformance testkit](docs/plugin-driver-conformance.md) now
+drives independently described `PluginDriver` subjects through five portable
+host-lifecycle cases without the agent or daemon. Its private instrumentation
+records exact boundary calls, cancellation, cleanup, and activation isolation;
+a trusted fixture probe confirms resource state. The deterministic reference
+fake passes. No real backend has passed yet, so this is not a cross-runtime,
+guest-ABI, loader, sandbox, or capability-transport certification.
+
 The repository already contains a model-free Rust kernel and evidence harness:
 
 - atomic Selene commits for current state, semantic events, and command
@@ -243,7 +251,8 @@ up-front specification:
 1. Build the Rust composition kernel and an independent semantic conformance
    corpus informed by Cordis lifecycle behavior.
 2. Extend the landed plugin manifest vocabulary with driver lifecycle,
-   effective capability grants, and a cross-driver SDK conformance suite.
+   effective capability grants, and a reusable host-side driver conformance
+   testkit before claiming cross-runtime equivalence.
 3. Connect scoped local effects to the existing durable external-effect and
    recovery machinery.
 4. Establish Selene-native work, session, memory, evidence, and plugin-lineage
@@ -304,7 +313,7 @@ projects are evolving independently and do not define YAH compatibility.
 | Path | Contents |
 |---|---|
 | `crates/yah-compose/` | Process-local component identity, epoch-fenced lifecycle, reversible effect scopes, typed revocable services, exact-assignment dependency reconciliation, and fenced desired component revisions |
-| `crates/yah-plugin-host/` | Strict plugin manifest/revision contracts, runtime-neutral driver lifecycle, and exact activation-scoped capability grants and handles |
+| `crates/yah-plugin-host/` | Strict plugin manifest/revision contracts, runtime-neutral driver lifecycle, exact activation-scoped capability grants/handles, and reusable host-side conformance cases |
 | `crates/yah-kernel/` | Current model-free durability, authority, effect, cancellation, provider, and protocol kernel |
 | `crates/exp001-harness/` | Storage fan-in and crash-recovery evidence harness |
 | `generated/protocol/` | Checked-in JSON Schemas and TypeScript bindings for the current protocol experiment |
