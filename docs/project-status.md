@@ -8,8 +8,8 @@ There is no usable release. The repository contains a tested reliability
 foundation and the first process-local composition lifecycle, cleanup, typed
 service-binding, exact-assignment dependency reconciliation, and fenced desired
 component-revision primitives, plus an independently authored semantic
-conformance corpus; it does not yet contain a runnable composition host, plugin
-host, agent loop, sandbox, daemon, or client.
+and concurrency/fault-injection corpus; it does not yet contain a runnable
+composition host, plugin host, agent loop, sandbox, daemon, or client.
 
 ## Evidence Status
 
@@ -17,7 +17,7 @@ host, agent loop, sandbox, daemon, or client.
 |---|---|---|
 | G02 storage fan-in and crash recovery | Atomic state, receipt, and journal commits under kill/reopen, writer takeover, and corruption drills | Passed across 1,440 scored trials: [report](gates/G02-storage-fanin-recovery.md) |
 | Current model-free kernel | Deterministic tests for command, fencing, cancellation, effect, provider, recovery, and Adapter 1 behavior | Available for reuse; pivot integration has not started |
-| Contextual composition runtime | Component definition/instance/scope identities, epoch-fenced lifecycle, reversible nested effects, typed requirements, exact revocable bindings, exact-assignment recomposition, fenced desired revisions, and six cross-layer semantic cases | Initial slices with deterministic conformance evidence; no callbacks, provider-ranking policy, contextual visibility, or host-wide scheduler |
+| Contextual composition runtime | Component definition/instance/scope identities, epoch-fenced lifecycle, reversible nested effects, typed requirements, exact revocable bindings, exact-assignment recomposition, fenced desired revisions, six cross-layer semantic cases, and four concurrent fault cases | Initial slices with deterministic conformance evidence; no callbacks, task supervisor, provider-ranking policy, contextual visibility, or host-wide scheduler |
 | Plugin manifest, SDK, and conformance suite | No implementation in this repository | Not started |
 | Wasm, Node/TypeScript, and Python plugin drivers | No implementation in this repository | Not started |
 | Selene work, session, memory, evidence, and plugin-lineage domains | Only the current kernel graph exists | Design/spike stage |
@@ -55,13 +55,18 @@ resolve services, or reconcile desired state.
 - Cached close reports and resumable pending close. When close is driven to
   completion, every callback is attempted once; repeated or resumed closes do
   not rerun completed callbacks.
+- A private hierarchical activity fence rejects new service calls at close and
+  drains already-admitted provider and consumer callbacks before any cleanup;
+  parent close includes descendant activity while direct child close remains
+  isolated from its parent and siblings.
 - Aggregation of returned errors and unwind panics without short-circuiting.
 - Explicit separation from durable external-effect settlement.
 
 Cleanup is executor-neutral and sequential. The current layer does not provide
-deadlines, forced termination, concurrent admission/close, task supervision, or
-proof that cancellation stopped work. Dropping a scope requests cancellation
-but does not run its cleanup.
+deadlines, forced termination, concurrent effect registration, multi-owner
+close, or task supervision. A mediated service callback that never returns can
+keep explicit close pending. Dropping a scope requests cancellation but does not
+drain admitted calls or run its cleanup.
 
 ### Typed live services
 
@@ -75,6 +80,10 @@ but does not run its cleanup.
   the active provider's effect scope.
 - Exact provider-registration bindings whose handles gate every call and fail
   closed when the provider scope, consumer scope, or registry is revoked.
+- Explicit provider or consumer close waits for calls already admitted through
+  those handles before releasing activation effects. Binding creates only a
+  weak handle; each call's temporary strong value is covered by both admissions,
+  including during callback unwind.
 - Generated provider identities reuse their unique effect registration, so a
   stale handle or delayed cleanup cannot target a replacement publication.
 
@@ -133,7 +142,7 @@ concurrent desired writers, rollback, retry/backoff, and persistence remain
 unimplemented. Exact provider registration IDs are live values and are not
 durable desired state.
 
-### Composition semantic conformance
+### Composition semantic and fault conformance
 
 - Six independently authored black-box cases compose the public lifecycle,
   effect, service, dependency, and desired-state APIs rather than restating one
@@ -147,11 +156,16 @@ durable desired state.
   mounted revisions.
 - The [corpus contract](composition-conformance.md) documents its pinned Cordis
   inspiration and the behaviors deliberately not copied.
+- Four deterministic fault cases use OS-thread barriers and manual polling to
+  prove parent/child provider drain, isolated consumer-child close, callback
+  unwind release, resumable close, and final provider-value destructor panic
+  containment during exact-epoch activation failure.
 
 Registry-domain separation is a coarse process-local boundary, not contextual
 scope inheritance or shared isolation realms. Desired churn is caller-driven,
-not filesystem HMR. Concurrent fault injection remains a separate validation
-slice.
+not filesystem HMR. The fault corpus covers synchronous mediated service calls,
+not async tasks, deadlines, reentrant self-close, escaped authority, executor or
+waker failure, or concurrent effect registration.
 
 ### Selene-backed mutation and recovery
 
@@ -216,8 +230,8 @@ crate or protocol boundary in advance.
 ## Not Implemented
 
 - Component callback runner, contextual service inheritance/isolation,
-  automatic provider ranking or registry watches, concurrent scope/task
-  supervisor, host-wide desired-graph scheduler, or isolation realms.
+  automatic provider ranking or registry watches, concurrent effect-registration
+  or task supervisor, host-wide desired-graph scheduler, or isolation realms.
 - Plugin packages, manifests, admission, installation, updates, SDKs, or
   language conformance tests.
 - Wasmtime/WIT host or sandboxed Node/TypeScript and CPython workers.

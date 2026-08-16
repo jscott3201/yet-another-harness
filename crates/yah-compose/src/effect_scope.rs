@@ -5,8 +5,10 @@
 //! Panic payload disposal is also contained; a pathological secondary payload
 //! is leaked if its own destructor panics. Process aborts, `panic = "abort"`,
 //! FFI failures, executor loss, and panics while abandoning a scope are outside
-//! this report boundary.
+//! this report boundary. Panics from executor-supplied wakers while requesting
+//! cancellation or signaling activity drain are likewise outside it.
 
+mod activity;
 mod cancellation;
 mod report;
 
@@ -16,7 +18,10 @@ use std::{
     future::Future,
     panic::{AssertUnwindSafe, catch_unwind},
     pin::Pin,
-    sync::atomic::{AtomicU64, Ordering},
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
     task::{Context, Poll},
 };
 
@@ -24,6 +29,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::ActivationEpoch;
 
+pub(crate) use activity::{ActivityAdmission, ActivityAdmissionError, ActivityDrain, ActivityGate};
 pub use cancellation::ScopeCancellation;
 pub use report::{
     CleanupError, CleanupFailure, CleanupFailureKind, CleanupOutcome, CleanupRecord, CloseReport,
@@ -42,8 +48,10 @@ type AsyncCleanup = Box<dyn FnOnce() -> BoxCleanupFuture + Send + 'static>;
 ///
 /// The scope is intentionally uniquely owned. Cleanup is sequential and may
 /// be resumed after a pending [`CloseScope`] future is dropped, provided the
-/// scope itself survives. Concurrent admission and multi-owner close policy
-/// remain outside this slice.
+/// scope itself survives. Concurrent effect registration and multi-owner close
+/// policy remain outside this slice. Service handles use a private hierarchical
+/// admission fence: explicit close rejects new calls and waits for already
+/// admitted synchronous calls in this subtree before running any cleanup.
 ///
 /// Dropping a scope requests cancellation as a fail-safe, then abandons any
 /// cleanup that has not run. Owners must explicitly drive [`Self::close`] to
@@ -53,6 +61,7 @@ pub struct EffectScope {
     id: EffectScopeId,
     label: String,
     cancellation: CancellationToken,
+    activity: Arc<ActivityGate>,
     next_registration: u64,
     storage: ScopeStorage,
 }
@@ -72,6 +81,7 @@ impl EffectScope {
             id: allocate_scope_id(activation)?,
             label: label.into(),
             cancellation: CancellationToken::new(),
+            activity: ActivityGate::root(),
             next_registration: 1,
             storage: ScopeStorage::Open {
                 entries: Vec::new(),
@@ -103,6 +113,10 @@ impl EffectScope {
         ScopeCancellation::new(self.cancellation.clone())
     }
 
+    pub(crate) fn activity_gate(&self) -> Arc<ActivityGate> {
+        Arc::clone(&self.activity)
+    }
+
     /// Create a child whose teardown position is its creation position.
     pub fn child(
         &mut self,
@@ -113,6 +127,7 @@ impl EffectScope {
             id: allocate_scope_id(self.activation())?,
             label: label.into(),
             cancellation: self.cancellation.child_token(),
+            activity: ActivityGate::child(&self.activity),
             next_registration: 1,
             storage: ScopeStorage::Open {
                 entries: Vec::new(),
@@ -201,11 +216,14 @@ impl EffectScope {
         Ok(registration_id)
     }
 
-    /// Seal admission, request subtree cancellation, and drive cleanup.
+    /// Seal admission, request subtree cancellation, drain service calls, and
+    /// drive cleanup.
     ///
     /// Calling this method seals admission and requests cancellation
-    /// synchronously. If the returned future is dropped while pending, calling
-    /// `close` again resumes cleanup without rerunning completed callbacks.
+    /// synchronously. While polled, it waits for already-admitted synchronous
+    /// service calls in this subtree before the first cleanup callback. If the
+    /// returned future is dropped while pending, calling `close` again resumes
+    /// the same drain or cleanup without rerunning completed callbacks.
     pub fn close(&mut self) -> CloseScope<'_> {
         self.begin_close();
         CloseScope { scope: self }
@@ -253,9 +271,11 @@ impl EffectScope {
         if !matches!(self.storage, ScopeStorage::Open { .. }) {
             return;
         }
+        let quiescence = self.activity.drain();
         let previous = std::mem::replace(
             &mut self.storage,
             ScopeStorage::Closing {
+                quiescence: None,
                 remaining: Vec::new(),
                 current: None,
                 steps: Vec::new(),
@@ -265,10 +285,12 @@ impl EffectScope {
             unreachable!("open state checked before close transition")
         };
         self.storage = ScopeStorage::Closing {
+            quiescence: Some(quiescence),
             remaining: entries,
             current: None,
             steps: Vec::new(),
         };
+        self.activity.revoke();
         self.cancellation.cancel();
     }
 
@@ -277,6 +299,10 @@ impl EffectScope {
         loop {
             if let ScopeStorage::Closed { report } = &self.storage {
                 return Poll::Ready(report.clone());
+            }
+
+            if self.poll_quiescence(cx).is_pending() {
+                return Poll::Pending;
             }
 
             if let Some(current) = self.take_current() {
@@ -397,6 +423,22 @@ impl EffectScope {
         current.take()
     }
 
+    fn poll_quiescence(&mut self, cx: &mut Context<'_>) -> Poll<()> {
+        let ScopeStorage::Closing { quiescence, .. } = &mut self.storage else {
+            return Poll::Ready(());
+        };
+        let Some(drain) = quiescence else {
+            return Poll::Ready(());
+        };
+        match drain.as_mut().poll(cx) {
+            Poll::Pending => Poll::Pending,
+            Poll::Ready(()) => {
+                *quiescence = None;
+                Poll::Ready(())
+            }
+        }
+    }
+
     fn put_current(&mut self, cleanup: CurrentCleanup) {
         let ScopeStorage::Closing { current, .. } = &mut self.storage else {
             unreachable!("current cleanup belongs to a closing scope")
@@ -436,6 +478,7 @@ impl fmt::Debug for EffectScope {
 
 impl Drop for EffectScope {
     fn drop(&mut self) {
+        self.activity.revoke();
         self.cancellation.cancel();
     }
 }
@@ -459,6 +502,7 @@ enum ScopeStorage {
         entries: Vec<EffectEntry>,
     },
     Closing {
+        quiescence: Option<ActivityDrain>,
         remaining: Vec<EffectEntry>,
         current: Option<CurrentCleanup>,
         steps: Vec<CloseStep>,

@@ -21,6 +21,23 @@ These cases are deterministic. Suspended cleanup is polled manually and
 resumed through an explicit signal; the corpus does not depend on sleeps,
 filesystem timing, or background reconciliation.
 
+## Concurrency and fault injection
+
+The companion corpus lives in
+`crates/yah-compose/tests/concurrency_fault_injection.rs` and contains four
+deterministic cases:
+
+| Case | YAH contract |
+|---|---|
+| `CMP007-PROVIDER-DRAIN` | Parent close immediately hides a child-scope provider, rejects late calls, and waits for several admitted calls before touching a newer parent cleanup or withdrawing and releasing the provider. A dropped close waiter resumes the same drain. |
+| `CMP007-CONSUMER-DRAIN` | Closing one consumer child does not revoke a handle bound in its sibling, while parent close rejects new use and waits for an admitted call before releasing consumer effects. The independent provider stays visible. |
+| `CMP007-CALLBACK-PANIC` | A callback panic propagates to its caller but releases both provider and consumer activity admissions, allowing simultaneous explicit closes to finish and release their effects once. |
+| `CMP007-DESTRUCTOR-PANIC` | Exact-epoch active failure waits for an admitted call; the final registry-created provider value is then released inside cleanup panic containment, older cleanup continues, and the non-clean report remains blocked until explicit abandonment. |
+
+OS-thread barriers establish call admission and release points; manual polling
+proves the close futures are pending before release. The cases use no sleeps,
+probabilistic scheduling assertions, or background runtime.
+
 ## Boundaries
 
 - Dependency convergence is explicit. YAH does not currently choose a unique
@@ -34,9 +51,11 @@ filesystem timing, or background reconciliation.
   runner or automatic retry/backoff policy.
 - Local cleanup does not compensate or settle an external action. Durable
   external effects remain owned by the kernel ledger.
-- Sequential conformance does not establish concurrent admission/close,
-  bounded task drain, deadline, or adversarial destructor behavior; that work
-  belongs to the failure-injection corpus.
+- The fault corpus establishes explicit-close draining only for synchronous
+  calls mediated by `ServiceHandle::try_with`. It does not establish task or
+  future supervision, deadlines, forced termination, safe reentrant self-close,
+  escaped service authority, concurrent effect registration, executor/waker
+  fault containment, or a general concurrency model.
 
 ## Behavioral provenance
 

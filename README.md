@@ -140,10 +140,14 @@ The design deliberately separates two concerns:
 The current local scope implementation binds cleanup to one activation,
 requests cancellation before teardown, unwinds mixed synchronous/asynchronous
 and nested registrations in deterministic reverse order, and reports every
-returned error or unwind panic without short-circuiting later cleanup.
-Owners must drive an explicit close to completion; dropping a scope requests
-cancellation but does not run registered cleanup. Cancellation is still a
-request, not proof that work or an escaped action stopped.
+returned error or unwind panic without short-circuiting later cleanup. Explicit
+close also rejects new mediated service calls and drains calls already admitted
+against the provider and consumer scope trees before running any cleanup.
+Owners must drive close to completion; dropping a scope requests cancellation
+but does not drain calls or run registered cleanup. The drain covers synchronous
+`ServiceHandle::try_with` callbacks, not spawned tasks, escaped authority, or a
+callback that never returns. Cancellation is still a request, not proof that
+other work or an escaped action stopped.
 
 A clean plugin unload cannot prove that an external action did not happen. That
 distinction is a hard runtime invariant.
@@ -156,14 +160,15 @@ activation epochs that fence start completions, failure reports, and stop
 requests or completions; activation-owned reversible effect scopes; and a
 process-local typed service registry. Required services produce deterministic
 missing reports, provider publication is owned by effect cleanup, and handles
-bind one exact provider registration and fail closed when either activation
-scope is cancelled. A level-triggered reconciled component freezes its mounted
-definition and one explicit, exact provider assignment per activation; changing
-or losing an assigned provider cancels and tears down the old activation before
-a replacement can start. Exact-epoch activation failures likewise seal their
-effects and target pending after clean teardown; non-clean cleanup remains
-blocked. Component callbacks, registry watches, contextual service visibility,
-and automatic provider ranking are not implemented yet.
+bind one exact provider registration, fail closed when either activation scope
+is sealed, and keep explicit cleanup pending until admitted synchronous calls
+release both activations. A level-triggered reconciled component freezes its
+mounted definition and one explicit, exact provider assignment per activation;
+changing or losing an assigned provider cancels and tears down the old
+activation before a replacement can start. Exact-epoch activation failures
+likewise seal their effects and target pending after clean teardown; non-clean
+cleanup remains blocked. Component callbacks, registry watches, contextual
+service visibility, and automatic provider ranking are not implemented yet.
 
 A stable desired component slot now fences caller-sequenced generations bound
 to a process-unique slot incarnation and immutable component/configuration
@@ -178,8 +183,11 @@ An independently authored
 [composition semantic conformance corpus](docs/composition-conformance.md)
 now exercises nested cleanup, explicit pending dependency convergence, exact
 provider replacement, registry-domain separation, activation failure rollback,
-and latest-desired revision churn across those public primitives. The corpus
-does not claim contextual realm isolation, automatic injection, or file HMR.
+and latest-desired revision churn across those public primitives. A companion
+deterministic fault corpus covers concurrent provider and consumer close,
+hierarchical call draining, callback unwind, resumable close, and final
+provider-value destructor panic containment. The corpora do not claim
+contextual realm isolation, automatic injection, file HMR, or task supervision.
 
 The repository already contains a model-free Rust kernel and evidence harness:
 
