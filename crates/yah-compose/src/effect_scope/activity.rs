@@ -1,4 +1,6 @@
 use std::{
+    error::Error,
+    fmt,
     future::Future,
     pin::Pin,
     sync::{
@@ -131,3 +133,76 @@ pub(crate) enum ActivityAdmissionError {
     Revoked,
     Exhausted,
 }
+
+/// Cloneable admission token for synchronous work borrowing activation state.
+///
+/// The token carries no cancellation or cleanup authority. Entering it joins
+/// the owning effect scope's pre-cleanup activity drain: explicit close rejects
+/// new entries and waits for already-entered callbacks before running cleanup.
+/// The callback must not wait for closure of the same scope.
+#[derive(Clone)]
+pub struct ScopeActivity {
+    activation: crate::ActivationEpoch,
+    gate: Arc<ActivityGate>,
+}
+
+impl ScopeActivity {
+    pub(crate) fn new(activation: crate::ActivationEpoch, gate: Arc<ActivityGate>) -> Self {
+        Self { activation, gate }
+    }
+
+    pub const fn activation(&self) -> crate::ActivationEpoch {
+        self.activation
+    }
+
+    pub fn is_open(&self) -> bool {
+        self.gate.is_open()
+    }
+
+    /// Run one synchronous operation in this activation subtree.
+    ///
+    /// Admission cannot escape this callback, so it cannot be moved into an
+    /// asynchronous task or retained after the operation returns.
+    pub fn try_with<R>(&self, operation: impl FnOnce() -> R) -> Result<R, ScopeActivityError> {
+        let admission = self.gate.admit().map_err(ScopeActivityError::from)?;
+        let result = operation();
+        drop(admission);
+        Ok(result)
+    }
+}
+
+impl fmt::Debug for ScopeActivity {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ScopeActivity")
+            .field("activation", &self.activation)
+            .field("is_open", &self.is_open())
+            .finish()
+    }
+}
+
+/// Why an activation activity entry was rejected.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ScopeActivityError {
+    Revoked,
+    Exhausted,
+}
+
+impl From<ActivityAdmissionError> for ScopeActivityError {
+    fn from(error: ActivityAdmissionError) -> Self {
+        match error {
+            ActivityAdmissionError::Revoked => Self::Revoked,
+            ActivityAdmissionError::Exhausted => Self::Exhausted,
+        }
+    }
+}
+
+impl fmt::Display for ScopeActivityError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Revoked => "activation activity is revoked",
+            Self::Exhausted => "activation activity admission is exhausted",
+        })
+    }
+}
+
+impl Error for ScopeActivityError {}

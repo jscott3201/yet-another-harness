@@ -1,15 +1,22 @@
 //! Runtime-neutral plugin package and driver contracts.
 //!
 //! This crate validates declarative package manifests and immutable revision
-//! identities, and defines the runtime-neutral host/driver lifecycle. It does
-//! not load code, grant capabilities, choose restart policy, or persist plugin
-//! state. Those authority boundaries remain owned by later host layers.
+//! identities, defines the runtime-neutral host/driver lifecycle, and projects
+//! authority-selected manifest requests into exact activation-scoped typed
+//! handles. It does not load code, compute policy or approval, choose restart
+//! behavior, or persist plugin state.
 
+mod capability;
 mod driver;
 mod identity;
 mod manifest;
 mod revision;
 
+pub use capability::{
+    CapabilityBroker, CapabilityBrokerError, CapabilityDefinition, CapabilityGrant,
+    CapabilityGrantError, CapabilityHandle, CapabilityHandleError, CapabilityProviderRegistration,
+    CapabilityRegistrationId, EffectiveCapabilityGrants, PluginStartContext,
+};
 pub use driver::{
     ActivatePlugin, DriverActivationError, DriverActivationErrorKind, DriverDeactivationError,
     DriverFuture, DriverHealthError, DriverPrepareError, DriverStartPermit, DriverStopPermit,

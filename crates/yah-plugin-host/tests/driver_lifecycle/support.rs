@@ -12,11 +12,47 @@ use std::{
 };
 
 use yah_plugin_host::{
-    DriverActivationError, DriverDeactivationError, DriverFuture, DriverHealthError, DriverKind,
-    DriverPrepareError, DriverStartPermit, DriverStopPermit, PluginActivationId,
-    PluginActivationRequest, PluginDriver, PluginHealth, PluginRevisionId,
-    PreparedDriverActivation,
+    CapabilityBroker, DriverActivationError, DriverDeactivationError, DriverFuture,
+    DriverHealthError, DriverKind, DriverPrepareError, DriverStartPermit, DriverStopPermit,
+    EffectiveCapabilityGrants, HostPluginActivation, HostPluginActivationError,
+    PackageRelativePath, PluginActivationId, PluginActivationRequest, PluginDriver,
+    PluginEntrypoint, PluginHealth, PluginManifest, PluginRevision, PluginRevisionId,
+    PreparedDriverActivation, SdkVersionRequirement,
 };
+
+pub(super) fn prepare_activation<'slot>(
+    slot: &'slot mut yah_compose::ComponentSlot,
+    epoch: yah_compose::ProviderSelectionEpoch,
+    driver: Arc<dyn PluginDriver>,
+) -> Result<HostPluginActivation<'slot>, HostPluginActivationError> {
+    let revision_id = driver.revision_id().clone();
+    let entrypoint = match driver.kind() {
+        DriverKind::BuiltinRust => PluginEntrypoint::BuiltinRust {},
+        DriverKind::WasmComponent => PluginEntrypoint::WasmComponent {
+            path: PackageRelativePath::new("plugin.wasm").unwrap(),
+        },
+        DriverKind::NodeProcess => PluginEntrypoint::NodeProcess {
+            path: PackageRelativePath::new("plugin.js").unwrap(),
+        },
+        DriverKind::PythonProcess => PluginEntrypoint::PythonProcess {
+            path: PackageRelativePath::new("plugin.py").unwrap(),
+        },
+    };
+    let manifest = PluginManifest::new(
+        revision_id.package_id().clone(),
+        revision_id.version().clone(),
+        SdkVersionRequirement::new(">=0.1.0, <0.2.0").unwrap(),
+        entrypoint,
+        vec![],
+        vec![],
+        vec![],
+    )
+    .unwrap();
+    let revision = PluginRevision::new(manifest, revision_id.package_digest().clone());
+    let grants = EffectiveCapabilityGrants::empty(&revision);
+    let broker = CapabilityBroker::new().unwrap();
+    HostPluginActivation::prepare(slot, epoch, &broker, &grants, driver)
+}
 
 #[derive(Clone, Default)]
 pub(super) struct Gate {

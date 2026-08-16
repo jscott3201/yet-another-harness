@@ -250,6 +250,14 @@ impl ReconciledComponent {
         Ok(resources.effects.defer_async(label, cleanup)?)
     }
 
+    /// Join the exact activation's synchronous pre-cleanup activity drain.
+    pub fn activity(
+        &self,
+        selection_epoch: ProviderSelectionEpoch,
+    ) -> Result<crate::ScopeActivity, ReconcileError> {
+        Ok(self.resources(selection_epoch)?.effects.scope_activity())
+    }
+
     /// Observe cancellation for this exact activation without receiving
     /// cancellation authority.
     pub fn cancellation(
