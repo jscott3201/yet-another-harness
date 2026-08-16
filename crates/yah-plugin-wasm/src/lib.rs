@@ -14,12 +14,14 @@ pub mod bindings;
 pub mod driver;
 pub mod guest;
 pub mod host;
+pub mod limits;
 
 pub use driver::{
     ResourceState, WasmActivationPlan, WasmComponentDriver, WasmDriverBuildError, WasmObserver,
 };
 pub use guest::GuestProgram;
 pub use host::{HostObserver, HostState, LogRecord, RETAINED_LOG_RECORDS};
+pub use limits::{EpochTicker, GuestInterrupt, WasmLimits};
 
 /// Fully versioned WIT package the driver and contract tests share.
 pub const WIT_PACKAGE: &str = "yah:plugin@0.1.0";

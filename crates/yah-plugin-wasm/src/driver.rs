@@ -6,25 +6,28 @@
 //! guest deactivation hook, so `deactivate` drops the store outright rather than
 //! asking guest code to cooperate.
 //!
-//! This driver does not load packages, enforce resource, deadline, fuel, or
-//! host-call limits, transport granted capabilities across the ABI, or contain
-//! hostile guest code. Those remain later roadmap slices.
+//! Every activation runs under the host-owned bounds in [`crate::limits`]: a
+//! total memory and table ceiling, a call deadline that stops a guest which
+//! will not stop itself, and a cap on what one guest-to-host call may transfer.
 //!
-//! One consequence of having no interruption mechanism: the store lock is held
-//! for the duration of a guest call, so a guest that never returns also blocks
-//! that activation's deactivation. Only host-owned limits can fix that, and
-//! they are not implemented here.
+//! The store lock is still held for the duration of a guest call, so a guest
+//! that will not return delays its own deactivation. Deactivation stops the
+//! guest before asking for that lock, which is what bounds the delay.
+//!
+//! This driver does not load packages, meter fuel, transport granted
+//! capabilities across the ABI, or contain hostile guest code. Bounding what a
+//! guest costs is not isolating what it can reach.
 
 use std::{
     collections::{HashMap, VecDeque},
     sync::{
         Arc, Mutex,
-        atomic::{AtomicU8, AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering},
     },
 };
 
 use wasmtime::{
-    Engine, Store,
+    Config, Engine, ResourceLimiter, Store,
     component::{Component, HasSelf, Linker},
 };
 use yah_plugin_host::{
@@ -38,6 +41,7 @@ use crate::{
     bindings::Conformance,
     guest::GuestProgram,
     host::{HostObserver, HostState},
+    limits::{EpochTicker, GuestInterrupt, WasmLimits},
 };
 
 type ObservationMap = HashMap<PluginActivationId, Arc<ActivationObservation>>;
@@ -76,6 +80,33 @@ impl WasmActivationPlan {
     pub const fn start_failure() -> Self {
         Self {
             guest: GuestProgram::ActivateFailure,
+            start: StartBehavior::CallActivate,
+            deactivate: DeactivateBehavior::Release,
+        }
+    }
+
+    /// Instantiate a guest that never returns, so the deadline must stop it.
+    pub const fn runaway() -> Self {
+        Self {
+            guest: GuestProgram::Runaway,
+            start: StartBehavior::CallActivate,
+            deactivate: DeactivateBehavior::Release,
+        }
+    }
+
+    /// Instantiate a guest that grows memory until the ceiling refuses.
+    pub const fn memory_hog() -> Self {
+        Self {
+            guest: GuestProgram::MemoryHog,
+            start: StartBehavior::CallActivate,
+            deactivate: DeactivateBehavior::Release,
+        }
+    }
+
+    /// Instantiate a guest whose memory is spread across several memories.
+    pub const fn multi_memory() -> Self {
+        Self {
+            guest: GuestProgram::MultiMemory,
             start: StartBehavior::CallActivate,
             deactivate: DeactivateBehavior::Release,
         }
@@ -146,6 +177,15 @@ impl WasmObserver {
             .map_or(0, |state| state.deactivation_calls.load(Ordering::Acquire))
     }
 
+    /// Whether this activation recorded a failure that leaves it unusable.
+    ///
+    /// Wasmtime poisons a whole store on any failed guest invocation, so this
+    /// is a terminal fact rather than a transient one.
+    pub fn is_faulted(&self, id: &PluginActivationId) -> bool {
+        self.observation(id)
+            .is_some_and(|state| state.faulted.load(Ordering::Acquire))
+    }
+
     /// Host-side view of this activation's imports.
     ///
     /// The checked-in fixtures import nothing, so for them this only ever
@@ -177,9 +217,12 @@ struct ActivationScript {
 pub struct WasmComponentDriver {
     revision: PluginRevisionId,
     engine: Engine,
+    limits: WasmLimits,
     components: HashMap<GuestProgram, Component>,
     script: Mutex<ActivationScript>,
     observations: Arc<Mutex<ObservationMap>>,
+    /// Kept alive for the driver's lifetime; dropping it stops the ticker.
+    _ticker: EpochTicker,
 }
 
 impl WasmComponentDriver {
@@ -192,8 +235,25 @@ impl WasmComponentDriver {
         revision: PluginRevisionId,
         plans: impl IntoIterator<Item = WasmActivationPlan>,
     ) -> Result<(Arc<dyn PluginDriver>, WasmObserver), WasmDriverBuildError> {
+        Self::scripted_with_limits(revision, plans, WasmLimits::default())
+    }
+
+    /// Script the driver with explicit bounds.
+    ///
+    /// Tests use this to make a limit reachable in a reasonable wall clock. The
+    /// bounds are host-owned in either case: no component influences them.
+    pub fn scripted_with_limits(
+        revision: PluginRevisionId,
+        plans: impl IntoIterator<Item = WasmActivationPlan>,
+        limits: WasmLimits,
+    ) -> Result<(Arc<dyn PluginDriver>, WasmObserver), WasmDriverBuildError> {
         let plans: VecDeque<WasmActivationPlan> = plans.into_iter().collect();
-        let engine = Engine::default();
+        let mut config = Config::new();
+        config.epoch_interruption(true);
+        let engine = Engine::new(&config).map_err(|error| {
+            WasmDriverBuildError::new(format!("engine did not accept its configuration: {error}"))
+        })?;
+        let ticker = EpochTicker::start(&engine, limits.epoch_tick);
         let mut components = HashMap::new();
         for plan in &plans {
             if let std::collections::hash_map::Entry::Vacant(slot) = components.entry(plan.guest) {
@@ -213,12 +273,14 @@ impl WasmComponentDriver {
         let driver: Arc<dyn PluginDriver> = Arc::new(Self {
             revision,
             engine,
+            limits,
             components,
             script: Mutex::new(ActivationScript {
                 pending: plans,
                 assigned: HashMap::new(),
             }),
             observations,
+            _ticker: ticker,
         });
         Ok((driver, observer))
     }
@@ -278,6 +340,8 @@ impl PluginDriver for WasmComponentDriver {
             core: Arc::new(ActivationCore {
                 engine: self.engine.clone(),
                 component,
+                limits: self.limits,
+                interrupt: GuestInterrupt::new(),
                 observation,
                 live: Mutex::new(None),
             }),
@@ -309,6 +373,8 @@ struct PreparedWasmActivation {
 struct ActivationCore {
     engine: Engine,
     component: Component,
+    limits: WasmLimits,
+    interrupt: GuestInterrupt,
     observation: Arc<ActivationObservation>,
     live: Mutex<Option<LiveInstance>>,
 }
@@ -320,10 +386,35 @@ impl ActivationCore {
             .map_err(|error| {
                 DriverActivationError::failed(format!("host imports did not link: {error}"))
             })?;
-        let mut store = Store::new(&self.engine, HostState::new(self.observation.host.clone()));
-        let bindings =
-            Conformance::instantiate(&mut store, &self.component, &linker).map_err(|error| {
-                DriverActivationError::failed(format!("component did not instantiate: {error}"))
+        let mut store = Store::new(
+            &self.engine,
+            HostState::with_limits(self.observation.host.clone(), self.limits),
+        );
+        store.limiter(|state: &mut HostState| state.limiter() as &mut dyn ResourceLimiter);
+        // A guest can alias every element of a list at one buffer, so the
+        // memory ceiling does not bound what a single call costs the host.
+        // This does.
+        store.set_hostcall_fuel(self.limits.host_call_bytes);
+
+        // A store's epoch deadline starts at zero, which has already elapsed,
+        // so this has to be set before anything runs guest code - including
+        // instantiation, which runs the component's own initialisation.
+        //
+        // Extending one tick at a time keeps the decision in the callback,
+        // which is the only place a stuck call can be reached from.
+        let interrupt = self.interrupt.clone();
+        let budget = self.limits.call_budget_ticks;
+        store.set_epoch_deadline(1);
+        store.epoch_deadline_callback(move |_| Ok(interrupt.on_deadline(budget)));
+        self.interrupt.begin_call();
+
+        let bindings = self
+            .guarded(|| Conformance::instantiate(&mut store, &self.component, &linker))
+            .map_err(|error| {
+                self.fault(format!(
+                    "component did not instantiate: {}",
+                    describe_guest_failure("instantiation", &error)
+                ))
             })?;
         *self
             .live
@@ -337,6 +428,16 @@ impl ActivationCore {
     }
 
     fn call_activate(&self) -> Result<(), DriverActivationError> {
+        // A killed activation must not enter the guest at all. The epoch
+        // deadline only stops a call already in flight, and it only stops one
+        // that runs long enough to reach a deadline: a short call returns
+        // before the epoch ever advances and would never consult the flag. So
+        // the flag is also read here, where entry is the thing being decided.
+        if self.interrupt.is_killed() {
+            return Err(DriverActivationError::failed(
+                "activation was stopped before activate could run",
+            ));
+        }
         let mut guard = self
             .live
             .lock()
@@ -344,19 +445,62 @@ impl ActivationCore {
         let live = guard.as_mut().ok_or_else(|| {
             DriverActivationError::failed("activation store was released before activate")
         })?;
-        let called = live
-            .bindings
-            .yah_plugin_lifecycle()
-            .call_activate(&mut live.store)
-            .map_err(|error| {
-                DriverActivationError::failed(format!("guest activate trapped: {error}"))
-            })?;
+        // Re-arm for this call. The deadline is absolute, so a store that has
+        // been idle since instantiation is already past the one it was given,
+        // and the guest would be charged for time it never ran.
+        live.store.set_epoch_deadline(1);
+        self.interrupt.begin_call();
+        let called = self
+            .guarded(|| {
+                live.bindings
+                    .yah_plugin_lifecycle()
+                    .call_activate(&mut live.store)
+            })
+            .map_err(|error| self.fault(describe_guest_failure("activate", &error)))?;
+        // A returned `guest-error` is an ordinary ABI return: the guest chose to
+        // refuse, nothing trapped, and the store is still usable. Recording it
+        // as a fault would make `health` report a store that cannot be entered
+        // when it can.
         called.map_err(|error| {
             DriverActivationError::failed(format!(
                 "guest activate returned {:?}: {}",
                 error.code, error.message
             ))
         })
+    }
+
+    /// Run one guest call so a panic cannot escape into the host.
+    ///
+    /// A trap unwinds no Rust frames, but a panicking host import does - and it
+    /// bypasses the flag Wasmtime sets on a trapping store, leaving a store
+    /// that still looks callable behind guest frames that were abandoned
+    /// mid-execution. Catching here turns that into an ordinary activation
+    /// failure whose store `deactivate` still owns and releases.
+    fn guarded<T>(&self, call: impl FnOnce() -> wasmtime::Result<T>) -> wasmtime::Result<T> {
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(call)) {
+            Ok(result) => result,
+            Err(panic) => {
+                let summary = panic
+                    .downcast_ref::<&str>()
+                    .map(|text| (*text).to_owned())
+                    .or_else(|| panic.downcast_ref::<String>().cloned())
+                    .unwrap_or_else(|| "unknown panic".to_owned());
+                Err(wasmtime::Error::msg(format!(
+                    "host code panicked while guest code was running: {summary}"
+                )))
+            }
+        }
+    }
+
+    /// Record that this activation can never serve another guest call.
+    ///
+    /// Wasmtime poisons the whole store on any failed invocation, so a faulted
+    /// activation is known-bad rather than merely unknown. The store stays
+    /// owned here: releasing it is `deactivate`'s job, and the host contract
+    /// requires a failed start to keep its partial resource for cleanup.
+    fn fault(&self, summary: String) -> DriverActivationError {
+        self.observation.faulted.store(true, Ordering::Release);
+        DriverActivationError::failed(summary)
     }
 }
 
@@ -386,6 +530,14 @@ impl PreparedDriverActivation for PreparedWasmActivation {
     }
 
     fn health(&self) -> Result<PluginHealth, DriverHealthError> {
+        // A faulted store is known-bad, not unknown, so this reports rather
+        // than errors. Both reads are atomics: health must never wait on the
+        // lock a guest call holds.
+        if self.core.observation.faulted.load(Ordering::Acquire) {
+            return Ok(PluginHealth::unhealthy(
+                "wasm activation cannot be entered again after a guest failure",
+            ));
+        }
         if self.core.observation.resource_state().ok() == Some(ResourceState::Live) {
             Ok(PluginHealth::Healthy)
         } else {
@@ -410,6 +562,10 @@ impl PreparedDriverActivation for PreparedWasmActivation {
             observation
                 .deactivation_calls
                 .fetch_add(1, Ordering::AcqRel);
+            // Stop any guest call still running before asking for the lock it
+            // holds. Without this the wait is bounded only by whatever the
+            // guest chooses to do next, which for a runaway guest is nothing.
+            core.interrupt.kill();
             // Dropping the store releases the instance, its memories, and every
             // host binding the linker installed. No guest hook participates.
             //
@@ -425,6 +581,10 @@ impl PreparedDriverActivation for PreparedWasmActivation {
                 .take();
             if released.is_some() {
                 drop(released);
+                // The observation outlives the store deliberately, but its
+                // retained log records are guest-sized. Counters are evidence
+                // and stay; the bytes do not.
+                observation.host.release_records();
                 observation
                     .resource
                     .store(ResourceState::Released as u8, Ordering::Release);
@@ -441,6 +601,7 @@ impl PreparedDriverActivation for PreparedWasmActivation {
 
 struct ActivationObservation {
     resource: AtomicU8,
+    faulted: AtomicBool,
     deactivation_calls: AtomicUsize,
     host: HostObserver,
 }
@@ -449,6 +610,7 @@ impl ActivationObservation {
     fn new(host: HostObserver) -> Self {
         Self {
             resource: AtomicU8::new(ResourceState::NotAcquired as u8),
+            faulted: AtomicBool::new(false),
             deactivation_calls: AtomicUsize::new(0),
             host,
         }
@@ -470,4 +632,25 @@ pub enum ResourceState {
     NotAcquired = 0,
     Live = 1,
     Released = 2,
+}
+
+/// Name the limit that stopped a guest, rather than pass the trap through raw.
+///
+/// The summary is the only place the reason survives into the host's error, so
+/// "the deadline killed it" and "the guest executed a bad instruction" must not
+/// arrive looking the same.
+fn describe_guest_failure(call: &str, error: &wasmtime::Error) -> String {
+    match error.downcast_ref::<wasmtime::Trap>() {
+        Some(wasmtime::Trap::Interrupt) => {
+            format!("guest {call} exceeded its call deadline and was interrupted by the host")
+        }
+        Some(wasmtime::Trap::OutOfFuel) => {
+            format!("guest {call} exhausted its fuel budget")
+        }
+        Some(wasmtime::Trap::CannotEnterComponent) => {
+            format!("guest {call} was refused because an earlier failure poisoned this activation")
+        }
+        Some(trap) => format!("guest {call} trapped: {trap}"),
+        None => format!("guest {call} failed: {error}"),
+    }
 }

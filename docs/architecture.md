@@ -282,10 +282,12 @@ be repaired by optimistic labeling.
 
 The WIT draft contains only explicitly named baseline interfaces and no WASI
 imports, and the Wasm driver links exactly those, though its checked-in
-fixtures import nothing and so never call back. It does not yet enforce
-memory, deadline, fuel, or host-call limits, so it may run only the
-checked-in fixture corpus and not untrusted code. Full-language workers will be
-launched through
+fixtures import nothing and so never call back. It enforces host-owned memory
+and table ceilings and a call deadline that terminates a guest which will not
+stop, and it bounds what one host call may retain. Those are resource bounds,
+not isolation: guest code still runs in the authority process, so the driver may
+run only the checked-in fixture corpus and not untrusted code. Full-language
+workers will be launched through
 a selected sandbox backend. Each backend must advertise and be tested for the
 controls it actually enforces; unsupported required controls must fail
 admission. No plugin sandbox is implemented or audited yet.

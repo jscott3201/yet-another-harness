@@ -238,9 +238,12 @@ executes against it. Pinned Wasmtime and `wit-bindgen` macros compile host and
 guest Rust bindings from the same versioned source, parser tests freeze its two
 baseline imports and two fixture exports, and a Wasmtime driver compiles
 checked-in component fixtures, gives each activation its own store, and drops
-that store to deactivate without asking guest code. It loads no plugin package
-and enforces no memory, deadline, fuel, or host-call limit, so it runs only its
-own fixtures and makes no capability-transport, WASI, or sandbox claim.
+that store to deactivate without asking guest code. It loads no plugin package.
+It enforces host-owned memory and table ceilings, a call deadline that stops a
+guest which will not stop itself, and a bound on what one host call may retain.
+Those bound a guest's cost, not its authority: it still runs in the host
+process, so the driver runs only its own fixtures and makes no
+capability-transport, WASI, or sandbox claim.
 
 The repository already contains a model-free Rust kernel and evidence harness:
 

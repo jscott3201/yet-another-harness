@@ -10,14 +10,16 @@ use std::sync::{
     atomic::{AtomicBool, AtomicUsize, Ordering},
 };
 
-use crate::bindings::yah::plugin::{cancellation, logging};
+use crate::{
+    bindings::yah::plugin::{cancellation, logging},
+    limits::{ActivationLimiter, WasmLimits},
+};
 
 /// How many log records one activation retains before the host stops storing.
 ///
 /// A guest controls how often it logs, so unbounded retention would let it grow
 /// host memory without touching a capability. Dropped records are counted so
-/// the loss stays visible instead of silent. Byte bounds on the strings
-/// themselves belong with the rest of the resource limits.
+/// the loss stays visible instead of silent.
 pub const RETAINED_LOG_RECORDS: usize = 64;
 
 /// One structured record a guest emitted through the `logging` import.
@@ -45,6 +47,7 @@ pub struct HostObserver {
     source: Option<CancellationSource>,
     records: Arc<Mutex<Vec<LogRecord>>>,
     dropped: Arc<AtomicUsize>,
+    truncated: Arc<AtomicUsize>,
     cancellation_polls: Arc<AtomicUsize>,
 }
 
@@ -86,23 +89,59 @@ impl HostObserver {
         self.dropped.load(Ordering::Acquire)
     }
 
+    /// Drop retained records, keeping the counts that describe them.
+    ///
+    /// Record contents are guest-sized, so an observation that outlives its
+    /// store must not keep them. What was seen, dropped, and clipped is small
+    /// and stays.
+    pub fn release_records(&self) {
+        self.records
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clear();
+    }
+
+    /// Values clipped to the byte ceiling, counted so the loss is not silent.
+    pub fn truncated_values(&self) -> usize {
+        self.truncated.load(Ordering::Acquire)
+    }
+
     pub fn cancellation_polls(&self) -> usize {
         self.cancellation_polls.load(Ordering::Acquire)
     }
 }
 
 /// Per-store host state handed to the generated import implementations.
+///
+/// The store's resource limiter lives here because Wasmtime resolves it through
+/// the store's data, so the ceilings travel with the activation rather than
+/// with the engine every activation shares.
 pub struct HostState {
     observer: HostObserver,
+    limits: WasmLimits,
+    limiter: ActivationLimiter,
 }
 
 impl HostState {
-    pub const fn new(observer: HostObserver) -> Self {
-        Self { observer }
+    pub fn new(observer: HostObserver) -> Self {
+        Self::with_limits(observer, WasmLimits::default())
+    }
+
+    pub fn with_limits(observer: HostObserver, limits: WasmLimits) -> Self {
+        Self {
+            observer,
+            limits,
+            limiter: limits.limiter(),
+        }
     }
 
     pub const fn observer(&self) -> &HostObserver {
         &self.observer
+    }
+
+    /// The ceilings Wasmtime consults when the guest asks to grow.
+    pub const fn limiter(&mut self) -> &mut ActivationLimiter {
+        &mut self.limiter
     }
 }
 
@@ -117,15 +156,45 @@ impl logging::Host for HostState {
             self.observer.dropped.fetch_add(1, Ordering::AcqRel);
             return;
         }
+        // A guest chooses how large each value is, so the count bound alone
+        // does not bound the bytes. Retention is truncated rather than refused:
+        // the record is evidence, and a clipped record is better evidence than
+        // none. Truncation is counted so the doc claim stays checkable.
+        let message = truncate_utf8(message, self.limits.max_log_message_bytes, &self.observer);
+        let fields = fields
+            .into_iter()
+            .take(self.limits.max_log_fields)
+            .map(|field| {
+                (
+                    truncate_utf8(field.key, self.limits.max_log_message_bytes, &self.observer),
+                    truncate_utf8(
+                        field.value,
+                        self.limits.max_log_message_bytes,
+                        &self.observer,
+                    ),
+                )
+            })
+            .collect::<Vec<_>>();
         records.push(LogRecord {
             level,
             message,
-            fields: fields
-                .into_iter()
-                .map(|field| (field.key, field.value))
-                .collect(),
+            fields,
         });
     }
+}
+
+/// Clip `value` to `limit` bytes without splitting a character.
+fn truncate_utf8(mut value: String, limit: usize, observer: &HostObserver) -> String {
+    if value.len() <= limit {
+        return value;
+    }
+    observer.truncated.fetch_add(1, Ordering::AcqRel);
+    let mut end = limit;
+    while end > 0 && !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    value.truncate(end);
+    value
 }
 
 impl cancellation::Host for HostState {

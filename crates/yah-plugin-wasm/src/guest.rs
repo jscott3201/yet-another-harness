@@ -18,6 +18,12 @@ pub enum GuestProgram {
     Conformant,
     /// Activates with a returned `guest-error` rather than a trap.
     ActivateFailure,
+    /// Never returns from `activate`, so only the host's deadline stops it.
+    Runaway,
+    /// Grows linear memory a fixed number of pages, trapping if refused.
+    MemoryHog,
+    /// Declares two linear memories, to test that the ceiling is a total.
+    MultiMemory,
 }
 
 impl GuestProgram {
@@ -26,9 +32,15 @@ impl GuestProgram {
         match self {
             Self::Conformant => CONFORMANT,
             Self::ActivateFailure => ACTIVATE_FAILURE,
+            Self::Runaway => RUNAWAY,
+            Self::MemoryHog => MEMORY_HOG,
+            Self::MultiMemory => MULTI_MEMORY,
         }
     }
 }
 
 const CONFORMANT: &str = include_str!("../guests/conformant.wat");
 const ACTIVATE_FAILURE: &str = include_str!("../guests/activate-failure.wat");
+const RUNAWAY: &str = include_str!("../guests/runaway.wat");
+const MEMORY_HOG: &str = include_str!("../guests/memory-hog.wat");
+const MULTI_MEMORY: &str = include_str!("../guests/multi-memory.wat");
