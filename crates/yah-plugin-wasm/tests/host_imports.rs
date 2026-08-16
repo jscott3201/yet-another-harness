@@ -15,7 +15,7 @@ use wasmtime::{
     component::{Component, HasSelf, Linker},
 };
 use yah_plugin_wasm::{
-    GuestProgram, RETAINED_LOG_RECORDS,
+    GuestProgram, LogRecord, RETAINED_LOG_RECORDS, WasmLimits,
     bindings::{
         Conformance,
         yah::plugin::{
@@ -103,5 +103,181 @@ fn fixture_allocator_traps_instead_of_returning_an_out_of_range_pointer() {
     assert!(
         reported.contains("wasm backtrace"),
         "expected a guest-side trap: {reported}"
+    );
+}
+
+#[test]
+fn log_values_are_clipped_to_the_byte_ceiling_and_the_loss_is_counted() {
+    let limits = WasmLimits {
+        max_log_message_bytes: 16,
+        max_log_fields: 2,
+        ..WasmLimits::default()
+    };
+    let observer = HostObserver::new();
+    let mut state = HostState::with_limits(observer.clone(), limits);
+
+    // A multi-byte character straddling the ceiling must not be split. The
+    // character is three bytes and the ceiling is 16, so no whole number of
+    // them lands on the boundary: the clip *must* step back to 15 to stay on a
+    // character boundary. A two-byte character would divide the ceiling evenly
+    // and never exercise that step.
+    state.log(
+        LogLevel::Warn,
+        "…".repeat(40),
+        (0..10)
+            .map(|index| LogField {
+                key: format!("k{index}"),
+                value: "v".repeat(100),
+            })
+            .collect(),
+    );
+
+    let records = observer.records();
+    assert_eq!(records.len(), 1);
+    // 15, not 16: the ceiling is not a multiple of the character width, so the
+    // clip had to walk back. Asserting the exact length is what makes a
+    // regression to naive byte truncation fail here.
+    assert_eq!(
+        records[0].message.len(),
+        15,
+        "clip must stop at the last whole character below the ceiling: {:?}",
+        records[0].message
+    );
+    assert!(
+        records[0].message.chars().all(|c| c == '…'),
+        "clipping split a character: {:?}",
+        records[0].message
+    );
+    assert_eq!(records[0].fields.len(), limits.max_log_fields);
+    assert!(observer.truncated_values() > 0);
+
+    // Clipping the length is not the ceiling; releasing the guest's allocation
+    // is. `String::truncate` moves `len` and leaves `capacity` alone, so a
+    // record clipped in place would still hold every byte the guest sent -
+    // 4 KiB of message here against a 16-byte ceiling. Reading capacity from
+    // the stored records is the only assertion that can see that; the clones
+    // `records()` returns have capacity exactly equal to their length.
+    let per_record = limits.max_log_message_bytes
+        + limits.max_log_fields * 2 * limits.max_log_message_bytes
+        + limits.max_log_fields * std::mem::size_of::<(String, String)>();
+    let ceiling =
+        records.len() * per_record + RETAINED_LOG_RECORDS * std::mem::size_of::<LogRecord>();
+    assert!(
+        observer.retained_bytes() <= ceiling,
+        "host retains {} bytes against a ceiling of {ceiling}",
+        observer.retained_bytes()
+    );
+}
+
+#[test]
+fn the_epoch_ticker_thread_stops_when_its_ticker_is_dropped() {
+    let mut config = wasmtime::Config::new();
+    config.epoch_interruption(true);
+    let engine = Engine::new(&config).expect("engine accepts epoch interruption");
+
+    let tick = std::time::Duration::from_millis(5);
+    let ticker = yah_plugin_wasm::EpochTicker::start(&engine, tick);
+    let counter = ticker.tick_counter();
+
+    std::thread::sleep(tick * 20);
+    assert!(
+        counter.load(std::sync::atomic::Ordering::Acquire) > 0,
+        "a live ticker must advance the epoch"
+    );
+
+    drop(ticker);
+    let after_drop = counter.load(std::sync::atomic::Ordering::Acquire);
+    std::thread::sleep(tick * 20);
+    let settled = counter.load(std::sync::atomic::Ordering::Acquire);
+
+    // At most one tick may land: the thread reads the stop flag between sleeps.
+    // The sleeps above are a wide multiple of the tick so a loaded machine
+    // still sees the thread run before the drop and stop after it.
+    assert!(
+        settled <= after_drop + 1,
+        "the ticker thread kept running after its ticker was dropped: {after_drop} -> {settled}"
+    );
+}
+
+#[test]
+fn a_flood_of_empty_fields_does_not_leave_the_host_holding_the_guest_vector() {
+    // The escape a string-only ceiling cannot see. Every field here is two
+    // empty strings, so every string capacity is zero and a metric that counted
+    // only strings would report nothing - while the vector carrying them is
+    // sized by the guest. Building the record through `collect` would hand that
+    // vector straight to the host, because `LogField` and `(String, String)`
+    // have the same layout and Rust reuses the buffer in place.
+    let limits = WasmLimits {
+        max_log_fields: 2,
+        ..WasmLimits::default()
+    };
+    let observer = HostObserver::new();
+    let mut state = HostState::with_limits(observer.clone(), limits);
+
+    let flood = 20_000;
+    state.log(
+        LogLevel::Warn,
+        String::new(),
+        (0..flood)
+            .map(|_| LogField {
+                key: String::new(),
+                value: String::new(),
+            })
+            .collect(),
+    );
+
+    let records = observer.records();
+    assert_eq!(records[0].fields.len(), limits.max_log_fields);
+    let guest_sized = flood * std::mem::size_of::<(String, String)>();
+    assert!(
+        observer.retained_bytes() < guest_sized / 100,
+        "host retains {} bytes of a {guest_sized}-byte guest vector",
+        observer.retained_bytes()
+    );
+}
+
+#[test]
+fn values_under_the_ceiling_do_not_retain_the_allocation_they_arrived_in() {
+    // A string can sit under the byte ceiling and still carry a large
+    // allocation: the canonical ABI sizes the buffer from the guest's chosen
+    // string encoding, and decoding `latin1+utf16` allocates about twice the
+    // byte length. Nothing here is clipped - `truncated_values` stays zero -
+    // so this exercises the path where the host does no work and must still
+    // not keep what it was handed.
+    let limits = WasmLimits {
+        max_log_message_bytes: 4096,
+        max_log_fields: 4,
+        ..WasmLimits::default()
+    };
+    let observer = HostObserver::new();
+    let mut state = HostState::with_limits(observer.clone(), limits);
+
+    let slack = 1024 * 1024;
+    let roomy = || {
+        let mut value = String::with_capacity(slack);
+        value.push_str("under the ceiling");
+        value
+    };
+    state.log(
+        LogLevel::Info,
+        roomy(),
+        (0..limits.max_log_fields)
+            .map(|_| LogField {
+                key: roomy(),
+                value: roomy(),
+            })
+            .collect(),
+    );
+
+    assert_eq!(
+        observer.truncated_values(),
+        0,
+        "nothing here exceeds the byte ceiling by length"
+    );
+    let arrived_in = (1 + 2 * limits.max_log_fields) * slack;
+    assert!(
+        observer.retained_bytes() < arrived_in / 100,
+        "host retains {} bytes of the {arrived_in} it was handed",
+        observer.retained_bytes()
     );
 }

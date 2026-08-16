@@ -119,10 +119,11 @@ versions: the latest stable CPython line, the current Node.js release and active
 LTS line, modern ESM, and contemporary TypeScript syntax.
 
 Untrusted Python, JavaScript, and native code will not execute inside the Rust
-authority process. In-process Wasm is a target only when explicit WIT imports
-and host-enforced resource limits are in place. Node and Python plugins will
-run in supervised worker processes constrained by an OS sandbox, container, or
-stronger isolation backend. Runtime permission switches are defense in depth,
+authority process. In-process Wasm is a target only when explicit WIT imports,
+host-enforced resource limits, and containment for hostile guest code are all in
+place; the first two now exist for the fixture corpus and the third does not.
+Node and Python plugins will run in supervised worker processes constrained by
+an OS sandbox, container, or stronger isolation backend. Runtime permission switches are defense in depth,
 not the security boundary. No plugin sandbox has been implemented or audited
 yet.
 
@@ -238,9 +239,16 @@ executes against it. Pinned Wasmtime and `wit-bindgen` macros compile host and
 guest Rust bindings from the same versioned source, parser tests freeze its two
 baseline imports and two fixture exports, and a Wasmtime driver compiles
 checked-in component fixtures, gives each activation its own store, and drops
-that store to deactivate without asking guest code. It loads no plugin package
-and enforces no memory, deadline, fuel, or host-call limit, so it runs only its
-own fixtures and makes no capability-transport, WASI, or sandbox claim.
+that store to deactivate without asking guest code. It loads no plugin package.
+It enforces host-owned ceilings on an activation's total memory and table size
+and on how many memories, tables, and instances it may hold, a call deadline
+that stops a guest which will not stop itself, and caps on what one guest-to-host
+call may transfer and what the host retains from it. Ceilings are proved in
+pairs — the same guest refused under a tight ceiling and admitted under a
+generous one — so a failure is attributable to the ceiling rather than to the
+fixture. Those bound a guest's cost, not its authority: guest code still runs in
+the host process, so the driver runs only its own fixtures and makes no
+capability-transport, WASI, or sandbox claim.
 
 The repository already contains a model-free Rust kernel and evidence harness:
 

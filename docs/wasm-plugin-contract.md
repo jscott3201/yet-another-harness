@@ -3,7 +3,8 @@
 YAH's first WebAssembly Component Model contract is a pre-1.0 conformance
 world. It fixes the smallest host/guest shape needed for the first driver, and
 a Wasmtime-backed driver now compiles, instantiates, and calls components
-against it. Packaging, resource limits, and containment are not part of it.
+against it under host-owned resource and deadline limits. Packaging and
+hostile-code containment are not part of it.
 
 The canonical source is
 [`crates/yah-plugin-wasm/wit/yah-plugin.wit`](../crates/yah-plugin-wasm/wit/yah-plugin.wit):
@@ -98,15 +99,76 @@ every host binding the linker installed, and it does not consult guest code:
 the world exports no guest deactivation hook, so a faulty guest is never asked
 to agree to its own shutdown.
 
-That is not yet the same as being unable to delay it. The store lock is held
-for the duration of a guest call, so a guest that never returns from `activate`
-also blocks that activation's deactivation. Nothing here can interrupt running
-guest code; only the deadline and interruption limits below can, and they are
-not implemented.
+A guest that never returns can still delay its own teardown, but only for a
+bounded time. Deactivation stops the guest before asking for the lock it holds,
+and the guest reaches that decision at its next epoch deadline. A stop is also
+read on the way into a call, not only at a deadline: a call short enough to
+return before the epoch advances would otherwise never consult it.
+
+The mechanism's own bound is a single tick: once deactivation raises the stop,
+the next deadline the guest reaches ends the call. A case does kill a live call
+— under a budget large enough that only the kill can end it — so the stop is
+demonstrated. The *one-tick* figure is not: that case bounds the stop generously
+rather than at one tick, because a tight bound would fail on a loaded machine
+for reasons that have nothing to do with the mechanism.
 
 The driver passes the five portable host lifecycle cases, and a separate smoke
 test compiles a component, activates it, calls `fixture-tool.invoke`, and drops
 the store.
+
+### Limits
+
+Every activation runs under host-owned bounds it cannot raise. Two of them work
+differently, and the difference matters.
+
+A memory or table ceiling *refuses*. The guest asks to grow, the host declines,
+and `memory.grow` answers -1 — a value the guest can see and handle. A guest
+that ignores the refusal fails on its own terms.
+
+A memory claimed at instantiation is the same refusal with nowhere to put the
+answer. The limiter still sees the request, but there is no `memory.grow`
+instruction to hand -1 back to, so the refusal aborts instantiation and the
+guest never executes anything. That is the path the two-memory fixture takes.
+
+Counts are bounded as well as totals, and for a reason the totals do not cover:
+Wasmtime reserves an address-space window per linear memory whether or not that
+memory holds any pages. A memory declared with zero pages therefore costs the
+byte ceiling nothing and costs the host a reservation, so a guest bounded only
+by bytes could exhaust the host's address space without ever exceeding its
+"memory ceiling". The driver bounds the number of memories, tables, and
+instances — but not globals, which Wasmtime exposes no limiter hook for and
+which therefore have no host bound; they cost sixteen bytes apiece per core
+instance, so a component may spend them freely up to whatever the validator
+allows. The driver sizes the per-memory reservation to the byte ceiling rather than
+leaving it at Wasmtime's 4 GiB default — including the reservation a memory
+gets when it outgrows the first one, which otherwise defaults to 2 GiB, and the
+guard region on each side, which otherwise defaults to 32 MiB and would dominate
+what a memory costs at this ceiling.
+
+A call deadline *terminates*. The world's cancellation import is advisory, so a
+guest that never asks whether it should stop would otherwise run forever. The
+driver advances its engine's epoch on a timer, and a guest that outlives its
+budget is trapped without being consulted.
+
+Deadlines are per-store and relative to the engine's epoch at the moment they
+are armed, and the driver re-arms before every call. That re-arming is load
+bearing: a deadline is absolute, so a store left idle since instantiation is
+already past the one it was given, and its next call would be charged for time
+it never ran. Because each store carries its own deadline, one timer bounds
+every activation without coupling them: the tick that kills a call out of
+budget leaves a sibling with budget untouched. Kill isolation is demonstrated —
+one activation's stop does not reach another's, on one engine under one ticker
+— but no case yet has two guest calls live at once, so the budget half of that
+sentence is a claim about the code. Deactivation uses the same mechanism to
+stop an in-flight call before waiting on the lock that call holds, which is
+what bounds teardown behind a runaway guest.
+
+The host also bounds what it retains from one `logging` call — record count,
+message bytes, and field count — and counts what it dropped or clipped, so the
+loss is visible rather than silent.
+
+These bound what a guest can *cost*. They do not bound what it can *reach*:
+guest code runs in the authority process with no sandbox.
 
 ### Fixture components
 
@@ -129,12 +191,31 @@ This slice does not provide:
 - capability-resource tables or graph, memory, artifact, tool-registry, or
   durable-effect host APIs, and no route for a guest to reach a granted
   capability;
-- WIT async/streams, deadlines, epoch interruption, fuel, memory/table limits,
-  or bounded host-call output;
+- WIT async/streams, fuel metering, or per-call output bounds on the ABI
+  itself;
 - WASI ambient authority, sandbox enforcement, malformed-component coverage,
   or cross-runtime equivalence.
 
-WIT strings and lists are not byte-bounded by this draft, and the host retains
-only a fixed number of guest log records before dropping them. Until the driver
-enforces memory, call, deadline, and output limits, this world is unsuitable
-for executing untrusted input.
+WIT strings and lists are not byte-bounded by the ABI, and the memory ceiling
+does not bound them either: a guest can point every element of a list at one
+buffer, so a small guest memory can name a very large lifted value. Two other
+things bound them. The driver sets a per-host-call byte budget on the store
+(`host_call_bytes`), charged as the canonical ABI copies a value out of guest
+memory. It bounds one call, not a store's lifetime: Wasmtime copies the
+allowance into each lift and never writes it back, so it refills per call.
+
+The host also clips and counts what it keeps from a `logging` call — record
+count, message bytes, and field count — and copies what it keeps into its own
+allocations. The copy is the point. A lifted value carries whatever capacity
+the guest's chosen string encoding produced, and a vector of fields collected
+in place would be the guest's own buffer, so retaining either as it arrived
+would retain far more than the ceiling names. This holds on the path where
+nothing is clipped as well: a value under the ceiling by length can still have
+arrived in a much larger allocation.
+
+The host-call budget is enforced but unexercised: no checked-in fixture imports
+anything, so no guest-to-host call happens anywhere in the corpus. The
+retention limits are exercised directly.
+
+Bounds are not containment: a guest still runs in the host process with no
+sandbox, so this world remains unsuitable for executing untrusted input.

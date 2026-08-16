@@ -2762,6 +2762,7 @@ dependencies = [
  "wasmtime",
  "wit-bindgen",
  "wit-parser 0.252.0",
+ "yah-compose",
  "yah-plugin-host",
 ]
 

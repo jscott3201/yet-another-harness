@@ -14,8 +14,10 @@ authoring example connects an example-only host capability to a built-in driver
 and passes the reusable lifecycle corpus. A provisional WIT conformance world
 now backs a Wasmtime driver that compiles, instantiates, and calls checked-in
 fixture components and passes the same lifecycle corpus. The repository does
-not yet contain a general callback host, package loader, guest resource limits,
-agent loop, sandbox, daemon, or client; no cross-runtime equivalence is proven.
+not yet contain a general callback host, package loader, agent loop, sandbox,
+daemon, or client. Guest resource limits exist only inside the Wasmtime driver,
+and they bound what a guest can cost, not what it can reach. No cross-runtime
+equivalence is proven.
 
 ## Evidence Status
 
@@ -29,7 +31,8 @@ agent loop, sandbox, daemon, or client; no cross-runtime equivalence is proven.
 | Activation-scoped capability broker | Revision-bound requested subsets, exact typed registrations, weak mediated handles, provider/activation ABA fencing, and synchronous call drain before cleanup | One example-only local greeting round trip passes; no policy engine, durable attempt scope, production capability family, WIT/IPC resource table, or hostile-code sandbox |
 | Host-side driver conformance | Five stable cases cover ready lifecycle, pending-start cancellation, returned start/deactivation failures, and shared-driver isolation through public host APIs | Reusable runner is reference-proven and passed by the local authoring driver; no production guest backend or cross-runtime equivalence claim |
 | Wasm Component ABI draft | Versioned `yah:plugin@0.1.0` WIT world with exact logging/cancellation imports, lifecycle/fixture-tool exports, host and guest canonical binding compilation, parser-checked interface identities, and named-source regressions | Contract evidence from three generators sharing one parser; no guest calls a host import, and no capability transport or WASI access |
-| Wasmtime component driver | Engine-owned compilation with inert preparation, one store and instance per exact activation, store-drop deactivation with no guest hook, and a smoke test that activates a component and calls its fixture tool | Passes the five portable lifecycle cases against checked-in text fixtures; no package loader, resource/deadline/fuel limits, capability transport, guest-authored component, or sandbox claim |
+| Wasmtime component driver | Engine-owned compilation with inert preparation, one store and instance per exact activation, store-drop deactivation with no guest hook, and a smoke test that activates a component and calls its fixture tool | Passes the five portable lifecycle cases against checked-in text fixtures; no package loader, capability transport, guest-authored component, or sandbox claim |
+| Wasm resource and deadline limits | Memory and table ceilings summed across every memory and table one activation owns, ceilings on how many memories, tables, and instances it may hold, a per-memory address-space reservation, growth reservation, and guard region all sized to the byte ceiling rather than to a 4 GiB memory, a per-store epoch deadline re-armed per call that terminates a guest which never returns, refusal to enter a stopped activation, and log retention that copies text and the field vector out of the allocations they arrived in, whether or not anything was clipped | Paired fixtures show the same guest refused under a tight ceiling and admitted under a generous one, a two-memory guest refused against a total its largest memory alone would clear, a many-empty-memory guest refused against a count its byte total never charges for, a runaway killed under a watchdog, a live call stopped by a kill under an effectively infinite budget, a short call refused on entry, retained host bytes asserted against the documented ceiling, a flood of empty-string fields that leaves the host holding under 1% of the vector the guest sent, and values under the byte ceiling that arrive in a large allocation and are not retained in it; the table ceiling has unit evidence only, globals are unbounded because Wasmtime exposes no limiter hook for them, the host-call byte budget and log-record release are enforced but unexercised because no checked-in fixture imports anything, and there is no fuel metering, host-call flood coverage, two-live-calls-under-one-ticker case, or sandbox claim |
 | Node/TypeScript and Python plugin drivers | No implementation in this repository | Not started |
 | Selene work, session, memory, evidence, and plugin-lineage domains | Only the current kernel graph exists | Design/spike stage |
 | Full harness vertical slice | No live model, tool execution, memory loop, or subagent | Not started |
@@ -320,8 +323,9 @@ crate or protocol boundary in advance.
   production execution backends or capability families, plugin service
   contributions, policy-derived grants, language SDKs, guest-semantic corpus,
   or demonstrated cross-runtime equivalence.
-- Guest components built from a language toolchain, Wasm resource, deadline,
-  fuel, or host-call limits, or sandboxed Node/TypeScript and CPython workers.
+- Guest components built from a language toolchain, any guest that calls a host
+  import, fuel metering, host-call flood coverage, or sandboxed Node/TypeScript
+  and CPython workers.
 - Durable memory capture, retrieval, ranking, summaries, or evidence lineage.
 - Live model providers, prompt assembly, tool execution, workflows, schedules,
   goals, or subagents.

@@ -5,15 +5,17 @@
 //! semantics: it says nothing about what the guest computed, only that the
 //! driver acquired, reported, and released one activation correctly.
 
+#[path = "support/fixtures.rs"]
+mod fixtures;
+
 use std::sync::Arc;
 
+use fixtures::{case_digest, revision};
 use yah_plugin_host::{
     DriverConformanceCase, DriverConformanceProbe, DriverConformanceProbeError,
     DriverConformanceReport, DriverConformanceResourceState, DriverConformanceSetupError,
-    DriverConformanceSubject, DriverConformanceTarget, DriverKind, PackageDigest,
-    PackageRelativePath, PluginActivationId, PluginEntrypoint, PluginManifest, PluginPackageId,
-    PluginRevision, PluginVersion, SdkVersionRequirement, run_driver_conformance,
-    run_driver_conformance_case,
+    DriverConformanceSubject, DriverConformanceTarget, DriverKind, PluginActivationId,
+    run_driver_conformance, run_driver_conformance_case,
 };
 use yah_plugin_wasm::{ResourceState, WasmActivationPlan, WasmComponentDriver, WasmObserver};
 
@@ -79,55 +81,6 @@ impl DriverConformanceProbe for WasmProbe {
                 ResourceState::Released => DriverConformanceResourceState::Released,
             })
             .map_err(DriverConformanceProbeError::new)
-    }
-}
-
-fn revision(
-    case: DriverConformanceCase,
-    digest: char,
-) -> Result<PluginRevision, DriverConformanceSetupError> {
-    let setup = |error: String| DriverConformanceSetupError::new(error);
-    let package = PluginPackageId::new(format!("test.wasm.{}", package_suffix(case)))
-        .map_err(|error| setup(format!("fixture package ID is invalid: {error}")))?;
-    let manifest = PluginManifest::new(
-        package,
-        PluginVersion::new("1.0.0")
-            .map_err(|error| setup(format!("fixture version is invalid: {error}")))?,
-        SdkVersionRequirement::new(">=0.1.0, <0.2.0")
-            .map_err(|error| setup(format!("fixture SDK requirement is invalid: {error}")))?,
-        PluginEntrypoint::WasmComponent {
-            path: PackageRelativePath::new("plugin.wasm")
-                .map_err(|error| setup(format!("fixture entrypoint path is invalid: {error}")))?,
-        },
-        vec![],
-        vec![],
-        vec![],
-    )
-    .map_err(|error| setup(format!("fixture manifest is invalid: {error}")))?;
-    let digest = PackageDigest::new(format!("blake3:{}", digest.to_string().repeat(64)))
-        .map_err(|error| setup(format!("fixture digest is invalid: {error}")))?;
-    Ok(PluginRevision::new(manifest, digest))
-}
-
-fn package_suffix(case: DriverConformanceCase) -> &'static str {
-    match case {
-        DriverConformanceCase::ReadyLifecycle => "ready",
-        DriverConformanceCase::PendingStartCancellation => "pending",
-        DriverConformanceCase::ReturnedStartFailure => "start.failure",
-        DriverConformanceCase::ReturnedDeactivationFailure => "stop.failure",
-        DriverConformanceCase::SharedDriverIsolation => "shared",
-        _ => "unsupported",
-    }
-}
-
-fn case_digest(case: DriverConformanceCase) -> char {
-    match case {
-        DriverConformanceCase::ReadyLifecycle => '1',
-        DriverConformanceCase::PendingStartCancellation => '2',
-        DriverConformanceCase::ReturnedStartFailure => '3',
-        DriverConformanceCase::ReturnedDeactivationFailure => '4',
-        DriverConformanceCase::SharedDriverIsolation => '5',
-        _ => 'f',
     }
 }
 
