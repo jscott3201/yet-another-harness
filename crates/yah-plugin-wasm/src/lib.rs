@@ -8,8 +8,11 @@
 //!
 //! Activations run under host-owned bounds ([`limits`]): ceilings on total
 //! memory and table size and on how many memories, tables, and instances one
-//! activation may hold, a call deadline, and caps on what a guest-to-host call
-//! may transfer and what the host retains from it.
+//! activation may hold, the stack one call runs on, a call deadline, and caps
+//! on what a guest-to-host call may transfer and what the host retains from it.
+//!
+//! Guest calls run on their own stack and yield the thread at each epoch tick,
+//! so one guest cannot starve another by computing.
 //!
 //! This crate does not load plugin packages, meter fuel, transport capability
 //! grants across the ABI, or contain hostile guest code. Bounding what a guest

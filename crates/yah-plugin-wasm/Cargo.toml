@@ -8,6 +8,9 @@ publish = false
 description = "Provisional WIT contract and Wasmtime component driver for YAH"
 
 [dependencies]
+# `sync` only: `tokio::sync::Mutex` needs no reactor, so an async-aware lock
+# here does not oblige a driver consumer to run on Tokio.
+tokio = { workspace = true, features = ["sync"] }
 wasmtime.workspace = true
 yah-plugin-host = { path = "../yah-plugin-host" }
 

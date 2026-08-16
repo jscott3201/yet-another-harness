@@ -38,42 +38,46 @@ impl Harness {
         }
     }
 
-    fn instantiate(&self) -> (Store<HostState>, Conformance) {
+    async fn instantiate(&self) -> (Store<HostState>, Conformance) {
         let mut store = Store::new(&self.engine, HostState::new(HostObserver::new()));
-        let bindings = Conformance::instantiate(&mut store, &self.component, &self.linker)
+        let bindings = Conformance::instantiate_async(&mut store, &self.component, &self.linker)
+            .await
             .expect("fixture instantiates");
         (store, bindings)
     }
 }
 
-#[test]
-fn conformant_component_activates_and_answers_a_fixture_tool_call() {
+#[tokio::test]
+async fn conformant_component_activates_and_answers_a_fixture_tool_call() {
     let harness = Harness::new(GuestProgram::Conformant);
-    let (mut store, bindings) = harness.instantiate();
+    let (mut store, bindings) = harness.instantiate().await;
 
     bindings
         .yah_plugin_lifecycle()
         .call_activate(&mut store)
+        .await
         .expect("activate does not trap")
         .expect("conformant fixture activates");
 
     let answered = bindings
         .yah_plugin_fixture_tool()
         .call_invoke(&mut store, "{\"ping\":true}")
+        .await
         .expect("invoke does not trap")
         .expect("conformant fixture answers");
 
     assert_eq!(answered, "{\"activated\":true}");
 }
 
-#[test]
-fn activate_failure_component_returns_the_declared_guest_error() {
+#[tokio::test]
+async fn activate_failure_component_returns_the_declared_guest_error() {
     let harness = Harness::new(GuestProgram::ActivateFailure);
-    let (mut store, bindings) = harness.instantiate();
+    let (mut store, bindings) = harness.instantiate().await;
 
     let refused = bindings
         .yah_plugin_lifecycle()
         .call_activate(&mut store)
+        .await
         .expect("activate does not trap")
         .expect_err("failure fixture refuses activation");
 
@@ -81,13 +85,14 @@ fn activate_failure_component_returns_the_declared_guest_error() {
     assert_eq!(refused.message, "fixture refused activation");
 }
 
-#[test]
-fn dropping_the_store_is_the_whole_shutdown_and_leaves_the_engine_reusable() {
+#[tokio::test]
+async fn dropping_the_store_is_the_whole_shutdown_and_leaves_the_engine_reusable() {
     let harness = Harness::new(GuestProgram::Conformant);
-    let (mut first, bindings) = harness.instantiate();
+    let (mut first, bindings) = harness.instantiate().await;
     bindings
         .yah_plugin_lifecycle()
         .call_activate(&mut first)
+        .await
         .expect("activate does not trap")
         .expect("conformant fixture activates");
 
@@ -98,10 +103,11 @@ fn dropping_the_store_is_the_whole_shutdown_and_leaves_the_engine_reusable() {
     // Host-owned artifacts outlive the activation they served: a fresh store
     // instantiates from the same compiled component with no residue from the
     // one just torn down.
-    let (mut second, reborn) = harness.instantiate();
+    let (mut second, reborn) = harness.instantiate().await;
     let answered = reborn
         .yah_plugin_fixture_tool()
         .call_invoke(&mut second, "{}")
+        .await
         .expect("invoke does not trap")
         .expect("fixture answers after the prior store was dropped");
     assert_eq!(answered, "{\"activated\":true}");

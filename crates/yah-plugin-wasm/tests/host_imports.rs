@@ -73,21 +73,24 @@ fn advisory_cancel_is_independent_of_the_host_signal() {
     assert!(state.is_cancelled());
 }
 
-#[test]
-fn fixture_allocator_traps_instead_of_returning_an_out_of_range_pointer() {
+#[tokio::test]
+async fn fixture_allocator_traps_instead_of_returning_an_out_of_range_pointer() {
     let engine = Engine::default();
     let component = Component::new(&engine, GuestProgram::Conformant.text()).expect("compiles");
     let mut linker: Linker<HostState> = Linker::new(&engine);
     Conformance::add_to_linker::<HostState, HasSelf<HostState>>(&mut linker, |state| state)
         .expect("host imports link");
     let mut store = Store::new(&engine, HostState::new(HostObserver::new()));
-    let bindings = Conformance::instantiate(&mut store, &component, &linker).expect("instantiates");
+    let bindings = Conformance::instantiate_async(&mut store, &component, &linker)
+        .await
+        .expect("instantiates");
 
     // The fixture owns one 64KiB page, so lowering this string cannot fit.
     let oversized = "x".repeat(100_000);
     let refused = bindings
         .yah_plugin_fixture_tool()
         .call_invoke(&mut store, &oversized)
+        .await
         .expect_err("an unsatisfiable allocation cannot succeed");
 
     // The point is *where* the refusal comes from. The allocator traps inside

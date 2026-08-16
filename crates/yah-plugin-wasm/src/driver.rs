@@ -11,6 +11,13 @@
 //! tables, and instances it may hold, a call deadline that stops a guest which
 //! will not stop itself, and a cap on what one guest-to-host call may transfer.
 //!
+//! A guest call runs on a stack of its own, so a call that will not return no
+//! longer holds the thread polling its future: at each epoch tick the guest
+//! yields to the executor and other work proceeds. The WIT world stays
+//! synchronous - nothing declares `async func` - so this is Wasmtime's fiber
+//! support rather than Component Model async, which the JavaScript toolchain
+//! cannot yet compile.
+//!
 //! The store lock is still held for the duration of a guest call, so a guest
 //! that will not return delays its own deactivation. Deactivation stops the
 //! guest before asking for that lock, which is what bounds the delay.
@@ -279,6 +286,10 @@ impl WasmComponentDriver {
         // accesses into faults without a bounds check; it stays, but sized to
         // something proportionate to the ceiling rather than to a 4 GiB memory.
         config.memory_guard_size(limits.memory_guard_bytes);
+        // One of these exists per concurrent guest call, so it is a cost of
+        // concurrency rather than of plugin count. Wasmtime's 2 MiB default is
+        // sized for arbitrary guest code; this corpus does not need it.
+        config.async_stack_size(limits.call_stack_bytes);
         let engine = Engine::new(&config).map_err(|error| {
             WasmDriverBuildError::new(format!("engine did not accept its configuration: {error}"))
         })?;
@@ -372,7 +383,7 @@ impl PluginDriver for WasmComponentDriver {
                 limits: self.limits,
                 interrupt: GuestInterrupt::new(),
                 observation,
-                live: Mutex::new(None),
+                live: tokio::sync::Mutex::new(None),
             }),
         }))
     }
@@ -405,7 +416,14 @@ struct ActivationCore {
     limits: WasmLimits,
     interrupt: GuestInterrupt,
     observation: Arc<ActivationObservation>,
-    live: Mutex<Option<LiveInstance>>,
+    /// The store, behind an async-aware lock.
+    ///
+    /// A guest call needs `&mut LiveInstance` for its whole duration, so the
+    /// critical section contains an `await` and cannot be shortened. That rules
+    /// out a blocking mutex: its guard is `!Send`, which would make the futures
+    /// this driver hands the host `!Send`, and holding a blocking lock across
+    /// an await would stall the executor rather than the caller.
+    live: tokio::sync::Mutex<Option<LiveInstance>>,
 }
 
 impl ActivationCore {
@@ -425,7 +443,7 @@ impl ActivationCore {
         Ok(())
     }
 
-    fn instantiate(&self) -> Result<(), DriverActivationError> {
+    async fn instantiate(&self) -> Result<(), DriverActivationError> {
         self.enter_guest("instantiation")?;
         let mut linker: Linker<HostState> = Linker::new(&self.engine);
         Conformance::add_to_linker::<HostState, HasSelf<HostState>>(&mut linker, |state| state)
@@ -455,30 +473,28 @@ impl ActivationCore {
         self.interrupt.begin_call();
 
         let bindings = self
-            .guarded(|| Conformance::instantiate(&mut store, &self.component, &linker))
+            .guarded(Conformance::instantiate_async(
+                &mut store,
+                &self.component,
+                &linker,
+            ))
+            .await
             .map_err(|error| {
                 self.fault(format!(
                     "component did not instantiate: {}",
                     self.describe_stop("instantiation", &error)
                 ))
             })?;
-        *self
-            .live
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) =
-            Some(LiveInstance { store, bindings });
+        *self.live.lock().await = Some(LiveInstance { store, bindings });
         self.observation
             .resource
             .store(ResourceState::Live as u8, Ordering::Release);
         Ok(())
     }
 
-    fn call_activate(&self) -> Result<(), DriverActivationError> {
+    async fn call_activate(&self) -> Result<(), DriverActivationError> {
         self.enter_guest("activate")?;
-        let mut guard = self
-            .live
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut guard = self.live.lock().await;
         let live = guard.as_mut().ok_or_else(|| {
             DriverActivationError::failed("activation store was released before activate")
         })?;
@@ -488,11 +504,12 @@ impl ActivationCore {
         live.store.set_epoch_deadline(1);
         self.interrupt.begin_call();
         let called = self
-            .guarded(|| {
+            .guarded(
                 live.bindings
                     .yah_plugin_lifecycle()
-                    .call_activate(&mut live.store)
-            })
+                    .call_activate(&mut live.store),
+            )
+            .await
             .map_err(|error| self.fault(self.describe_stop("activate", &error)))?;
         // A returned `guest-error` is an ordinary ABI return: the guest chose to
         // refuse, nothing trapped, and the store is still usable. Recording it
@@ -532,7 +549,41 @@ impl ActivationCore {
     /// that still looks callable behind guest frames that were abandoned
     /// mid-execution. Catching here turns that into an ordinary activation
     /// failure whose store `deactivate` still owns and releases.
-    fn guarded<T>(&self, call: impl FnOnce() -> wasmtime::Result<T>) -> wasmtime::Result<T> {
+    ///
+    /// The guard wraps each `poll` rather than one synchronous call, because a
+    /// guest call now runs on a fiber: the panic surfaces when the fiber is
+    /// resumed, which is inside a poll. Catching around the `await` instead
+    /// would catch nothing, since `await` itself does not run the guest.
+    async fn guarded<T>(
+        &self,
+        call: impl std::future::Future<Output = wasmtime::Result<T>>,
+    ) -> wasmtime::Result<T> {
+        let mut call = std::pin::pin!(call);
+        std::future::poll_fn(move |cx| {
+            match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| call.as_mut().poll(cx)))
+            {
+                Ok(std::task::Poll::Pending) => std::task::Poll::Pending,
+                Ok(std::task::Poll::Ready(result)) => std::task::Poll::Ready(result),
+                Err(panic) => std::task::Poll::Ready(Err(Self::panic_error(&panic))),
+            }
+        })
+        .await
+    }
+
+    /// Render a caught panic payload as an ordinary guest-call failure.
+    fn panic_error(panic: &Box<dyn std::any::Any + Send>) -> wasmtime::Error {
+        let summary = panic
+            .downcast_ref::<&str>()
+            .map(|text| (*text).to_owned())
+            .or_else(|| panic.downcast_ref::<String>().cloned())
+            .unwrap_or_else(|| "unknown panic".to_owned());
+        wasmtime::Error::msg(format!(
+            "host code panicked while guest code was running: {summary}"
+        ))
+    }
+
+    #[allow(dead_code)]
+    fn guarded_sync<T>(&self, call: impl FnOnce() -> wasmtime::Result<T>) -> wasmtime::Result<T> {
         match std::panic::catch_unwind(std::panic::AssertUnwindSafe(call)) {
             Ok(result) => result,
             Err(panic) => {
@@ -583,9 +634,9 @@ impl PreparedDriverActivation for PreparedWasmActivation {
                     "host start permit did not match the prepared activation",
                 ));
             }
-            core.instantiate()?;
+            core.instantiate().await?;
             match plan.start {
-                StartBehavior::CallActivate => core.call_activate(),
+                StartBehavior::CallActivate => core.call_activate().await,
                 StartBehavior::PendAfterInstantiate => {
                     std::future::pending::<Result<(), DriverActivationError>>().await
                 }
@@ -638,11 +689,7 @@ impl PreparedDriverActivation for PreparedWasmActivation {
             // driver cleaned up after itself" indistinguishable from "the
             // driver never acquired anything", so the state only advances when
             // there was something to release.
-            let released = core
-                .live
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .take();
+            let released = core.live.lock().await.take();
             if released.is_some() {
                 drop(released);
                 // The observation outlives the store deliberately, but its
@@ -746,7 +793,20 @@ mod interrupt_tests {
         config.memory_reservation(limits.memory_reservation_bytes);
         config.memory_reservation_for_growth(limits.memory_reservation_bytes);
         config.memory_guard_size(limits.memory_guard_bytes);
+        config.async_stack_size(limits.call_stack_bytes);
         Engine::new(&config).expect("engine accepts its configuration")
+    }
+
+    /// Drive one future to completion on this thread.
+    ///
+    /// These cases reach past the host into `ActivationCore`, whose calls are
+    /// futures now that a guest call runs on its own stack. A current-thread
+    /// runtime is the smallest thing that can resume one.
+    fn block_on<T>(future: impl std::future::Future<Output = T>) -> T {
+        tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("a current-thread runtime is constructible")
+            .block_on(future)
     }
 
     fn core(engine: &Engine, program: GuestProgram, limits: WasmLimits) -> Arc<ActivationCore> {
@@ -757,7 +817,7 @@ mod interrupt_tests {
             limits,
             interrupt: GuestInterrupt::new(),
             observation: Arc::new(ActivationObservation::new(HostObserver::new())),
-            live: Mutex::new(None),
+            live: tokio::sync::Mutex::new(None),
         })
     }
 
@@ -779,7 +839,7 @@ mod interrupt_tests {
         let engine = engine(limits);
         let core = core(&engine, GuestProgram::Runaway, limits);
         let ticker = EpochTicker::start(&engine, limits.epoch_tick);
-        core.instantiate().expect("the runaway instantiates");
+        block_on(core.instantiate()).expect("the runaway instantiates");
 
         // The result comes back over a channel rather than from `join`. The
         // budget here is effectively infinite by design, so if the kill fails
@@ -788,7 +848,7 @@ mod interrupt_tests {
         // detect. A leaked thread is the price of reporting that.
         let (done, result) = std::sync::mpsc::channel();
         let calling = Arc::clone(&core);
-        thread::spawn(move || done.send(calling.call_activate()));
+        thread::spawn(move || done.send(block_on(calling.call_activate())));
 
         // Wait for evidence the guest is actually inside the call, rather than
         // sleeping and hoping. A nonzero tick count means the guest reached an
@@ -830,21 +890,72 @@ mod interrupt_tests {
         let engine = engine(limits);
         let core = core(&engine, GuestProgram::Conformant, limits);
         let _ticker = EpochTicker::start(&engine, limits.epoch_tick);
-        core.instantiate()
-            .expect("the conformant guest instantiates");
+        block_on(core.instantiate()).expect("the conformant guest instantiates");
 
         // This guest returns in microseconds, so it would never reach an epoch
         // deadline and never consult the flag. Entry is the only place a stop
         // can be read in time.
         core.interrupt.kill();
-        let failure = core
-            .call_activate()
+        let failure = block_on(core.call_activate())
             .expect_err("a killed activation must not run guest code");
         assert!(
             failure.summary().contains("stopped before activate"),
             "the refusal must name why it was refused: {}",
             failure.summary()
         );
+    }
+
+    /// The reason guest calls run on their own stack at all.
+    ///
+    /// Both activations are driven by ONE current-thread runtime, so there is
+    /// exactly one thread between them. A guest call that held that thread
+    /// would starve its neighbour completely: the healthy activation could not
+    /// even begin until the runaway hit its deadline. The runaway's budget here
+    /// is long enough that such a wait would be unmistakable.
+    #[test]
+    fn a_compute_bound_guest_does_not_starve_a_sibling_on_the_same_thread() {
+        let limits = WasmLimits {
+            epoch_tick: Duration::from_millis(5),
+            // Long enough that "the healthy one waited for the runaway" and
+            // "the healthy one interleaved with it" cannot be confused.
+            call_budget_ticks: 200,
+            ..WasmLimits::default()
+        };
+        let engine = engine(limits);
+        let spinner = core(&engine, GuestProgram::Runaway, limits);
+        let healthy = core(&engine, GuestProgram::Conformant, limits);
+        let _ticker = EpochTicker::start(&engine, limits.epoch_tick);
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("a current-thread runtime is constructible");
+        runtime.block_on(async {
+            spinner
+                .instantiate()
+                .await
+                .expect("the runaway instantiates");
+            healthy
+                .instantiate()
+                .await
+                .expect("the healthy guest instantiates");
+
+            let started = Instant::now();
+            let mut healthy_took = None;
+            let (spun, _) = tokio::join!(spinner.call_activate(), async {
+                let outcome = healthy.call_activate().await;
+                healthy_took = Some(started.elapsed());
+                outcome.expect("a healthy guest activates while a sibling spins");
+            });
+            let spinner_took = started.elapsed();
+
+            spun.expect_err("the runaway must still hit its deadline");
+            let healthy_took = healthy_took.expect("the healthy guest completed");
+            assert!(
+                healthy_took < spinner_took / 2,
+                "the healthy guest took {healthy_took:?} against the runaway's \
+                 {spinner_took:?}; it waited for the thread rather than sharing it"
+            );
+        });
     }
 
     #[test]
@@ -855,11 +966,10 @@ mod interrupt_tests {
         let killed = core(&engine, GuestProgram::Conformant, limits);
         let live = core(&engine, GuestProgram::Conformant, limits);
         let _ticker = EpochTicker::start(&engine, limits.epoch_tick);
-        killed.instantiate().expect("first guest instantiates");
-        live.instantiate().expect("second guest instantiates");
+        block_on(killed.instantiate()).expect("first guest instantiates");
+        block_on(live.instantiate()).expect("second guest instantiates");
 
         killed.interrupt.kill();
-        live.call_activate()
-            .expect("a kill on one activation must not reach another");
+        block_on(live.call_activate()).expect("a kill on one activation must not reach another");
     }
 }

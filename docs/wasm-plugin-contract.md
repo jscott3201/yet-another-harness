@@ -185,6 +185,16 @@ gets when it outgrows the first one, which otherwise defaults to 2 GiB, and the
 guard region on each side, which otherwise defaults to 32 MiB and would dominate
 what a memory costs at this ceiling.
 
+A guest call also runs on a stack of its own. That is what lets the deadline
+tick do something other than trap: with budget left the guest yields the thread
+back to the host's executor and resumes, so a guest that computes without ever
+calling a host import cannot starve its neighbours. The world stays
+synchronous — nothing in it declares `async func` — so this is Wasmtime's fiber
+support and not Component Model async, which the JavaScript toolchain cannot
+yet compile. The stack is allocated per concurrent call rather than per
+activation, so it is a cost of concurrency, and it is host-owned like every
+other bound here.
+
 A call deadline *terminates*. The world's cancellation import is advisory, so a
 guest that never asks whether it should stop would otherwise run forever. The
 driver advances its engine's epoch on a timer, and a guest that outlives its

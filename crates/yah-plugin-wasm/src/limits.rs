@@ -57,6 +57,16 @@ pub struct WasmLimits {
     /// alone gets memories that outgrow their reservation and are re-mapped,
     /// which costs more address space, not less.
     pub memory_reservation_bytes: u64,
+    /// Stack a guest call runs on, in bytes.
+    ///
+    /// A guest call runs on a stack of its own so it can yield the thread back
+    /// to the executor mid-call. That stack is allocated per concurrent call,
+    /// not per activation, so it is a live cost of how many calls run at once
+    /// rather than of how many plugins exist. Wasmtime's default is 2 MiB,
+    /// sized for arbitrary guest code; the fixture corpus recurses shallowly,
+    /// and a host that admits a guest needing more should raise this
+    /// deliberately rather than discover it as a stack overflow.
+    pub call_stack_bytes: usize,
     /// Address space reserved on each side of a linear memory.
     ///
     /// The guard is what lets Wasmtime turn an out-of-bounds guest access into
@@ -199,6 +209,7 @@ impl Default for WasmLimits {
             max_instances: 16,
             memory_reservation_bytes: 16 * 1024 * 1024,
             memory_guard_bytes: 1024 * 1024,
+            call_stack_bytes: 1024 * 1024,
             host_call_bytes: 4 * 1024 * 1024,
             epoch_tick: Duration::from_millis(10),
             call_budget_ticks: 100,
@@ -323,6 +334,14 @@ impl GuestInterrupt {
     /// Extending by a single tick rather than the whole remaining budget is
     /// deliberate: it is what makes [`Self::kill`] take effect within one tick
     /// instead of whenever the budget happens to run out.
+    ///
+    /// Continuing *yields* rather than resuming in place. A guest call runs on
+    /// its own stack, but a stack only gives the executor back when something
+    /// hands it back, and a guest that computes without calling a host import
+    /// never would: it would hold the thread until it finished or trapped, and
+    /// running on a fiber would have moved the blocking rather than removed
+    /// it. Yielding here is the point at which a compute-bound guest becomes
+    /// cooperative, and it costs one scheduling round-trip per tick.
     pub fn on_deadline(&self, budget_ticks: u64) -> UpdateDeadline {
         if self.is_killed() {
             return UpdateDeadline::Interrupt;
@@ -335,7 +354,7 @@ impl GuestInterrupt {
         if used >= budget_ticks {
             UpdateDeadline::Interrupt
         } else {
-            UpdateDeadline::Continue(1)
+            UpdateDeadline::Yield(1)
         }
     }
 }

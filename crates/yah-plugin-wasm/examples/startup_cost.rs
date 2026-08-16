@@ -28,6 +28,7 @@ fn main() -> wasmtime::Result<()> {
     config.memory_reservation(limits.memory_reservation_bytes);
     config.memory_reservation_for_growth(limits.memory_reservation_bytes);
     config.memory_guard_size(limits.memory_guard_bytes);
+    config.async_stack_size(limits.call_stack_bytes);
     let engine = Engine::new(&config)?;
 
     // One compile before any measurement. The first compilation in a process
