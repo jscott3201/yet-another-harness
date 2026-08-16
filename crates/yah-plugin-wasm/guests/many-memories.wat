@@ -1,45 +1,37 @@
-;; Fixture guest: grows linear memory until the host stops giving it more.
+;; Fixture guest: declares many linear memories that hold nothing.
 ;;
-;; The memory ceiling differs in kind from the call deadline. A refused
-;; `memory.grow` returns -1, which the guest can see and handle, so this is not
-;; a case of the host terminating a guest against its will. The fixture makes
-;; the refusal observable by trapping on it, so the driver still exercises the
-;; failure path rather than silently succeeding at a smaller size.
+;; This is the guest a byte ceiling alone cannot see. Each extra memory is
+;; declared with zero pages, so it adds nothing to the total the memory ceiling
+;; charges - and yet every one of them costs the host an address-space
+;; reservation. A host that bounded only bytes would admit this guest, and a
+;; few of them together would exhaust the address space of the authority
+;; process while every one stayed under its "memory ceiling".
 ;;
-;; It asks for a fixed number of pages so that the same fixture activates
-;; cleanly under a ceiling that can afford them. A fixture that always failed
-;; would let a test pass without the ceiling doing anything.
+;; The exported memory carries one page because the ABI needs somewhere to put
+;; a return value. Everything above it is empty by construction.
 ;;
 ;; See `conformant.wat` for the ABI and named-type rules.
 
 (component
   (core module $impl
     (memory (export "memory") 1)
+    (memory $spare1 0)
+    (memory $spare2 0)
+    (memory $spare3 0)
+    (memory $spare4 0)
+    (memory $spare5 0)
+    (memory $spare6 0)
+    (memory $spare7 0)
 
     (func (export "cabi_realloc")
       (param $old_ptr i32) (param $old_len i32) (param $align i32) (param $new_len i32)
       (result i32)
-      ;; Unreachable in practice: `activate` takes no parameters, so the host
-      ;; has nothing to lower, and its `ok` result is a pointer into the page
-      ;; this guest already owns.
+      ;; Unreachable in practice: the count ceiling refuses this guest at
+      ;; instantiation, so no lift or lower ever asks it for memory.
       unreachable)
 
-    ;; Ask for a fixed number of pages, one at a time, and trap on the first
-    ;; refusal. `memory.grow` answers -1 rather than trapping, so the refusal is
-    ;; a value the guest tests.
-    ;;
-    ;; The count is bounded rather than infinite so that the fixture succeeds
-    ;; under a generous ceiling. That is what makes the ceiling, and not some
-    ;; unrelated fault, the thing a test can attribute a failure to.
+    ;; Reached only if the ceiling admitted both memories.
     (func (export "activate") (result i32)
-      (local $remaining i32)
-      (local.set $remaining (i32.const 8))
-      (loop $grow
-        (if (i32.eq (memory.grow (i32.const 1)) (i32.const -1))
-          (then unreachable))
-        (local.set $remaining (i32.sub (local.get $remaining) (i32.const 1)))
-        (br_if $grow (i32.gt_s (local.get $remaining) (i32.const 0))))
-      ;; Every page was granted: return ok so a generous ceiling is observable.
       (i32.store8 (i32.const 1024) (i32.const 0))
       (i32.const 1024))
 

@@ -25,8 +25,10 @@
       (loop $forever (br $forever))
       unreachable)
 
+    ;; Never entered: lowering `invoke`'s string parameter goes through the
+    ;; trapping `cabi_realloc` above, so a call traps before reaching this. The
+    ;; export exists because the world requires it, not because it runs.
     (func (export "invoke") (param $ptr i32) (param $len i32) (result i32)
-      (loop $forever (br $forever))
       unreachable)
   )
 

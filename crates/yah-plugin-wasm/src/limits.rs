@@ -30,6 +30,26 @@ pub struct WasmLimits {
     pub memory_bytes: usize,
     /// Ceiling on one activation's table entries, summed across every table.
     pub table_elements: usize,
+    /// How many linear memories one activation may hold.
+    ///
+    /// A byte ceiling alone does not bound a memory *count*, and a count is its
+    /// own cost: Wasmtime reserves an address-space window per memory whether
+    /// or not the memory has any pages in it. A guest declaring many empty
+    /// memories is charged nothing by [`Self::memory_bytes`] and can still
+    /// exhaust the host's address space.
+    pub max_memories: usize,
+    /// How many tables one activation may hold, for the same reason.
+    pub max_tables: usize,
+    /// How many core instances one activation may hold.
+    pub max_instances: usize,
+    /// Address space Wasmtime reserves per linear memory.
+    ///
+    /// Wasmtime's default is 4 GiB, which lets a memory grow without ever
+    /// moving. That trade only makes sense when a memory is allowed to reach
+    /// 4 GiB; here the host's own ceiling is far lower, so the reservation is
+    /// sized to the ceiling and the difference stops being address space a
+    /// guest can claim for free.
+    pub memory_reservation_bytes: u64,
     /// Bytes one guest-to-host call may transfer into host memory.
     ///
     /// A guest can point every element of a list at the same buffer, so the
@@ -51,11 +71,13 @@ pub struct WasmLimits {
 }
 
 impl WasmLimits {
-    /// The wall-clock floor on how long a runaway call may run.
+    /// The wall-clock bound on how long a runaway call may run.
     ///
-    /// The ticker sleeps at least `epoch_tick` between increments, so this is
-    /// the least time a runaway call gets, not the most. Under load the real
-    /// figure stretches; the call still terminates.
+    /// This is not a floor. The ticker free-runs from driver construction, so
+    /// the first increment after a call is armed can land immediately and
+    /// spend a tick the call never used: a call is guaranteed only
+    /// `(call_budget_ticks - 1) * epoch_tick`. Under load the ticker's sleeps
+    /// stretch and the real figure grows past this; the call still terminates.
     pub const fn call_deadline(&self) -> Duration {
         let ticks = if self.call_budget_ticks > u32::MAX as u64 {
             u32::MAX
@@ -97,6 +119,22 @@ impl ActivationLimiter {
 }
 
 impl ResourceLimiter for ActivationLimiter {
+    // Counts, not just totals. Wasmtime defaults each of these to 10,000, and
+    // an empty memory costs the byte ceiling nothing while still costing the
+    // host an address-space reservation - so without these three, the byte
+    // ceiling bounds the wrong resource.
+    fn memories(&self) -> usize {
+        self.limits.max_memories
+    }
+
+    fn tables(&self) -> usize {
+        self.limits.max_tables
+    }
+
+    fn instances(&self) -> usize {
+        self.limits.max_instances
+    }
+
     fn memory_growing(
         &mut self,
         current: usize,
@@ -134,11 +172,17 @@ impl Default for WasmLimits {
     /// The memory ceiling is generous enough for a component that allocates
     /// while staying far below anything that would pressure the host, and the
     /// call deadline is long enough that a slow machine will not trap a
-    /// well-behaved fixture.
+    /// well-behaved fixture. The counts are small because a component with any
+    /// need for more than a handful of memories or tables is not something this
+    /// driver is meant to run yet.
     fn default() -> Self {
         Self {
             memory_bytes: 16 * 1024 * 1024,
             table_elements: 10_000,
+            max_memories: 4,
+            max_tables: 4,
+            max_instances: 16,
+            memory_reservation_bytes: 16 * 1024 * 1024,
             host_call_bytes: 4 * 1024 * 1024,
             epoch_tick: Duration::from_millis(10),
             call_budget_ticks: 100,
@@ -335,13 +379,21 @@ mod tests {
 
     /// `call_deadline` multiplies a `u64` budget into a `Duration`, which takes
     /// a `u32`. A budget past that must saturate, not wrap to a short deadline.
+    ///
+    /// The input is one past `u32::MAX`, not `u64::MAX`. `u64::MAX as u32` is
+    /// `u32::MAX` - exactly what saturation produces - so `u64::MAX` is the one
+    /// point in the domain where a truncating implementation and a saturating
+    /// one agree, and a test that used it could not fail.
     #[test]
     fn an_enormous_tick_budget_saturates_rather_than_wrapping() {
         let limits = WasmLimits {
             epoch_tick: Duration::from_millis(1),
-            call_budget_ticks: u64::MAX,
+            call_budget_ticks: u32::MAX as u64 + 1,
             ..WasmLimits::default()
         };
-        assert!(limits.call_deadline() >= Duration::from_secs(60 * 60 * 24));
+        assert_eq!(
+            limits.call_deadline(),
+            Duration::from_millis(u32::MAX as u64)
+        );
     }
 }

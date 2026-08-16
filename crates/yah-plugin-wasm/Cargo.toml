@@ -12,6 +12,7 @@ wasmtime.workspace = true
 yah-plugin-host = { path = "../yah-plugin-host" }
 
 [dev-dependencies]
+libc.workspace = true
 tokio = { workspace = true, features = ["macros", "rt"] }
 wit-bindgen.workspace = true
 yah-compose = { path = "../yah-compose" }

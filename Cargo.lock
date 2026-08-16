@@ -2758,6 +2758,7 @@ dependencies = [
 name = "yah-plugin-wasm"
 version = "0.0.1"
 dependencies = [
+ "libc",
  "tokio",
  "wasmtime",
  "wit-bindgen",

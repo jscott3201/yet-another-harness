@@ -24,6 +24,8 @@ pub enum GuestProgram {
     MemoryHog,
     /// Declares two linear memories, to test that the ceiling is a total.
     MultiMemory,
+    /// Declares many empty memories, which cost bytes nothing and space plenty.
+    ManyMemories,
 }
 
 impl GuestProgram {
@@ -35,6 +37,7 @@ impl GuestProgram {
             Self::Runaway => RUNAWAY,
             Self::MemoryHog => MEMORY_HOG,
             Self::MultiMemory => MULTI_MEMORY,
+            Self::ManyMemories => MANY_MEMORIES,
         }
     }
 }
@@ -44,3 +47,4 @@ const ACTIVATE_FAILURE: &str = include_str!("../guests/activate-failure.wat");
 const RUNAWAY: &str = include_str!("../guests/runaway.wat");
 const MEMORY_HOG: &str = include_str!("../guests/memory-hog.wat");
 const MULTI_MEMORY: &str = include_str!("../guests/multi-memory.wat");
+const MANY_MEMORIES: &str = include_str!("../guests/many-memories.wat");

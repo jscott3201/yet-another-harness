@@ -119,8 +119,10 @@ versions: the latest stable CPython line, the current Node.js release and active
 LTS line, modern ESM, and contemporary TypeScript syntax.
 
 Untrusted Python, JavaScript, and native code will not execute inside the Rust
-authority process. In-process Wasm is a target only when explicit WIT imports
-and host-enforced resource limits are in place. Node and Python plugins will
+authority process. In-process Wasm is a target only when explicit WIT imports,
+host-enforced resource limits, and containment for hostile guest code are all
+in place; the first two now exist for the fixture corpus and the third does
+not. Node and Python plugins will
 run in supervised worker processes constrained by an OS sandbox, container, or
 stronger isolation backend. Runtime permission switches are defense in depth,
 not the security boundary. No plugin sandbox has been implemented or audited
@@ -239,9 +241,11 @@ guest Rust bindings from the same versioned source, parser tests freeze its two
 baseline imports and two fixture exports, and a Wasmtime driver compiles
 checked-in component fixtures, gives each activation its own store, and drops
 that store to deactivate without asking guest code. It loads no plugin package.
-It enforces host-owned memory and table ceilings, a call deadline that stops a
-guest which will not stop itself, and a bound on what one host call may retain.
-Those bound a guest's cost, not its authority: it still runs in the host
+It enforces host-owned ceilings on an activation's total memory and table size
+and on how many memories, tables, and instances it may hold, a call deadline
+that stops a guest which will not stop itself, and a bound on what one host
+call may retain.
+Those bound a guest's cost, not its authority: guest code still runs in the host
 process, so the driver runs only its own fixtures and makes no
 capability-transport, WASI, or sandbox claim.
 

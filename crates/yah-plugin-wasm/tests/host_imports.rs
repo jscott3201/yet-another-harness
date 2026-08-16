@@ -150,6 +150,20 @@ fn log_values_are_clipped_to_the_byte_ceiling_and_the_loss_is_counted() {
     );
     assert_eq!(records[0].fields.len(), limits.max_log_fields);
     assert!(observer.truncated_values() > 0);
+
+    // Clipping the length is not the ceiling; releasing the guest's allocation
+    // is. `String::truncate` moves `len` and leaves `capacity` alone, so a
+    // record clipped in place would still hold every byte the guest sent -
+    // 4 KiB of message here against a 16-byte ceiling. Reading capacity from
+    // the stored records is the only assertion that can see that; the clones
+    // `records()` returns have capacity exactly equal to their length.
+    let ceiling =
+        limits.max_log_message_bytes + limits.max_log_fields * 2 * limits.max_log_message_bytes;
+    assert!(
+        observer.retained_bytes() <= ceiling,
+        "host retains {} bytes against a ceiling of {ceiling}",
+        observer.retained_bytes()
+    );
 }
 
 #[test]

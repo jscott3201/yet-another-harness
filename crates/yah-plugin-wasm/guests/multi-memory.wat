@@ -4,7 +4,9 @@
 ;; so a guest that spreads its allocation across several memories would be
 ;; admitted well above the total a host believed it had set. This fixture is
 ;; that guest. Its two memories are declared with initial pages, so the total is
-;; claimed at instantiation and the host never sees a `memory.grow` to refuse.
+;; the total is claimed at instantiation: the limiter still sees both
+;; requests, but there is no `memory.grow` instruction to answer with -1, so the
+;; refusal aborts instantiation instead.
 ;;
 ;; See `conformant.wat` for the ABI and named-type rules.
 
@@ -16,6 +18,8 @@
     (func (export "cabi_realloc")
       (param $old_ptr i32) (param $old_len i32) (param $align i32) (param $new_len i32)
       (result i32)
+      ;; Unreachable in practice: the ceiling refuses this guest at
+      ;; instantiation, so no lift or lower ever asks it for memory.
       unreachable)
 
     ;; Reached only if the ceiling admitted both memories.

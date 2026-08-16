@@ -62,7 +62,11 @@ fn test_limits() -> WasmLimits {
 /// Wide enough that a loaded machine will not fail the assertion, narrow enough
 /// that "the deadline never fired" cannot pass.
 fn kill_bound() -> Duration {
-    test_limits().call_deadline() * 40
+    // 40x the deadline, and the deadline itself is 20ms. The bound only has to
+    // separate "terminated" from "never terminates", so it is set well past
+    // anything scheduling noise can produce: a false positive here aborts the
+    // whole test binary, which is a far worse outcome than a slow pass.
+    test_limits().call_deadline() * 250
 }
 
 /// Bounds that admit the fixture corpus, for the control half of each pair.
@@ -108,7 +112,14 @@ impl Watchdog {
             if flag.load(Ordering::Acquire) {
                 return;
             }
-            eprintln!("watchdog: {what} did not finish within {bound:?}");
+            // Straight to fd 2, not `eprintln!`. libtest captures stderr for
+            // the thread that spawned this one, and `abort` discards the
+            // captured buffer - so a captured message is a message nobody ever
+            // reads, and the crash would name nothing.
+            let message = format!("watchdog: {what} did not finish within {bound:?}\n");
+            unsafe {
+                libc::write(2, message.as_ptr().cast(), message.len());
+            }
             std::process::abort();
         });
         Self { finished }
@@ -323,8 +334,15 @@ async fn a_guest_that_grows_past_the_memory_ceiling_is_refused() {
         other => panic!("a memory-hungry guest must fail activation, got {other:?}"),
     };
     assert_eq!(failure.kind(), DriverActivationErrorKind::Failed);
-    // The ceiling refuses growth, so the guest reaches its own trap rather than
-    // being interrupted. Naming the deadline here would be a lie.
+    // A ceiling refuses; it does not interrupt. `memory.grow` answers -1, the
+    // guest sees it and reaches its own `unreachable`. Asserting the guest's
+    // trap - rather than merely that the deadline was not involved - is what
+    // separates "the ceiling refused" from any other way the call could fail.
+    assert!(
+        failure.summary().contains("trapped"),
+        "the guest must fail on its own terms: {}",
+        failure.summary()
+    );
     assert!(
         !failure.summary().contains("call deadline"),
         "growth is refused, not interrupted: {}",
@@ -419,6 +437,71 @@ async fn several_memories_are_admitted_when_their_total_fits() {
     within_kill_bound("the multi-memory guest", activation.activate(&rig.registry))
         .await
         .expect("a total within the ceiling is granted");
+    assert_eq!(observer.resource_state(&id), Ok(ResourceState::Live));
+
+    let (slot, _handle) = activation.release_active().expect("active releases");
+    let removed = DesiredComponentState::removed(slot.generation(2));
+    slot.reconcile(&rig.registry, removed)
+        .expect("component begins stopping");
+    slot.finish_stop(rig.epoch)
+        .await
+        .expect("cleanup completes");
+}
+
+#[tokio::test]
+async fn a_guest_may_not_hold_more_memories_than_the_host_allows() {
+    // The escape a byte ceiling cannot see. Every extra memory in this fixture
+    // is empty, so it adds nothing to the total `memory_bytes` charges - and
+    // yet each one costs the host an address-space reservation. Bounding bytes
+    // without bounding counts bounds the wrong resource.
+    let mut rig = Rig::new("wasm.limits.memory.count", '7');
+    let (driver, _observer) = driver(&rig.revision, vec![WasmActivationPlan::many_memories()]);
+
+    let mut activation =
+        HostPluginActivation::prepare(&mut rig.slot, rig.epoch, &rig.broker, &rig.grants, driver)
+            .expect("preparation succeeds");
+
+    let outcome = within_kill_bound(
+        "the memory count ceiling",
+        activation.activate(&rig.registry),
+    )
+    .await;
+    let failure = match outcome {
+        Err(PluginStartError::Driver { failure, .. }) => failure,
+        other => panic!("a guest over the memory count must fail, got {other:?}"),
+    };
+    assert_eq!(failure.kind(), DriverActivationErrorKind::Failed);
+    assert!(
+        failure.summary().contains("instantiation"),
+        "the memories are declared, so the refusal lands at instantiation: {}",
+        failure.summary()
+    );
+
+    activation.finish_stop().await.expect("cleanup completes");
+}
+
+#[tokio::test]
+async fn the_same_empty_memories_are_admitted_when_the_count_allows_them() {
+    // The control: the byte total never changes between this case and the one
+    // above, so only the count ceiling can explain the difference.
+    let mut rig = Rig::new("wasm.limits.memory.count.ok", '8');
+    let (driver, observer) = driver_with(
+        &rig.revision,
+        vec![WasmActivationPlan::many_memories()],
+        WasmLimits {
+            max_memories: 16,
+            ..generous_limits()
+        },
+    );
+
+    let mut activation =
+        HostPluginActivation::prepare(&mut rig.slot, rig.epoch, &rig.broker, &rig.grants, driver)
+            .expect("preparation succeeds");
+    let id = activation.id().clone();
+
+    within_kill_bound("the many-memory guest", activation.activate(&rig.registry))
+        .await
+        .expect("a count within the ceiling is granted");
     assert_eq!(observer.resource_state(&id), Ok(ResourceState::Live));
 
     let (slot, _handle) = activation.release_active().expect("active releases");

@@ -125,6 +125,20 @@ A memory or table ceiling *refuses*. The guest asks to grow, the host declines,
 and `memory.grow` answers -1 — a value the guest can see and handle. A guest
 that ignores the refusal fails on its own terms.
 
+A memory claimed at instantiation is the same refusal with nowhere to put the
+answer. The limiter still sees the request, but there is no `memory.grow`
+instruction to hand -1 back to, so the refusal aborts instantiation and the
+guest never executes anything. That is the path the two-memory fixture takes.
+
+Counts are bounded as well as totals, and for a reason the totals do not cover:
+Wasmtime reserves an address-space window per linear memory whether or not that
+memory holds any pages. A memory declared with zero pages therefore costs the
+byte ceiling nothing and costs the host a reservation, so a guest bounded only
+by bytes could exhaust the host's address space without ever exceeding its
+"memory ceiling". The driver bounds the number of memories, tables, and
+instances, and sizes the per-memory reservation to the byte ceiling rather than
+leaving it at Wasmtime's 4 GiB default.
+
 A call deadline *terminates*. The world's cancellation import is advisory, so a
 guest that never asks whether it should stop would otherwise run forever. The
 driver advances its engine's epoch on a timer, and a guest that outlives its
@@ -136,7 +150,10 @@ bearing: a deadline is absolute, so a store left idle since instantiation is
 already past the one it was given, and its next call would be charged for time
 it never ran. Because each store carries its own deadline, one timer bounds
 every activation without coupling them: the tick that kills a call out of
-budget leaves a sibling with budget untouched. Deactivation uses
+budget leaves a sibling with budget untouched. Kill isolation is demonstrated — one
+activation's stop does not reach another's — but no case yet has two guest
+calls live at once under one ticker, so the budget half of that sentence is a
+claim about the code. Deactivation uses
 the same mechanism to stop an in-flight call before waiting on the lock that
 call holds, which is what bounds teardown behind a runaway guest.
 
@@ -173,8 +190,18 @@ This slice does not provide:
 - WASI ambient authority, sandbox enforcement, malformed-component coverage,
   or cross-runtime equivalence.
 
-WIT strings and lists are not byte-bounded by the ABI. What bounds them is the
-memory ceiling, which caps how large a value a guest can construct, and the
-host's own retention limits on what it keeps. Bounds are not containment: a
-guest still runs in the host process with no sandbox, so this world remains
-unsuitable for executing untrusted input.
+WIT strings and lists are not byte-bounded by the ABI, and the memory ceiling
+does not bound them either: a guest can point every element of a list at one
+buffer, so a small guest memory can name a very large lifted value. Two other
+things bound them. The driver sets a per-store host-call byte budget
+(`host_call_bytes`), which is charged as the canonical ABI copies a value out
+of guest memory, and the host clips and counts what it keeps from a `logging`
+call — record count, message bytes, and field count — copying the clipped text
+into its own allocation so a clipped record does not retain the guest's.
+
+The host-call budget is enforced but unexercised: no checked-in fixture imports
+anything, so no guest-to-host call happens anywhere in the corpus. The
+retention limits are exercised directly.
+
+Bounds are not containment: a guest still runs in the host process with no
+sandbox, so this world remains unsuitable for executing untrusted input.

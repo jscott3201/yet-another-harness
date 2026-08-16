@@ -85,6 +85,30 @@ impl HostObserver {
             .clone()
     }
 
+    /// Host heap the retained records actually hold, in bytes.
+    ///
+    /// This reads capacity, not length, and reads it from the stored records
+    /// rather than a copy. Both matter: a clipped `String` keeps whatever
+    /// capacity the guest's message arrived with unless the clip reallocates,
+    /// and `records()` hands out clones whose capacity is exactly their length,
+    /// so a copy cannot show the difference. The retention ceiling is a claim
+    /// about held heap, and this is the only view that can falsify it.
+    pub fn retained_bytes(&self) -> usize {
+        self.records
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .iter()
+            .map(|record| {
+                record.message.capacity()
+                    + record
+                        .fields
+                        .iter()
+                        .map(|(key, value)| key.capacity() + value.capacity())
+                        .sum::<usize>()
+            })
+            .sum()
+    }
+
     pub fn dropped_records(&self) -> usize {
         self.dropped.load(Ordering::Acquire)
     }
@@ -184,7 +208,14 @@ impl logging::Host for HostState {
 }
 
 /// Clip `value` to `limit` bytes without splitting a character.
-fn truncate_utf8(mut value: String, limit: usize, observer: &HostObserver) -> String {
+///
+/// The clipped text is copied into a fresh allocation rather than shortened in
+/// place. `String::truncate` moves `len` and leaves `capacity` alone, so
+/// retaining the clipped `String` would retain every byte the guest sent: a
+/// 1 MiB message clipped to 4 KiB would still hold 1 MiB of host heap, and the
+/// ceiling would bound only the length field. Since the point of the ceiling is
+/// what the host *keeps*, the copy is the ceiling.
+fn truncate_utf8(value: String, limit: usize, observer: &HostObserver) -> String {
     if value.len() <= limit {
         return value;
     }
@@ -193,8 +224,9 @@ fn truncate_utf8(mut value: String, limit: usize, observer: &HostObserver) -> St
     while end > 0 && !value.is_char_boundary(end) {
         end -= 1;
     }
-    value.truncate(end);
-    value
+    let mut clipped = String::with_capacity(end);
+    clipped.push_str(&value[..end]);
+    clipped
 }
 
 impl cancellation::Host for HostState {
