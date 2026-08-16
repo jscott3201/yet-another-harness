@@ -55,7 +55,9 @@ starting | active | failed -> stopping -> pending | removed
 - Provider replacement or disappearance causes controlled recomposition of
   affected consumers.
 - Every registration belongs to an effect scope. Closing a scope unwinds its
-  owned effects, including nested scopes, in reverse registration order.
+  owned effects, including nested scopes, in reverse registration order. Before
+  the first cleanup, explicit close drains mediated service calls already
+  admitted against that scope subtree.
 - Isolation realms and interceptors can narrow the services and policies
   visible to a subtree.
 
@@ -72,8 +74,11 @@ switch a provider.
 
 Provider publication is admitted into an active component's effect scope before
 it becomes discoverable. Each handle is fenced by both provider and consumer
-scope cancellation, limits provider access to a checked callback, and fails
-closed rather than following a replacement.
+scope activity and cancellation, limits provider access to a checked callback,
+and fails closed rather than following a replacement. An explicit close seals
+new calls synchronously and, while driven, waits for admitted callbacks before
+running any provider or consumer cleanup. This boundary does not supervise
+spawned tasks or authority deliberately escaped by a trusted service contract.
 
 The dependency reconciler consumes and freezes one mounted definition, live
 instance, activation effect scope, and immutable provider selection as one
@@ -181,9 +186,12 @@ requests cancellation before cleanup, and unwinds registrations and nested
 scopes serially in reverse registration order. Close reports are cached for
 idempotence, aggregate returned errors and panics without short-circuiting, and
 a later `close()` can resume pending cleanup after an earlier close waiter is
-dropped. Dropping the scope itself only requests cancellation and abandons
-unrun cleanup, so its owner must drive close to completion. This layer does not
-impose deadlines or prove that cooperatively cancelled work terminated.
+dropped. Before the first cleanup, explicit close rejects new mediated service
+calls and drains calls already admitted against the provider and consumer scope
+trees. Dropping the scope itself only requests cancellation and abandons the
+drain and unrun cleanup, so its owner must drive close to completion. This layer
+does not supervise tasks, impose deadlines, force a callback to return, or prove
+that cooperatively cancelled work terminated.
 
 ### Durable external effects
 

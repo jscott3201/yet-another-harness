@@ -7,13 +7,14 @@ use std::{
 
 use crate::{
     ComponentDefinition, ComponentInstance, ComponentState, EffectScope, EffectScopeState,
-    ServiceId,
+    ServiceId, effect_scope::ActivityGate,
 };
 
 use super::{
     ProviderCandidate, ProviderRegistrationId, RequiredService, RequirementCandidates,
     RequirementStatus, ServiceHandle, ServiceProvider, ServiceRegistryError, ServiceRequirement,
-    handle::ProviderGate, model::ContractType,
+    handle::{ProviderBinding, ProviderGate},
+    model::ContractType,
 };
 
 /// One process-local visibility domain for typed service providers.
@@ -41,7 +42,9 @@ impl ServiceRegistry {
     ///
     /// Providers are visible only once their component is active. A future
     /// callback runner may stage provider values while starting, complete the
-    /// activation, and then call this method as its readiness point.
+    /// activation, and then call this method as its readiness point. Explicit
+    /// provider-scope close drains admitted service calls before this cleanup
+    /// withdraws and releases the registry-owned provider value.
     pub fn provide<T: ?Sized + Send + Sync + 'static>(
         &mut self,
         owner: &ComponentInstance,
@@ -97,6 +100,7 @@ impl ServiceRegistry {
             contract,
             marker,
             gate,
+            activity: effects.activity_gate(),
             value: Box::new(Arc::clone(&value)),
         };
         self.core.publish(service_id, contract, entry);
@@ -153,10 +157,12 @@ impl ServiceRegistry {
     /// Bind one starting consumer activation to one exact provider candidate.
     ///
     /// Ordinary handles never switch to a replacement provider. Both provider
-    /// and consumer effect-scope cancellation fence every subsequent call.
-    /// This is a low-level trusted-authority primitive and cannot verify that
-    /// the requirement was declared or selected from the instance's definition
-    /// ID. Normal reconciled code should use [`crate::ReconciledComponent::bind`].
+    /// and consumer effect scopes fence every subsequent call; explicit close
+    /// drains calls admitted through the handle before either subtree cleans
+    /// up. This is a low-level trusted-authority primitive and cannot verify
+    /// that the requirement was declared or selected from the instance's
+    /// definition ID. Normal reconciled code should use
+    /// [`crate::ReconciledComponent::bind`].
     pub fn bind<T: ?Sized + Send + Sync + 'static>(
         &self,
         consumer: &ComponentInstance,
@@ -187,19 +193,18 @@ impl ServiceRegistry {
             });
         }
 
-        let (provider, gate, candidate) = self.core.binding::<T>(requirement, provider_id)?;
-        if !gate.is_available() {
+        let provider = self.core.binding::<T>(requirement, provider_id)?;
+        if !provider.is_available() {
             return Err(ServiceRegistryError::ProviderUnavailable { provider_id });
         }
 
         Ok(ServiceHandle::new(
-            Arc::downgrade(&provider),
-            gate,
-            candidate,
+            provider,
             consumer.id().clone(),
             consumer.scope_id().clone(),
             consumer_activation,
             consumer_effects.cancellation(),
+            consumer_effects.activity_gate(),
         ))
     }
 }
@@ -267,7 +272,11 @@ impl RegistryCore {
         Ok(state
             .providers
             .values()
-            .filter(|entry| entry.candidate.service_id() == service_id && entry.gate.is_available())
+            .filter(|entry| {
+                entry.candidate.service_id() == service_id
+                    && entry.gate.is_available()
+                    && entry.activity.is_open()
+            })
             .map(|entry| entry.candidate.clone())
             .collect())
     }
@@ -292,6 +301,7 @@ impl RegistryCore {
                         entry.candidate.service_id() == requirement.service_id()
                             && entry.contract == requirement.contract()
                             && entry.gate.is_available()
+                            && entry.activity.is_open()
                     })
                     .map(|entry| entry.candidate.clone())
                     .collect(),
@@ -303,7 +313,7 @@ impl RegistryCore {
         &self,
         requirement: &ServiceRequirement<T>,
         provider_id: ProviderRegistrationId,
-    ) -> Result<(Arc<T>, Arc<ProviderGate>, ProviderCandidate), ServiceRegistryError> {
+    ) -> Result<ProviderBinding<T>, ServiceRegistryError> {
         let mut state = self.lock();
         ensure_contract(&mut state, requirement.service_id(), requirement.contract())?;
         let entry = state
@@ -317,17 +327,22 @@ impl RegistryCore {
                 provided: entry.candidate.service_id().clone(),
             });
         }
-        if !entry.gate.is_available() {
+        if !entry.gate.is_available() || !entry.activity.is_open() {
             return Err(ServiceRegistryError::ProviderUnavailable { provider_id });
         }
-        let provider = entry.value.downcast_ref::<Arc<T>>().cloned().ok_or(
+        let provider = entry.value.downcast_ref::<Arc<T>>().ok_or(
             ServiceRegistryError::ProviderValueTypeMismatch {
                 provider_id,
                 expected: requirement.contract().name(),
                 stored: entry.contract.name(),
             },
         )?;
-        Ok((provider, Arc::clone(&entry.gate), entry.candidate.clone()))
+        Ok(ProviderBinding::new(
+            Arc::downgrade(provider),
+            Arc::clone(&entry.gate),
+            Arc::clone(&entry.activity),
+            entry.candidate.clone(),
+        ))
     }
 
     fn withdraw(&self, marker: &Arc<()>) {
@@ -370,6 +385,7 @@ struct ProviderEntry {
     contract: ContractType,
     marker: Arc<()>,
     gate: Arc<ProviderGate>,
+    activity: Arc<ActivityGate>,
     value: Box<dyn Any + Send + Sync>,
 }
 
