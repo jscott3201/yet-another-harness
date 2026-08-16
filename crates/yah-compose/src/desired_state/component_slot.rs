@@ -226,6 +226,22 @@ impl ComponentSlot {
         Ok(self.mounted_component()?.cancellation(selection_epoch)?)
     }
 
+    /// Record an activation failure and synchronously seal its effects.
+    ///
+    /// Clean cleanup returns the mounted revision to pending; a non-clean
+    /// report remains blocked in stopping. Retry remains an explicit later
+    /// reconciliation pass against the latest desired state.
+    pub fn fail_activation(
+        &mut self,
+        selection_epoch: ProviderSelectionEpoch,
+        summary: impl Into<String>,
+    ) -> Result<ReconcileOutcome, ComponentSlotError> {
+        self.require_active_revision()?;
+        Ok(self
+            .mounted_component_mut()?
+            .fail_activation(selection_epoch, summary)?)
+    }
+
     /// Resume the current sealed scope in place and retain its terminal report.
     ///
     /// If this future is dropped, the mounted component remains in the slot and

@@ -259,6 +259,32 @@ impl ReconciledComponent {
         Ok(self.resources(selection_epoch)?.effects.cancellation())
     }
 
+    /// Record an activation failure and synchronously seal its effects.
+    ///
+    /// Starting and active activations enter controlled teardown toward
+    /// [`StopTarget::Pending`]. This operation does not retry or latch the
+    /// component; a later reconciliation pass may start a fresh activation
+    /// after clean cleanup completes. A non-clean report remains blocked in
+    /// stopping under the normal teardown policy.
+    pub fn fail_activation(
+        &mut self,
+        selection_epoch: ProviderSelectionEpoch,
+        summary: impl Into<String>,
+    ) -> Result<ReconcileOutcome, ReconcileError> {
+        self.require_epoch(selection_epoch)?;
+        self.instance
+            .mark_failed(selection_epoch.activation(), summary)?;
+        let failure = self
+            .instance
+            .last_failure()
+            .expect("a successful failure transition retains diagnostics")
+            .clone();
+        self.begin_stop(
+            ComponentStopReason::ActivationFailed(failure),
+            StopTarget::Pending,
+        )
+    }
+
     /// Publish a starting activation only if its frozen assignment is still
     /// desired and every exact provider remains available.
     ///

@@ -1,9 +1,9 @@
 use std::{collections::BTreeMap, error::Error, fmt};
 
 use crate::{
-    ActivationEpoch, CloseReport, ComponentInstanceId, ComponentRevisionId, ComponentStateKind,
-    EffectScopeError, LifecycleError, ProviderCandidate, ProviderRegistrationId, ServiceId,
-    ServiceRegistryError, StopTarget,
+    ActivationEpoch, CloseReport, ComponentFailure, ComponentInstanceId, ComponentRevisionId,
+    ComponentStateKind, EffectScopeError, LifecycleError, ProviderCandidate,
+    ProviderRegistrationId, ServiceId, ServiceRegistryError, StopTarget,
 };
 
 /// Fence for one immutable provider assignment owned by one activation.
@@ -227,6 +227,7 @@ pub enum DesiredStopReason {
 pub enum ComponentStopReason {
     Dependency(DependencyStopReason),
     Desired(DesiredStopReason),
+    ActivationFailed(ComponentFailure),
 }
 
 /// Observable result of one level-triggered reconciliation pass.
