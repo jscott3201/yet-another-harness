@@ -80,6 +80,12 @@ Capability contract authors must not return or clone raw authority that bypasses
 the handle. Future Wasm and process adapters will map these semantics onto
 authenticated opaque resource tables rather than serialize process-local IDs.
 
+The runnable [local authoring example](plugin-authoring.md) demonstrates this
+flow with an example-only synchronous greeting contract. It proves denial,
+exact grant, activation revocation, and non-retargeting provider replacement;
+it does not turn that Rust trait into a production capability family or guest
+ABI.
+
 ## Deliberate boundary
 
 This slice does not implement:
@@ -90,7 +96,7 @@ This slice does not implement:
 - async calls, streams, task supervision, deadlines, rate limits, or forced
   cancellation;
 - durable work-attempt identity or child invocation scopes;
-- WIT/IPC resource encodings, concrete drivers, or sandbox enforcement;
+- WIT/IPC resource encodings, production execution drivers, or sandbox enforcement;
 - provider cleanup ownership, durable external effects, or Selene persistence;
   or
 - automatic lifecycle changes after a host policy decision.

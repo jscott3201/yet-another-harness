@@ -9,10 +9,11 @@ foundation and the first process-local composition lifecycle, cleanup, typed
 service-binding, exact-assignment dependency reconciliation, and fenced desired
 component-revision primitives, plus independently authored semantic and fault
 corpora, a strict plugin manifest, and a runtime-neutral prepared-driver
-lifecycle with activation-scoped capability brokerage. It does not yet contain
-a general callback host, concrete executable driver, agent loop, sandbox,
-daemon, or client. A reusable host-side driver conformance testkit is
-reference-proven, but no real backend has passed it yet.
+lifecycle with activation-scoped capability brokerage. One trusted local
+authoring example connects an example-only host capability to a built-in driver
+and passes the reusable lifecycle corpus. The repository does not yet contain
+a general callback host, production execution backend, agent loop, sandbox,
+daemon, or client; no guest runtime or cross-runtime equivalence is proven.
 
 ## Evidence Status
 
@@ -22,9 +23,9 @@ reference-proven, but no real backend has passed it yet.
 | Current model-free kernel | Deterministic tests for command, fencing, cancellation, effect, provider, recovery, and Adapter 1 behavior | Available for reuse; pivot integration has not started |
 | Contextual composition runtime | Component definition/instance/scope identities, immutable ancestor-scoped service visibility, epoch-fenced lifecycle, reversible nested effects, typed requirements, exact revocable bindings, exact-assignment recomposition, fenced desired revisions, six cross-layer semantic cases, and four concurrent fault cases | Initial slices with deterministic conformance evidence; no callbacks, task supervisor, provider-ranking policy, shared/named realms, or host-wide scheduler |
 | Plugin manifest and revision vocabulary | Strict bounded TOML, canonical package/service/capability/version/path types, typed driver entrypoints, request-only declarations, and host-supplied revision identity | Initial data-contract slice; no loading, admission, grants, or execution |
-| Plugin driver lifecycle | Dyn-compatible exact-revision driver preparation, cancellation-safe host start ownership, effect-owned deactivation, readiness revalidation, panic containment, and fenced advisory health | Runtime-neutral deterministic fake passes; no concrete backend, loader, scheduler, or general callback runner |
-| Activation-scoped capability broker | Revision-bound requested subsets, exact typed registrations, weak mediated handles, provider/activation ABA fencing, and synchronous call drain before cleanup | Initial in-process slice; no policy engine, durable attempt scope, concrete capability family, WIT/IPC resource table, or hostile-code sandbox |
-| Host-side driver conformance | Five stable cases cover ready lifecycle, pending-start cancellation, returned start/deactivation failures, and shared-driver isolation through public host APIs | Reusable runner is reference-proven; no real backend, guest ABI, or cross-runtime equivalence claim |
+| Plugin driver lifecycle | Dyn-compatible exact-revision driver preparation, cancellation-safe host start ownership, effect-owned deactivation, readiness revalidation, panic containment, and fenced advisory health | Deterministic reference and trusted local authoring drivers pass; no production backend, loader, scheduler, or general callback runner |
+| Activation-scoped capability broker | Revision-bound requested subsets, exact typed registrations, weak mediated handles, provider/activation ABA fencing, and synchronous call drain before cleanup | One example-only local greeting round trip passes; no policy engine, durable attempt scope, production capability family, WIT/IPC resource table, or hostile-code sandbox |
+| Host-side driver conformance | Five stable cases cover ready lifecycle, pending-start cancellation, returned start/deactivation failures, and shared-driver isolation through public host APIs | Reusable runner is reference-proven and passed by the local authoring driver; no production guest backend or cross-runtime equivalence claim |
 | Wasm, Node/TypeScript, and Python plugin drivers | No implementation in this repository | Not started |
 | Selene work, session, memory, evidence, and plugin-lineage domains | Only the current kernel graph exists | Design/spike stage |
 | Full harness vertical slice | No live model, tool execution, memory loop, or subagent | Not started |
@@ -223,13 +224,19 @@ or concurrent effect registration.
 - An aggregate runner that preserves every fresh-subject result and a
   deterministic reference adapter plus negative metadata, lifecycle,
   isolation, probe, cleanup, and final-driver-drop evidence.
+- A runnable trusted local authoring example whose checked manifest requests an
+  example-only greeting capability, whose built-in consumer distinguishes
+  request from grant, and whose exact handle remains revoked across clean stop
+  and provider replacement while the same driver family passes all five
+  portable lifecycle cases.
 
 Manifest parsing is not installation or admission. In particular, a built-in
 lane declaration cannot name a linked factory and still requires out-of-band
 trusted provenance plus exact host registration. Package extraction,
 signatures, configuration snapshots, policy/approval calculation, concrete
-capability families and driver backends, WIT/IPC bindings, durable attempts,
-and actual multi-backend or guest-semantic conformance are not implemented. See
+production capability families and execution backends, plugin-provided
+services, WIT/IPC bindings, durable attempts, and actual multi-runtime or
+guest-semantic conformance are not implemented. See
 the [driver lifecycle contract](plugin-driver.md) and
 [capability broker contract](plugin-capabilities.md), plus the
 [driver conformance contract](plugin-driver-conformance.md).
@@ -278,15 +285,15 @@ plugin SDK, daemon protocol, or promised compatibility surface.
 ## Pivot Work
 
 The next useful proof extends the landed composition and plugin-host contracts
-into a narrow vertical slice containing:
+beyond the completed local authoring example into a narrow vertical slice
+containing:
 
-1. one local example contract that uses the reusable conformance testkit;
-2. one Selene graph/memory host capability;
-3. one Wasm component plus one modern Node or Python process plugin that runs
+1. one Selene graph/memory host capability;
+2. one Wasm component plus one modern Node or Python process plugin that runs
    the portable host-driver cases;
-4. a durable external action demonstrating that plugin unload and action
+3. a durable external action demonstrating that plugin unload and action
    settlement remain distinct; and
-5. crash/restart reconstruction with behavioral conformance tests.
+4. crash/restart reconstruction with behavioral conformance tests.
 
 After that slice, the harness can grow model, prompt, tool, session, workflow,
 subagent, sandbox, daemon, and client components without fixing every final
@@ -298,9 +305,9 @@ crate or protocol boundary in advance.
   automatic provider ranking or registry watches, concurrent effect-registration
   or task supervisor, or host-wide desired-graph scheduler.
 - Plugin package loading, verification, admission, installation, updates,
-  concrete executable drivers or capability families, policy-derived grants,
-  language SDKs, guest-semantic corpus, or demonstrated cross-driver
-  equivalence.
+  production execution backends or capability families, plugin service
+  contributions, policy-derived grants, language SDKs, guest-semantic corpus,
+  or demonstrated cross-runtime equivalence.
 - Wasmtime/WIT host or sandboxed Node/TypeScript and CPython workers.
 - Durable memory capture, retrieval, ranking, summaries, or evidence lineage.
 - Live model providers, prompt assembly, tool execution, workflows, schedules,

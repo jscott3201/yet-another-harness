@@ -97,7 +97,7 @@ not part of package revision identity.
 
 The runtime-neutral [driver lifecycle](plugin-driver.md) is now a separate
 implemented layer over these values. Package loading and verification,
-configuration binding, concrete capability contracts, and concrete driver
+configuration binding, production capability families, and production driver
 backends remain later roadmap slices. The host-side driver conformance testkit
 is implemented separately from this data contract. WIT, process IPC, sandbox
 enforcement, persistence, and actual multi-backend equivalence also remain
