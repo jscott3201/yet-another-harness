@@ -38,13 +38,23 @@ OS-thread barriers establish call admission and release points; manual polling
 proves the close futures are pending before release. The cases use no sleeps,
 probabilistic scheduling assertions, or background runtime.
 
+## Contextual visibility
+
+`crates/yah-compose/tests/contextual_visibility.rs` proves that provider
+visibility is authorized by immutable scope-node ancestry rather than display
+IDs. Providers flow to their own scope and descendants, sibling and independent
+root scopes cannot observe or bind them, and exact reconciled assignments use
+the same filtered inventory before start and after withdrawal. Invisible exact
+IDs fail uniformly as unavailable without revealing provider metadata.
+
 ## Boundaries
 
 - Dependency convergence is explicit. YAH does not currently choose a unique
   provider or automatically react to registry changes.
-- Registry-domain separation is not Cordis-style contextual realm inheritance,
-  shared isolation labels, or a hostile-code sandbox. Contextual visibility is
-  still unimplemented.
+- Registry-domain separation is not Cordis-style shared isolation labels or a
+  hostile-code sandbox. CMP-008 separately proves immutable same-scope and
+  ancestor visibility across inventory, exact assignment, binding, and
+  withdrawal; shared/named realms and dynamic reparenting remain deferred.
 - Desired revision churn is not file watching, debounce, module HMR, loader
   rollback, or durable desired-state reconstruction.
 - Failure reporting is a host-facing lifecycle seam, not a component callback

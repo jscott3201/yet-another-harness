@@ -17,7 +17,7 @@ composition host, plugin host, agent loop, sandbox, daemon, or client.
 |---|---|---|
 | G02 storage fan-in and crash recovery | Atomic state, receipt, and journal commits under kill/reopen, writer takeover, and corruption drills | Passed across 1,440 scored trials: [report](gates/G02-storage-fanin-recovery.md) |
 | Current model-free kernel | Deterministic tests for command, fencing, cancellation, effect, provider, recovery, and Adapter 1 behavior | Available for reuse; pivot integration has not started |
-| Contextual composition runtime | Component definition/instance/scope identities, epoch-fenced lifecycle, reversible nested effects, typed requirements, exact revocable bindings, exact-assignment recomposition, fenced desired revisions, six cross-layer semantic cases, and four concurrent fault cases | Initial slices with deterministic conformance evidence; no callbacks, task supervisor, provider-ranking policy, contextual visibility, or host-wide scheduler |
+| Contextual composition runtime | Component definition/instance/scope identities, immutable ancestor-scoped service visibility, epoch-fenced lifecycle, reversible nested effects, typed requirements, exact revocable bindings, exact-assignment recomposition, fenced desired revisions, six cross-layer semantic cases, and four concurrent fault cases | Initial slices with deterministic conformance evidence; no callbacks, task supervisor, provider-ranking policy, shared/named realms, or host-wide scheduler |
 | Plugin manifest, SDK, and conformance suite | No implementation in this repository | Not started |
 | Wasm, Node/TypeScript, and Python plugin drivers | No implementation in this repository | Not started |
 | Selene work, session, memory, evidence, and plugin-lineage domains | Only the current kernel graph exists | Design/spike stage |
@@ -87,9 +87,11 @@ drain admitted calls or run its cleanup.
 - Generated provider identities reuse their unique effect registration, so a
   stale handle or delayed cleanup cannot target a replacement publication.
 
-The registry is one flat, process-local visibility domain. Its low-level
-inventory and binding operations do not choose providers or mutate lifecycle.
-Live service values are not serialized or stored in Selene.
+The registry is process-local. Inventory and binding derive visibility from an
+immutable scope lineage: providers flow to the same scope and descendants,
+while independently minted roots are isolated regardless of matching display
+IDs. These operations do not choose providers or mutate lifecycle. Live
+service values are not serialized or stored in Selene.
 
 ### Dependency reconciliation
 
@@ -113,8 +115,8 @@ Live service values are not serialized or stored in Selene.
 
 This layer deliberately supplies no implicit first-provider policy. Additional
 candidates do not disturb an explicit live assignment. Registry watches,
-background convergence, callback execution, contextual inheritance/isolation,
-provider ranking, cycles, and retry policy remain future work.
+background convergence, callback execution, shared/named realms, dynamic
+reparenting, provider ranking, cycles, and retry policy remain future work.
 
 ### Desired component revisions
 
@@ -161,11 +163,12 @@ durable desired state.
   unwind release, resumable close, and final provider-value destructor panic
   containment during exact-epoch activation failure.
 
-Registry-domain separation is a coarse process-local boundary, not contextual
-scope inheritance or shared isolation realms. Desired churn is caller-driven,
-not filesystem HMR. The fault corpus covers synchronous mediated service calls,
-not async tasks, deadlines, reentrant self-close, escaped authority, executor or
-waker failure, or concurrent effect registration.
+Registry-domain separation remains a coarse process-local boundary; CMP-008
+adds immutable scope ancestry within a registry, but not shared/named realms or
+policy interception. Desired churn is caller-driven, not filesystem HMR. The
+fault corpus covers synchronous mediated service calls, not async tasks,
+deadlines, reentrant self-close, escaped authority, executor or waker failure,
+or concurrent effect registration.
 
 ### Selene-backed mutation and recovery
 
@@ -229,9 +232,9 @@ crate or protocol boundary in advance.
 
 ## Not Implemented
 
-- Component callback runner, contextual service inheritance/isolation,
+- Component callback runner, shared/named realms and dynamic visibility,
   automatic provider ranking or registry watches, concurrent effect-registration
-  or task supervisor, host-wide desired-graph scheduler, or isolation realms.
+  or task supervisor, or host-wide desired-graph scheduler.
 - Plugin packages, manifests, admission, installation, updates, SDKs, or
   language conformance tests.
 - Wasmtime/WIT host or sandboxed Node/TypeScript and CPython workers.

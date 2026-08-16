@@ -6,7 +6,7 @@ use std::{
 };
 
 use crate::{
-    ComponentDefinition, ComponentInstance, ComponentState, EffectScope, EffectScopeState,
+    ComponentDefinition, ComponentInstance, ComponentState, EffectScope, EffectScopeState, Scope,
     ServiceId, effect_scope::ActivityGate,
 };
 
@@ -21,9 +21,10 @@ use super::{
 ///
 /// The registry is intentionally not `Clone`: provider publication remains
 /// under one composition authority. It may inventory multiple candidates for
-/// a service, but callers must bind an exact [`ProviderRegistrationId`]. Scope
-/// inheritance and selection policy are later layers. Level-triggered exact
-/// assignment reconciliation is owned by [`crate::ReconciledComponent`].
+/// a service, but callers must bind an exact [`ProviderRegistrationId`]. A
+/// provider is visible only from its own immutable scope node or descendants
+/// in the same root tree; display IDs never grant authority. Selection policy
+/// remains explicit in [`crate::ReconciledComponent`].
 /// The first declaration, discovery, or publication of a [`ServiceId`] fixes
 /// its exact Rust contract type for this registry's lifetime.
 pub struct ServiceRegistry {
@@ -101,6 +102,7 @@ impl ServiceRegistry {
             marker,
             gate,
             activity: effects.activity_gate(),
+            owner_scope: owner.scope().clone(),
             value: Box::new(Arc::clone(&value)),
         };
         self.core.publish(service_id, contract, entry);
@@ -114,9 +116,13 @@ impl ServiceRegistry {
     pub fn candidates<T: ?Sized + Send + Sync + 'static>(
         &self,
         requirement: &ServiceRequirement<T>,
+        consumer_scope: &Scope,
     ) -> Result<Vec<ProviderCandidate>, ServiceRegistryError> {
-        self.core
-            .candidates(requirement.service_id(), requirement.contract())
+        self.core.candidates(
+            requirement.service_id(),
+            requirement.contract(),
+            consumer_scope,
+        )
     }
 
     /// Snapshot every declared requirement and its visible candidates under
@@ -127,8 +133,10 @@ impl ServiceRegistry {
     pub fn inventory(
         &self,
         definition: &ComponentDefinition,
+        consumer_scope: &Scope,
     ) -> Result<Vec<RequirementCandidates>, ServiceRegistryError> {
-        self.core.inventory(definition.requirements())
+        self.core
+            .inventory(definition.requirements(), consumer_scope)
     }
 
     /// Check whether every required service declared by `definition` has at
@@ -140,8 +148,11 @@ impl ServiceRegistry {
     pub fn requirement_status(
         &self,
         definition: &ComponentDefinition,
+        consumer_scope: &Scope,
     ) -> Result<RequirementStatus, ServiceRegistryError> {
-        let inventory = self.core.inventory(definition.requirements())?;
+        let inventory = self
+            .core
+            .inventory(definition.requirements(), consumer_scope)?;
         let missing = inventory
             .into_iter()
             .filter(|group| group.candidates.is_empty())
@@ -193,7 +204,9 @@ impl ServiceRegistry {
             });
         }
 
-        let provider = self.core.binding::<T>(requirement, provider_id)?;
+        let provider = self
+            .core
+            .binding::<T>(requirement, provider_id, consumer.scope())?;
         if !provider.is_available() {
             return Err(ServiceRegistryError::ProviderUnavailable { provider_id });
         }
@@ -266,6 +279,7 @@ impl RegistryCore {
         &self,
         service_id: &ServiceId,
         contract: ContractType,
+        consumer_scope: &Scope,
     ) -> Result<Vec<ProviderCandidate>, ServiceRegistryError> {
         let mut state = self.lock();
         ensure_contract(&mut state, service_id, contract)?;
@@ -276,6 +290,7 @@ impl RegistryCore {
                 entry.candidate.service_id() == service_id
                     && entry.gate.is_available()
                     && entry.activity.is_open()
+                    && entry.owner_scope.is_visible_from(consumer_scope)
             })
             .map(|entry| entry.candidate.clone())
             .collect())
@@ -284,6 +299,7 @@ impl RegistryCore {
     fn inventory(
         &self,
         requirements: &[RequiredService],
+        consumer_scope: &Scope,
     ) -> Result<Vec<RequirementCandidates>, ServiceRegistryError> {
         let mut state = self.lock();
         for requirement in requirements {
@@ -302,6 +318,7 @@ impl RegistryCore {
                             && entry.contract == requirement.contract()
                             && entry.gate.is_available()
                             && entry.activity.is_open()
+                            && entry.owner_scope.is_visible_from(consumer_scope)
                     })
                     .map(|entry| entry.candidate.clone())
                     .collect(),
@@ -313,13 +330,21 @@ impl RegistryCore {
         &self,
         requirement: &ServiceRequirement<T>,
         provider_id: ProviderRegistrationId,
+        consumer_scope: &Scope,
     ) -> Result<ProviderBinding<T>, ServiceRegistryError> {
         let mut state = self.lock();
-        ensure_contract(&mut state, requirement.service_id(), requirement.contract())?;
         let entry = state
             .providers
             .get(&provider_id)
             .ok_or(ServiceRegistryError::UnknownProvider { provider_id })?;
+        if !entry.owner_scope.is_visible_from(consumer_scope) {
+            return Err(ServiceRegistryError::ProviderUnavailable { provider_id });
+        }
+        ensure_contract(&mut state, requirement.service_id(), requirement.contract())?;
+        let entry = state
+            .providers
+            .get(&provider_id)
+            .expect("provider remains present under the registry lock");
         if entry.candidate.service_id() != requirement.service_id() {
             return Err(ServiceRegistryError::ProviderDoesNotSatisfy {
                 provider_id,
@@ -386,6 +411,7 @@ struct ProviderEntry {
     marker: Arc<()>,
     gate: Arc<ProviderGate>,
     activity: Arc<ActivityGate>,
+    owner_scope: Scope,
     value: Box<dyn Any + Send + Sync>,
 }
 
