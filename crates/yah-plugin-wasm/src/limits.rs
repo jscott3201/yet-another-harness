@@ -60,13 +60,27 @@ pub struct WasmLimits {
     /// Stack a guest call runs on, in bytes.
     ///
     /// A guest call runs on a stack of its own so it can yield the thread back
-    /// to the executor mid-call. That stack is allocated per concurrent call,
-    /// not per activation, so it is a live cost of how many calls run at once
-    /// rather than of how many plugins exist. Wasmtime's default is 2 MiB,
-    /// sized for arbitrary guest code; the fixture corpus recurses shallowly,
-    /// and a host that admits a guest needing more should raise this
-    /// deliberately rather than discover it as a stack overflow.
+    /// to the executor mid-call. The cost is per *activation*, not per call in
+    /// flight: Wasmtime parks a finished call's stack in its store and reuses
+    /// it, releasing it only when the store is dropped. Since instantiation is
+    /// itself a guest call, every live activation holds one of these from its
+    /// first call until teardown, idle or not. A host sizing this is pricing
+    /// how many plugins it will keep alive, not how many are working.
+    ///
+    /// This sizes the stack; it does not bound how deep the guest may recurse
+    /// on it. That is [`Self::guest_stack_bytes`], and the two move together
+    /// because Wasmtime refuses a fiber smaller than the guest bound it
+    /// carries.
     pub call_stack_bytes: usize,
+    /// How deep guest code may recurse before it is trapped, in bytes.
+    ///
+    /// This is the bound that actually stops a runaway recursion, and it is
+    /// separate from the stack the call runs on: the fiber must be large
+    /// enough to hold this plus the host frames that run above it. Wasmtime
+    /// defaults it to 512 KiB whether or not a host thinks about it, so
+    /// leaving it unset would mean the guest's depth bound was Wasmtime's
+    /// choice rather than the host's.
+    pub guest_stack_bytes: usize,
     /// Address space reserved on each side of a linear memory.
     ///
     /// The guard is what lets Wasmtime turn an out-of-bounds guest access into
@@ -210,6 +224,7 @@ impl Default for WasmLimits {
             memory_reservation_bytes: 16 * 1024 * 1024,
             memory_guard_bytes: 1024 * 1024,
             call_stack_bytes: 1024 * 1024,
+            guest_stack_bytes: 512 * 1024,
             host_call_bytes: 4 * 1024 * 1024,
             epoch_tick: Duration::from_millis(10),
             call_budget_ticks: 100,
@@ -304,10 +319,12 @@ impl GuestInterrupt {
     /// Stop this activation, in flight and on entry.
     ///
     /// A call already running ends at its next epoch deadline, so its latency
-    /// is bounded by one tick rather than by anything the guest does. A call
-    /// that has not started yet is refused outright, which matters because a
-    /// short call can return without ever reaching a deadline and would
-    /// otherwise never see this flag at all.
+    /// is bounded by one tick rather than by anything the guest does - provided
+    /// something is still polling that call, since a guest call runs on a fiber
+    /// and reaches a deadline only when resumed. A call that has not started
+    /// yet is refused outright, which matters because a short call can return
+    /// without ever reaching a deadline and would otherwise never see this flag
+    /// at all.
     ///
     /// The flag is deliberately sticky: [`Self::begin_call`] resets the tick
     /// budget, but nothing resets a kill.

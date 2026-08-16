@@ -20,7 +20,12 @@
 //!
 //! The store lock is still held for the duration of a guest call, so a guest
 //! that will not return delays its own deactivation. Deactivation stops the
-//! guest before asking for that lock, which is what bounds the delay.
+//! guest before asking for that lock, which is what bounds the delay - but
+//! that stop is read at the guest's next epoch deadline, and a call now
+//! reaches one only while something is still polling its future. The bound the
+//! host relies on comes from destroying the start future first, which unwinds
+//! the fiber as it drops; a consumer that parked a start future and then
+//! awaited deactivation would wait on a guest nobody is resuming.
 //!
 //! This driver does not load packages, meter fuel, transport granted
 //! capabilities across the ABI, or contain hostile guest code. Bounding what a
@@ -124,6 +129,15 @@ impl WasmActivationPlan {
     pub const fn many_memories() -> Self {
         Self {
             guest: GuestProgram::ManyMemories,
+            start: StartBehavior::CallActivate,
+            deactivate: DeactivateBehavior::Release,
+        }
+    }
+
+    /// Instantiate a guest that recurses until the depth bound stops it.
+    pub const fn deep_recursion() -> Self {
+        Self {
+            guest: GuestProgram::DeepRecursion,
             start: StartBehavior::CallActivate,
             deactivate: DeactivateBehavior::Release,
         }
@@ -286,10 +300,14 @@ impl WasmComponentDriver {
         // accesses into faults without a bounds check; it stays, but sized to
         // something proportionate to the ceiling rather than to a 4 GiB memory.
         config.memory_guard_size(limits.memory_guard_bytes);
-        // One of these exists per concurrent guest call, so it is a cost of
-        // concurrency rather than of plugin count. Wasmtime's 2 MiB default is
-        // sized for arbitrary guest code; this corpus does not need it.
+        // Wasmtime parks a finished call's stack in its store and reuses it,
+        // so this is one allocation per live activation rather than per call
+        // in flight. Its 2 MiB default is sized for arbitrary guest code.
         config.async_stack_size(limits.call_stack_bytes);
+        // The stack size is not the recursion bound - this is. Left unset it
+        // would sit at Wasmtime's 512 KiB, which would make how deep a guest
+        // may recurse Wasmtime's decision rather than the host's.
+        config.max_wasm_stack(limits.guest_stack_bytes);
         let engine = Engine::new(&config).map_err(|error| {
             WasmDriverBuildError::new(format!("engine did not accept its configuration: {error}"))
         })?;
@@ -582,23 +600,6 @@ impl ActivationCore {
         ))
     }
 
-    #[allow(dead_code)]
-    fn guarded_sync<T>(&self, call: impl FnOnce() -> wasmtime::Result<T>) -> wasmtime::Result<T> {
-        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(call)) {
-            Ok(result) => result,
-            Err(panic) => {
-                let summary = panic
-                    .downcast_ref::<&str>()
-                    .map(|text| (*text).to_owned())
-                    .or_else(|| panic.downcast_ref::<String>().cloned())
-                    .unwrap_or_else(|| "unknown panic".to_owned());
-                Err(wasmtime::Error::msg(format!(
-                    "host code panicked while guest code was running: {summary}"
-                )))
-            }
-        }
-    }
-
     /// Record that this activation can never serve another guest call.
     ///
     /// A faulted activation is known-bad rather than merely unknown, so this is
@@ -794,6 +795,7 @@ mod interrupt_tests {
         config.memory_reservation_for_growth(limits.memory_reservation_bytes);
         config.memory_guard_size(limits.memory_guard_bytes);
         config.async_stack_size(limits.call_stack_bytes);
+        config.max_wasm_stack(limits.guest_stack_bytes);
         Engine::new(&config).expect("engine accepts its configuration")
     }
 
@@ -948,12 +950,26 @@ mod interrupt_tests {
             });
             let spinner_took = started.elapsed();
 
-            spun.expect_err("the runaway must still hit its deadline");
-            let healthy_took = healthy_took.expect("the healthy guest completed");
+            let spun = spun.expect_err("the runaway must still hit its deadline");
             assert!(
-                healthy_took < spinner_took / 2,
-                "the healthy guest took {healthy_took:?} against the runaway's \
-                 {spinner_took:?}; it waited for the thread rather than sharing it"
+                spun.summary().contains("call deadline"),
+                "the runaway must end on its deadline, not some other way: {}",
+                spun.summary()
+            );
+
+            let healthy_took = healthy_took.expect("the healthy guest completed");
+            // Measured against the mechanism's own unit, not against the
+            // runaway's total. A ratio would accept a sibling that waited
+            // dozens of ticks as long as the runaway ran longer still; the
+            // property being claimed is that the sibling gets in within about
+            // one tick. The shipped code lands near 1.5 ticks, so this leaves
+            // several times that in headroom and still fails anything that
+            // yields rarely instead of every tick.
+            assert!(
+                healthy_took < limits.epoch_tick * 10,
+                "the healthy guest took {healthy_took:?}, more than ten ticks, \
+                 against the runaway's {spinner_took:?}; it is not interleaving \
+                 per tick"
             );
         });
     }

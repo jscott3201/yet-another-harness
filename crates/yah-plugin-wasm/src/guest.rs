@@ -26,6 +26,8 @@ pub enum GuestProgram {
     MultiMemory,
     /// Declares many empty memories, which cost bytes nothing and space plenty.
     ManyMemories,
+    /// Recurses without a base case, to test the host's depth bound.
+    DeepRecursion,
 }
 
 impl GuestProgram {
@@ -38,6 +40,7 @@ impl GuestProgram {
             Self::MemoryHog => MEMORY_HOG,
             Self::MultiMemory => MULTI_MEMORY,
             Self::ManyMemories => MANY_MEMORIES,
+            Self::DeepRecursion => DEEP_RECURSION,
         }
     }
 }
@@ -48,3 +51,4 @@ const RUNAWAY: &str = include_str!("../guests/runaway.wat");
 const MEMORY_HOG: &str = include_str!("../guests/memory-hog.wat");
 const MULTI_MEMORY: &str = include_str!("../guests/multi-memory.wat");
 const MANY_MEMORIES: &str = include_str!("../guests/many-memories.wat");
+const DEEP_RECURSION: &str = include_str!("../guests/deep-recursion.wat");

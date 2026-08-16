@@ -79,19 +79,20 @@ fn generous_limits() -> WasmLimits {
 
 /// Turns a hang into a reported failure.
 ///
-/// `tokio::time::timeout` cannot do this job here. The driver runs its guest
-/// call synchronously inside the future's `poll`, so a call that never returns
-/// never yields to the runtime; a timer that fires has nothing to wake, because
-/// the timeout branch is only reached when the task is polled *again* - which
-/// is precisely what a hung guest prevents. Every in-runtime timeout is
-/// cooperative, and a blocking poll is uncooperative by construction.
+/// A guest call now yields its thread at every epoch tick, so an in-runtime
+/// timeout would usually work. The watchdog is a thread anyway, because the
+/// thing these cases are checking is exactly the mechanism a cooperative
+/// timeout would depend on: if the yield regresses, the guest holds its thread
+/// again and a timer has nothing to wake. A guard that fails only when the
+/// mechanism it guards still works is not a guard.
 ///
-/// A thread outside the runtime is not bound by that. It cannot cancel the
-/// blocked call - nothing can, short of the epoch mechanism these cases exist
-/// to check - so it ends the process instead. That takes the rest of the test
-/// binary down with it, which is the deliberate trade: a crash names the case
-/// that overran within seconds, where a hang says nothing until CI gives up on
-/// the whole job.
+/// It also covers a hang in host code outside the fiber, which no amount of
+/// guest cooperation reaches.
+///
+/// Being outside the runtime, it cannot cancel a blocked call - so it ends the
+/// process instead. That takes the rest of the test binary down with it, which
+/// is the deliberate trade: a crash names the case that overran within
+/// seconds, where a hang says nothing until CI gives up on the whole job.
 struct Watchdog {
     finished: Arc<AtomicBool>,
 }
@@ -503,6 +504,76 @@ async fn the_same_empty_memories_are_admitted_when_the_count_allows_them() {
     within_kill_bound("the many-memory guest", activation.activate(&rig.registry))
         .await
         .expect("a count within the ceiling is granted");
+    assert_eq!(observer.resource_state(&id), Ok(ResourceState::Live));
+
+    let (slot, _handle) = activation.release_active().expect("active releases");
+    let removed = DesiredComponentState::removed(slot.generation(2));
+    slot.reconcile(&rig.registry, removed)
+        .expect("component begins stopping");
+    slot.finish_stop(rig.epoch)
+        .await
+        .expect("cleanup completes");
+}
+
+#[tokio::test]
+async fn a_guest_that_recurses_too_deep_is_stopped_by_the_depth_bound() {
+    // The bound under test is `guest_stack_bytes`, not the size of the stack
+    // the call runs on. Only a recursing guest can tell them apart: it reaches
+    // a depth limit while the fiber it runs on is far from exhausted.
+    let mut rig = Rig::new("wasm.limits.recursion", '9');
+    let (driver, _observer) = driver(&rig.revision, vec![WasmActivationPlan::deep_recursion()]);
+
+    let mut activation =
+        HostPluginActivation::prepare(&mut rig.slot, rig.epoch, &rig.broker, &rig.grants, driver)
+            .expect("preparation succeeds");
+
+    let outcome = within_kill_bound("the depth bound", activation.activate(&rig.registry)).await;
+    let failure = match outcome {
+        Err(PluginStartError::Driver { failure, .. }) => failure,
+        other => panic!("a too-deep guest must fail, got {other:?}"),
+    };
+    assert_eq!(failure.kind(), DriverActivationErrorKind::Failed);
+    // Naming the exhaustion matters: a depth bound and a call deadline are
+    // different limits, and a guest that recursed is not a guest that spun.
+    assert!(
+        failure.summary().contains("stack exhausted"),
+        "the depth bound must name itself: {}",
+        failure.summary()
+    );
+    assert!(
+        !failure.summary().contains("call deadline"),
+        "recursion is refused by depth, not by time: {}",
+        failure.summary()
+    );
+
+    activation.finish_stop().await.expect("cleanup completes");
+}
+
+#[tokio::test]
+async fn the_same_recursion_completes_under_a_bound_that_can_afford_it() {
+    // The control, and the only thing that makes the case above attributable.
+    // Same guest, same depth, only the host's number differs. It also pins
+    // that the driver sets the bound at all: left unset, Wasmtime's 512 KiB
+    // default applies and this guest cannot finish.
+    let mut rig = Rig::new("wasm.limits.recursion.ok", 'a');
+    let (driver, observer) = driver_with(
+        &rig.revision,
+        vec![WasmActivationPlan::deep_recursion()],
+        WasmLimits {
+            guest_stack_bytes: 8 * 1024 * 1024,
+            call_stack_bytes: 16 * 1024 * 1024,
+            ..generous_limits()
+        },
+    );
+
+    let mut activation =
+        HostPluginActivation::prepare(&mut rig.slot, rig.epoch, &rig.broker, &rig.grants, driver)
+            .expect("preparation succeeds");
+    let id = activation.id().clone();
+
+    within_kill_bound("the deep guest", activation.activate(&rig.registry))
+        .await
+        .expect("recursion within the bound is granted");
     assert_eq!(observer.resource_state(&id), Ok(ResourceState::Live));
 
     let (slot, _handle) = activation.release_active().expect("active releases");
