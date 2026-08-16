@@ -1,3 +1,5 @@
+use std::sync::OnceLock;
+
 use yah_compose::{
     ComponentDefinition, ComponentDefinitionError, ComponentInstance, ComponentState, EffectScope,
     EffectScopeError, EffectScopeState, RequirementStatus, Scope, ServiceDefinition,
@@ -10,11 +12,19 @@ struct Greeting(&'static str);
 #[derive(Debug)]
 struct Count(u64);
 
+fn composition_scope() -> &'static Scope {
+    static SCOPE: OnceLock<Scope> = OnceLock::new();
+    SCOPE.get_or_init(|| Scope::root("service-registry.tests"))
+}
+
 fn active_instance(label: &str) -> (ComponentInstance, EffectScope) {
     let definition = ComponentDefinition::new(format!("{label}.component"));
-    let scope = Scope::root(format!("{label}.scope"));
-    let mut instance =
-        ComponentInstance::new(format!("{label}.instance"), &definition, &scope).unwrap();
+    let mut instance = ComponentInstance::new(
+        format!("{label}.instance"),
+        &definition,
+        composition_scope(),
+    )
+    .unwrap();
     let activation = instance.begin_start().unwrap();
     let effects = EffectScope::new(format!("{label}.effects"), activation).unwrap();
     instance.complete_start(activation).unwrap();
@@ -25,9 +35,9 @@ fn starting_instance(
     label: &str,
     definition: &ComponentDefinition,
 ) -> (ComponentInstance, EffectScope) {
-    let scope = Scope::root(format!("{label}.scope"));
     let mut instance =
-        ComponentInstance::new(format!("{label}.instance"), definition, &scope).unwrap();
+        ComponentInstance::new(format!("{label}.instance"), definition, composition_scope())
+            .unwrap();
     let activation = instance.begin_start().unwrap();
     let effects = EffectScope::new(format!("{label}.effects"), activation).unwrap();
     (instance, effects)
@@ -68,13 +78,15 @@ fn deterministic_missing_requirements_leave_the_consumer_pending() {
     let mut consumer_definition = ComponentDefinition::new("test.consumer");
     consumer_definition.require(&greeting.required()).unwrap();
     consumer_definition.require(&count.required()).unwrap();
-    let consumer_scope = Scope::root("consumer.scope");
+    let consumer_scope = composition_scope().clone();
     let consumer =
         ComponentInstance::new("consumer.instance", &consumer_definition, &consumer_scope).unwrap();
     let mut registry = ServiceRegistry::new();
 
     assert_eq!(
-        registry.requirement_status(&consumer_definition).unwrap(),
+        registry
+            .requirement_status(&consumer_definition, &consumer_scope)
+            .unwrap(),
         RequirementStatus::Missing(vec![greeting.id().clone(), count.id().clone()])
     );
     assert_eq!(consumer.state(), &ComponentState::Pending);
@@ -88,7 +100,9 @@ fn deterministic_missing_requirements_leave_the_consumer_pending() {
         )
         .unwrap();
     assert_eq!(
-        registry.requirement_status(&consumer_definition).unwrap(),
+        registry
+            .requirement_status(&consumer_definition, &consumer_scope)
+            .unwrap(),
         RequirementStatus::Missing(vec![count.id().clone()])
     );
     assert_eq!(consumer.state(), &ComponentState::Pending);
@@ -98,7 +112,9 @@ fn deterministic_missing_requirements_leave_the_consumer_pending() {
         .provide(&count_owner, &mut count_effects, count.provider(Count(7)))
         .unwrap();
     assert_eq!(
-        registry.requirement_status(&consumer_definition).unwrap(),
+        registry
+            .requirement_status(&consumer_definition, &consumer_scope)
+            .unwrap(),
         RequirementStatus::Ready
     );
 }
@@ -115,7 +131,7 @@ fn semantic_ids_and_rust_contract_types_both_participate_in_matching() {
         .unwrap();
 
     assert_eq!(
-        registry.candidates(&wrong_type.required()),
+        registry.candidates(&wrong_type.required(), owner.scope()),
         Err(ServiceRegistryError::ContractTypeMismatch {
             service_id: greeting.id().clone(),
             expected: std::any::type_name::<Greeting>(),
@@ -124,12 +140,14 @@ fn semantic_ids_and_rust_contract_types_both_participate_in_matching() {
     );
     assert!(
         registry
-            .candidates(&other_id.required())
+            .candidates(&other_id.required(), owner.scope())
             .unwrap()
             .is_empty()
     );
     assert_eq!(
-        registry.candidates(&greeting.required()).unwrap(),
+        registry
+            .candidates(&greeting.required(), owner.scope())
+            .unwrap(),
         vec![published]
     );
 }
@@ -162,7 +180,12 @@ fn publication_requires_an_active_owner_and_its_exact_activation_scope() {
         ),
         Err(ServiceRegistryError::ActivationMismatch { .. })
     ));
-    assert!(registry.candidates(&service.required()).unwrap().is_empty());
+    assert!(
+        registry
+            .candidates(&service.required(), pending.scope())
+            .unwrap()
+            .is_empty()
+    );
 }
 
 #[test]
@@ -186,7 +209,12 @@ fn a_sealed_effect_scope_rejects_publication_without_visibility() {
             }
         ))
     );
-    assert!(registry.candidates(&service.required()).unwrap().is_empty());
+    assert!(
+        registry
+            .candidates(&service.required(), owner.scope())
+            .unwrap()
+            .is_empty()
+    );
 }
 
 #[test]
@@ -213,7 +241,9 @@ fn multiple_candidates_use_id_order_not_publication_order_or_implicit_selection(
 
     assert!(first.id() < second.id());
     assert_eq!(
-        registry.candidates(&requirement).unwrap(),
+        registry
+            .candidates(&requirement, first_owner.scope())
+            .unwrap(),
         vec![first.clone(), second.clone()]
     );
 

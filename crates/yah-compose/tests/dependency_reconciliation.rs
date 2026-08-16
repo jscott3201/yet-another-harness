@@ -1,3 +1,5 @@
+use std::sync::OnceLock;
+
 use yah_compose::{
     ComponentDefinition, ComponentInstance, ComponentState, ComponentStopReason, DependencyIssue,
     DependencyReadiness, DependencyStopReason, EffectScope, ProviderAssignments, ProviderCandidate,
@@ -11,6 +13,11 @@ struct Greeting(&'static str);
 #[derive(Debug)]
 struct Count;
 
+fn composition_scope() -> &'static Scope {
+    static SCOPE: OnceLock<Scope> = OnceLock::new();
+    SCOPE.get_or_init(|| Scope::root("dependency-reconciliation.tests"))
+}
+
 struct PublishedGreeting {
     effects: EffectScope,
     candidate: ProviderCandidate,
@@ -23,9 +30,12 @@ fn publish_greeting(
     value: &'static str,
 ) -> PublishedGreeting {
     let definition = ComponentDefinition::new(format!("{label}.component"));
-    let scope = Scope::root(format!("{label}.scope"));
-    let mut owner =
-        ComponentInstance::new(format!("{label}.instance"), &definition, &scope).unwrap();
+    let mut owner = ComponentInstance::new(
+        format!("{label}.instance"),
+        &definition,
+        composition_scope(),
+    )
+    .unwrap();
     let activation = owner.begin_start().unwrap();
     let mut effects = EffectScope::new(format!("{label}.effects"), activation).unwrap();
     owner.complete_start(activation).unwrap();
@@ -41,8 +51,7 @@ fn greeting_consumer(
 ) -> ReconciledComponent {
     let mut definition = ComponentDefinition::new("test.greeting-consumer");
     definition.require(&service.required()).unwrap();
-    let scope = Scope::root("test.consumer-scope");
-    ReconciledComponent::mount(instance_id, definition, &scope).unwrap()
+    ReconciledComponent::mount(instance_id, definition, composition_scope()).unwrap()
 }
 
 fn start_greeting_consumer(
@@ -125,9 +134,8 @@ fn multiple_requirements_resolve_in_declaration_not_publication_order() {
     let mut definition = ComponentDefinition::new("test.multi-consumer");
     definition.require(&first_service.required()).unwrap();
     definition.require(&second_service.required()).unwrap();
-    let scope = Scope::root("test.multi-scope");
     let mut consumer =
-        ReconciledComponent::mount("test.multi-instance", definition, &scope).unwrap();
+        ReconciledComponent::mount("test.multi-instance", definition, composition_scope()).unwrap();
     let assignments = ProviderAssignments::new();
 
     assert_eq!(
@@ -188,9 +196,12 @@ fn exact_assignment_starts_binds_and_remains_stable() {
 fn an_empty_requirement_set_is_immediately_eligible() {
     let registry = ServiceRegistry::new();
     let definition = ComponentDefinition::new("test.no-dependencies");
-    let scope = Scope::root("test.no-dependencies-scope");
-    let mut component =
-        ReconciledComponent::mount("test.no-dependencies-instance", definition, &scope).unwrap();
+    let mut component = ReconciledComponent::mount(
+        "test.no-dependencies-instance",
+        definition,
+        composition_scope(),
+    )
+    .unwrap();
     let assignments = ProviderAssignments::new();
 
     let selection = match component.reconcile(&registry, &assignments).unwrap() {
@@ -316,7 +327,7 @@ async fn recomposition_withdraws_services_owned_by_the_old_activation() {
     ));
     assert!(
         registry
-            .candidates(&downstream.required())
+            .candidates(&downstream.required(), composition_scope())
             .unwrap()
             .is_empty()
     );
@@ -449,9 +460,8 @@ fn invalid_assignment_and_requirement_inputs_do_not_mutate_lifecycle() {
     let mut registry = ServiceRegistry::new();
     let greeting_provider = publish_greeting(&mut registry, &greeting, "greeting", "hello");
     let count_definition = ComponentDefinition::new("count.provider");
-    let count_scope = Scope::root("count.scope");
     let mut count_owner =
-        ComponentInstance::new("count.instance", &count_definition, &count_scope).unwrap();
+        ComponentInstance::new("count.instance", &count_definition, composition_scope()).unwrap();
     let count_activation = count_owner.begin_start().unwrap();
     let mut count_effects = EffectScope::new("count.effects", count_activation).unwrap();
     count_owner.complete_start(count_activation).unwrap();

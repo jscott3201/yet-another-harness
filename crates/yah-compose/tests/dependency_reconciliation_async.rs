@@ -1,5 +1,5 @@
 use std::{
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, OnceLock},
     time::Duration,
 };
 
@@ -13,6 +13,11 @@ use yah_compose::{
 #[derive(Debug)]
 struct Service(&'static str);
 
+fn composition_scope() -> &'static Scope {
+    static SCOPE: OnceLock<Scope> = OnceLock::new();
+    SCOPE.get_or_init(|| Scope::root("dependency-reconciliation-async.tests"))
+}
+
 fn publish(
     registry: &mut ServiceRegistry,
     service: &ServiceDefinition<Service>,
@@ -20,9 +25,12 @@ fn publish(
     value: &'static str,
 ) -> (EffectScope, ProviderCandidate) {
     let definition = ComponentDefinition::new(format!("{label}.provider"));
-    let scope = Scope::root(format!("{label}.scope"));
-    let mut owner =
-        ComponentInstance::new(format!("{label}.instance"), &definition, &scope).unwrap();
+    let mut owner = ComponentInstance::new(
+        format!("{label}.instance"),
+        &definition,
+        composition_scope(),
+    )
+    .unwrap();
     let activation = owner.begin_start().unwrap();
     let mut effects = EffectScope::new(format!("{label}.effects"), activation).unwrap();
     owner.complete_start(activation).unwrap();
@@ -35,8 +43,7 @@ fn publish(
 fn consumer(service: &ServiceDefinition<Service>) -> ReconciledComponent {
     let mut definition = ComponentDefinition::new("test.consumer");
     definition.require(&service.required()).unwrap();
-    let scope = Scope::root("test.consumer-scope");
-    ReconciledComponent::mount("test.consumer-instance", definition, &scope).unwrap()
+    ReconciledComponent::mount("test.consumer-instance", definition, composition_scope()).unwrap()
 }
 
 #[tokio::test]

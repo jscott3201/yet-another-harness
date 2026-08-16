@@ -3,7 +3,7 @@ use std::{
     panic::{AssertUnwindSafe, catch_unwind},
     pin::Pin,
     sync::{
-        Arc, Barrier,
+        Arc, Barrier, OnceLock,
         atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     task::{Context, Poll, Waker},
@@ -28,6 +28,11 @@ impl Drop for DropProbe {
 
 #[derive(Debug)]
 struct PanicOnDrop(Arc<AtomicBool>);
+
+fn composition_scope() -> &'static Scope {
+    static SCOPE: OnceLock<Scope> = OnceLock::new();
+    SCOPE.get_or_init(|| Scope::root("concurrency-fault.tests"))
+}
 
 impl Drop for PanicOnDrop {
     fn drop(&mut self) {
@@ -89,7 +94,12 @@ async fn cmp007_parent_close_drains_child_provider_calls_before_any_cleanup() {
 
     let mut close = Box::pin(provider_effects.close());
     assert!(matches!(poll_once(close.as_mut()), Poll::Pending));
-    assert!(registry.candidates(&requirement).unwrap().is_empty());
+    assert!(
+        registry
+            .candidates(&requirement, owner.scope())
+            .unwrap()
+            .is_empty()
+    );
     assert_revoked(&handle);
     assert!(!resource_closed.load(Ordering::SeqCst));
     assert_eq!(dropped.load(Ordering::SeqCst), 0);
@@ -170,7 +180,10 @@ async fn cmp007_child_consumer_close_is_isolated_but_parent_close_drains_its_cal
     assert!(matches!(poll_once(close.as_mut()), Poll::Pending));
     assert_revoked(&handle);
     assert!(!resource_closed.load(Ordering::SeqCst));
-    assert_eq!(registry.candidates(&requirement).unwrap(), vec![candidate]);
+    assert_eq!(
+        registry.candidates(&requirement, owner.scope()).unwrap(),
+        vec![candidate]
+    );
 
     release.wait();
     call.join().unwrap().unwrap();
@@ -310,7 +323,12 @@ async fn cmp007_active_failure_drains_call_and_contains_final_provider_destructo
     let mut finish = Box::pin(provider.finish_stop(epoch));
     assert!(matches!(poll_once(finish.as_mut()), Poll::Pending));
     assert_revoked(&handle);
-    assert!(registry.candidates(&requirement).unwrap().is_empty());
+    assert!(
+        registry
+            .candidates(&requirement, consumer.scope())
+            .unwrap()
+            .is_empty()
+    );
     assert!(!older_cleanup_ran.load(Ordering::SeqCst));
     assert!(!newer_cleanup_ran.load(Ordering::SeqCst));
     drop(finish);
@@ -353,9 +371,12 @@ async fn cmp007_active_failure_drains_call_and_contains_final_provider_destructo
 
 fn active_instance(label: &str) -> (ComponentInstance, EffectScope) {
     let definition = ComponentDefinition::new(format!("{label}.component"));
-    let scope = Scope::root(format!("{label}.scope"));
-    let mut instance =
-        ComponentInstance::new(format!("{label}.instance"), &definition, &scope).unwrap();
+    let mut instance = ComponentInstance::new(
+        format!("{label}.instance"),
+        &definition,
+        composition_scope(),
+    )
+    .unwrap();
     let activation = instance.begin_start().unwrap();
     let effects = EffectScope::new(format!("{label}.effects"), activation).unwrap();
     instance.complete_start(activation).unwrap();
@@ -368,9 +389,12 @@ fn consumer<T: ?Sized + Send + Sync + 'static>(
 ) -> (ComponentInstance, EffectScope) {
     let mut definition = ComponentDefinition::new(format!("{label}.component"));
     definition.require(&service.required()).unwrap();
-    let scope = Scope::root(format!("{label}.scope"));
-    let mut instance =
-        ComponentInstance::new(format!("{label}.instance"), &definition, &scope).unwrap();
+    let mut instance = ComponentInstance::new(
+        format!("{label}.instance"),
+        &definition,
+        composition_scope(),
+    )
+    .unwrap();
     let activation = instance.begin_start().unwrap();
     let effects = EffectScope::new(format!("{label}.effects"), activation).unwrap();
     (instance, effects)
@@ -384,7 +408,7 @@ fn active_slot(
     let revision = ComponentRevision::new(
         format!("{label}.revision"),
         definition,
-        Scope::root(format!("{label}.scope")),
+        composition_scope().clone(),
     );
     let mut slot = ComponentSlot::new(format!("{label}.slot")).unwrap();
     let desired = DesiredComponentState::enabled(

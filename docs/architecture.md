@@ -114,11 +114,15 @@ replacement, and removal by default. An explicit epoch-fenced abandonment can
 advance the already-recorded target without rerunning cleanup, but records that
 policy decision because a reported resource may still be live.
 
-Reconciliation is level-triggered by its composition authority. The initial
-registry is one flat visibility domain and installs no watches or background
-loop. Additional candidates do not override an explicit assignment. This
-layer does not yet execute activation callbacks, rank providers, implement
-contextual inheritance or isolation, or schedule a desired component graph.
+Reconciliation is level-triggered by its composition authority. Registry
+inventory, exact-assignment validation, and binding use the consumer's
+immutable scope lineage: a provider is visible in its own scope and
+descendants of that scope within the same root tree. Independently minted roots
+remain isolated even when their display IDs match. The registry installs no
+watches or background loop, and additional candidates do not override an
+explicit assignment. This layer does not yet execute activation callbacks,
+rank providers, implement shared/named realms or dynamic reparenting, or
+schedule a desired component graph.
 
 Live service values, futures, closures, guest resources, and process handles
 are not durable graph values. They remain in an in-memory registry whose state
@@ -284,9 +288,10 @@ Today the repository contains the initial process-local component lifecycle,
 effect-scope core, and typed revocable service registry; the Selene-backed
 reliability kernel; provider normalization fixtures; an in-process protocol
 experiment; and the G02 storage evidence harness. Component callbacks,
-contextual provider selection and reconciliation, the plugin SDK, Wasm and
-process drivers, graph memory domains, sandbox, live agent loop, daemon, and
-clients described above are not implemented yet.
+shared/named service realms, policy interception, automatic registry watches
+and provider ranking, the plugin SDK, Wasm and process drivers, graph memory
+domains, sandbox, live agent loop, daemon, and clients described above are not
+implemented yet.
 
 See [project status](project-status.md) for the exact current boundary and
 [protocol](protocol.md) for the existing Adapter 1 experiment.

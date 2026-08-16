@@ -161,6 +161,40 @@ fn a_revision_identity_cannot_be_reused_with_different_content() {
 }
 
 #[test]
+fn a_revision_identity_cannot_reuse_a_fresh_scope_with_the_same_label() {
+    let registry = ServiceRegistry::new();
+    let definition = ComponentDefinition::new("test.component");
+    let original = ComponentRevision::new(
+        "test.revision-a",
+        definition.clone(),
+        Scope::root("same.scope"),
+    );
+    let conflicting =
+        ComponentRevision::new("test.revision-a", definition, Scope::root("same.scope"));
+    let mut slot = ComponentSlot::new("test.slot").unwrap();
+    let epoch = start_epoch(
+        slot.reconcile(
+            &registry,
+            enabled(&slot, 1, &original, &ProviderAssignments::new()),
+        )
+        .unwrap(),
+    );
+    slot.complete_start(epoch, &registry).unwrap();
+    let cancellation = slot.cancellation(epoch).unwrap();
+
+    assert_eq!(
+        slot.reconcile(
+            &registry,
+            enabled(&slot, 2, &conflicting, &ProviderAssignments::new()),
+        ),
+        Err(ComponentSlotError::RevisionIdentityConflict {
+            revision: original.id().clone(),
+        })
+    );
+    assert!(!cancellation.is_cancelled());
+}
+
+#[test]
 fn disabled_intent_has_no_mount_and_pending_disable_unmounts_immediately() {
     let service = ServiceDefinition::<Greeting>::new("test.greeting/v1");
     let mut definition = ComponentDefinition::new("test.consumer");

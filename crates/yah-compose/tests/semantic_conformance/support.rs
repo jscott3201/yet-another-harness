@@ -1,7 +1,7 @@
 use std::{
     future::Future,
     pin::Pin,
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, OnceLock},
     task::{Context, Poll, Waker},
 };
 
@@ -34,16 +34,21 @@ pub(super) struct ActiveProvider {
     pub(super) candidate: ProviderCandidate,
 }
 
+fn composition_scope() -> &'static Scope {
+    static SCOPE: OnceLock<Scope> = OnceLock::new();
+    SCOPE.get_or_init(|| Scope::root("semantic-conformance.tests"))
+}
+
 pub(super) fn revision(
     id: &str,
-    scope: &str,
+    _scope: &str,
     required: Option<&ServiceDefinition<Message>>,
 ) -> ComponentRevision {
     let mut definition = ComponentDefinition::new(format!("{id}.component"));
     if let Some(service) = required {
         definition.require(&service.required()).unwrap();
     }
-    ComponentRevision::new(id, definition, Scope::root(scope))
+    ComponentRevision::new(id, definition, composition_scope().clone())
 }
 
 pub(super) fn enabled(

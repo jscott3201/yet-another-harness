@@ -97,6 +97,7 @@ pub struct ComponentInstance {
     id: ComponentInstanceId,
     definition_id: ComponentId,
     scope_id: ScopeId,
+    scope: Scope,
     state: ComponentState,
     incarnation: u64,
     last_activation: u64,
@@ -124,6 +125,7 @@ impl ComponentInstance {
             id: id.into(),
             definition_id: definition.id.clone(),
             scope_id: scope.id().clone(),
+            scope: scope.clone(),
             state: ComponentState::Pending,
             incarnation,
             last_activation: 0,
@@ -141,6 +143,10 @@ impl ComponentInstance {
 
     pub fn scope_id(&self) -> &ScopeId {
         &self.scope_id
+    }
+
+    pub fn scope(&self) -> &Scope {
+        &self.scope
     }
 
     pub fn state(&self) -> &ComponentState {

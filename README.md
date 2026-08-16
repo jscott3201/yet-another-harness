@@ -167,8 +167,11 @@ mounted definition and one explicit, exact provider assignment per activation;
 changing or losing an assigned provider cancels and tears down the old
 activation before a replacement can start. Exact-epoch activation failures
 likewise seal their effects and target pending after clean teardown; non-clean
-cleanup remains blocked. Component callbacks, registry watches, contextual
-service visibility, and automatic provider ranking are not implemented yet.
+cleanup remains blocked. Contextual service visibility follows immutable
+scope-tree ancestry: providers are visible in their own scope and descendants,
+while independently minted roots are isolated even when their display IDs
+match. Component callbacks, registry watches, shared/named realms, dynamic
+reparenting, and automatic provider ranking remain deferred.
 
 A stable desired component slot now fences caller-sequenced generations bound
 to a process-unique slot incarnation and immutable component/configuration
@@ -187,7 +190,7 @@ and latest-desired revision churn across those public primitives. A companion
 deterministic fault corpus covers concurrent provider and consumer close,
 hierarchical call draining, callback unwind, resumable close, and final
 provider-value destructor panic containment. The corpora do not claim
-contextual realm isolation, automatic injection, file HMR, or task supervision.
+shared/named realms, automatic injection, file HMR, or task supervision.
 
 The repository already contains a model-free Rust kernel and evidence harness:
 

@@ -1,5 +1,5 @@
 use std::sync::{
-    Arc, Barrier,
+    Arc, Barrier, OnceLock,
     atomic::{AtomicBool, AtomicUsize, Ordering},
 };
 
@@ -11,11 +11,19 @@ use yah_compose::{
 #[derive(Debug)]
 struct Greeting(&'static str);
 
+fn composition_scope() -> &'static Scope {
+    static SCOPE: OnceLock<Scope> = OnceLock::new();
+    SCOPE.get_or_init(|| Scope::root("service-handle.tests"))
+}
+
 fn active_instance(label: &str) -> (ComponentInstance, EffectScope) {
     let definition = ComponentDefinition::new(format!("{label}.component"));
-    let scope = Scope::root(format!("{label}.scope"));
-    let mut instance =
-        ComponentInstance::new(format!("{label}.instance"), &definition, &scope).unwrap();
+    let mut instance = ComponentInstance::new(
+        format!("{label}.instance"),
+        &definition,
+        composition_scope(),
+    )
+    .unwrap();
     let activation = instance.begin_start().unwrap();
     let effects = EffectScope::new(format!("{label}.effects"), activation).unwrap();
     instance.complete_start(activation).unwrap();
@@ -28,9 +36,12 @@ fn consumer(
 ) -> (ComponentInstance, EffectScope) {
     let mut definition = ComponentDefinition::new(format!("{label}.component"));
     definition.require(&service.required()).unwrap();
-    let scope = Scope::root(format!("{label}.scope"));
-    let mut instance =
-        ComponentInstance::new(format!("{label}.instance"), &definition, &scope).unwrap();
+    let mut instance = ComponentInstance::new(
+        format!("{label}.instance"),
+        &definition,
+        composition_scope(),
+    )
+    .unwrap();
     let activation = instance.begin_start().unwrap();
     let effects = EffectScope::new(format!("{label}.effects"), activation).unwrap();
     (instance, effects)
@@ -69,7 +80,12 @@ async fn unpolled_close_revokes_before_cleanup_and_cannot_remove_replacement() {
 
     drop(old_effects.close());
     assert_revoked(&old_handle);
-    assert!(registry.candidates(&requirement).unwrap().is_empty());
+    assert!(
+        registry
+            .candidates(&requirement, old_owner.scope())
+            .unwrap()
+            .is_empty()
+    );
     let (stale_consumer, stale_consumer_effects) = consumer("stale-consumer", &service);
     assert!(matches!(
         registry.bind(
@@ -106,7 +122,9 @@ async fn unpolled_close_revokes_before_cleanup_and_cannot_remove_replacement() {
     assert_eq!(first_report, repeated_report);
     assert_eq!(first_report.cleanup_count(), 1);
     assert_eq!(
-        registry.candidates(&requirement).unwrap(),
+        registry
+            .candidates(&requirement, new_owner.scope())
+            .unwrap(),
         vec![new_candidate]
     );
     assert_revoked(&old_handle);
@@ -148,11 +166,22 @@ fn dropping_provider_or_consumer_scopes_fails_closed() {
     drop(first_effects);
     assert_revoked(&first_handle);
     assert_eq!(second_handle.try_with(|value| value.0).unwrap(), "hello");
-    assert_eq!(registry.candidates(&requirement).unwrap().len(), 1);
+    assert_eq!(
+        registry
+            .candidates(&requirement, owner.scope())
+            .unwrap()
+            .len(),
+        1
+    );
 
     drop(provider_effects);
     assert_revoked(&second_handle);
-    assert!(registry.candidates(&requirement).unwrap().is_empty());
+    assert!(
+        registry
+            .candidates(&requirement, owner.scope())
+            .unwrap()
+            .is_empty()
+    );
 }
 
 #[test]
@@ -203,8 +232,8 @@ fn a_call_admitted_before_revocation_may_finish_but_later_calls_fail() {
         .unwrap();
     let mut definition = ComponentDefinition::new("consumer.component");
     definition.require(&requirement).unwrap();
-    let scope = Scope::root("consumer.scope");
-    let mut consumer = ComponentInstance::new("consumer.instance", &definition, &scope).unwrap();
+    let mut consumer =
+        ComponentInstance::new("consumer.instance", &definition, composition_scope()).unwrap();
     let activation = consumer.begin_start().unwrap();
     let effects = EffectScope::new("consumer.effects", activation).unwrap();
     let handle = registry
@@ -301,8 +330,8 @@ fn unsized_trait_contracts_and_public_registry_values_are_send_sync() {
         .unwrap();
     let mut definition = ComponentDefinition::new("consumer.component");
     definition.require(&requirement).unwrap();
-    let scope = Scope::root("consumer.scope");
-    let mut consumer = ComponentInstance::new("consumer.instance", &definition, &scope).unwrap();
+    let mut consumer =
+        ComponentInstance::new("consumer.instance", &definition, composition_scope()).unwrap();
     let activation = consumer.begin_start().unwrap();
     let effects = EffectScope::new("consumer.effects", activation).unwrap();
     let handle = registry
@@ -336,8 +365,8 @@ async fn stale_handle_clones_do_not_keep_a_provider_value_alive() {
         .unwrap();
     let mut definition = ComponentDefinition::new("consumer.component");
     definition.require(&requirement).unwrap();
-    let scope = Scope::root("consumer.scope");
-    let mut consumer = ComponentInstance::new("consumer.instance", &definition, &scope).unwrap();
+    let mut consumer =
+        ComponentInstance::new("consumer.instance", &definition, composition_scope()).unwrap();
     let activation = consumer.begin_start().unwrap();
     let effects = EffectScope::new("consumer.effects", activation).unwrap();
     let handle = registry
@@ -395,7 +424,12 @@ async fn provider_destructor_panic_is_reported_and_older_cleanup_continues() {
         .into_cleanup_failure()
         .expect("provider cleanup should fail");
     assert_eq!(failure.kind(), CleanupFailureKind::Panicked);
-    assert!(registry.candidates(&service.required()).unwrap().is_empty());
+    assert!(
+        registry
+            .candidates(&service.required(), owner.scope())
+            .unwrap()
+            .is_empty()
+    );
 }
 
 trait CloseStepExt {

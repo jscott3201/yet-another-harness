@@ -83,7 +83,7 @@ impl ReconciledComponent {
         &self,
         registry: &ServiceRegistry,
     ) -> Result<Vec<RequirementCandidates>, ReconcileError> {
-        Ok(registry.inventory(&self.definition)?)
+        Ok(registry.inventory(&self.definition, self.instance.scope())?)
     }
 
     /// Validate a desired assignment against one current registry inventory
@@ -491,7 +491,7 @@ impl ReconciledComponent {
         registry: &ServiceRegistry,
         assignments: &ProviderAssignments,
     ) -> Result<AssignmentResolution, ReconcileError> {
-        let inventory = registry.inventory(&self.definition)?;
+        let inventory = registry.inventory(&self.definition, self.instance.scope())?;
         let mut providers = Vec::with_capacity(inventory.len());
         let mut issues = Vec::new();
         for group in inventory {

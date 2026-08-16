@@ -51,7 +51,10 @@ string_id!(
     ComponentInstanceId,
     "Identity of one mounted component instance."
 );
-string_id!(ScopeId, "Identity of one process-local composition scope.");
+string_id!(
+    ScopeId,
+    "Diagnostic label for one process-local composition scope."
+);
 string_id!(
     ServiceId,
     "Stable semantic identity of one service contract."

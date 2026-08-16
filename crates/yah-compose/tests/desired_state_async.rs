@@ -1,5 +1,5 @@
 use std::{
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, OnceLock},
     time::Duration,
 };
 
@@ -18,6 +18,11 @@ struct Service(&'static str);
 #[derive(Debug)]
 struct OtherService;
 
+fn composition_scope() -> &'static Scope {
+    static SCOPE: OnceLock<Scope> = OnceLock::new();
+    SCOPE.get_or_init(|| Scope::root("desired-state-async.tests"))
+}
+
 struct Published {
     effects: EffectScope,
     candidate: ProviderCandidate,
@@ -30,9 +35,12 @@ fn publish(
     value: &'static str,
 ) -> Published {
     let definition = ComponentDefinition::new(format!("{label}.provider"));
-    let scope = Scope::root(format!("{label}.scope"));
-    let mut owner =
-        ComponentInstance::new(format!("{label}.instance"), &definition, &scope).unwrap();
+    let mut owner = ComponentInstance::new(
+        format!("{label}.instance"),
+        &definition,
+        composition_scope(),
+    )
+    .unwrap();
     let activation = owner.begin_start().unwrap();
     let mut effects = EffectScope::new(format!("{label}.effects"), activation).unwrap();
     owner.complete_start(activation).unwrap();
@@ -47,7 +55,7 @@ fn revision(id: &str, service: Option<&ServiceDefinition<Service>>) -> Component
     if let Some(service) = service {
         definition.require(&service.required()).unwrap();
     }
-    ComponentRevision::new(id, definition, Scope::root("test.scope"))
+    ComponentRevision::new(id, definition, composition_scope().clone())
 }
 
 fn enabled(
@@ -629,7 +637,9 @@ async fn removing_an_active_provider_hides_its_service_before_cleanup_is_polled(
         .provide(epoch, &mut registry, service.provider(Service("slot")))
         .unwrap();
     assert_eq!(
-        registry.candidates(&service.required()).unwrap(),
+        registry
+            .candidates(&service.required(), revision.scope())
+            .unwrap(),
         &[candidate]
     );
 
@@ -638,6 +648,11 @@ async fn removing_an_active_provider_hides_its_service_before_cleanup_is_polled(
         DesiredComponentState::removed(slot.generation(2)),
     )
     .unwrap();
-    assert!(registry.candidates(&service.required()).unwrap().is_empty());
+    assert!(
+        registry
+            .candidates(&service.required(), revision.scope())
+            .unwrap()
+            .is_empty()
+    );
     slot.finish_stop(epoch).await.unwrap();
 }
