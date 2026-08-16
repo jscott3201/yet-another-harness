@@ -160,8 +160,10 @@ bind one exact provider registration and fail closed when either activation
 scope is cancelled. A level-triggered reconciled component freezes its mounted
 definition and one explicit, exact provider assignment per activation; changing
 or losing an assigned provider cancels and tears down the old activation before
-a replacement can start. Component callbacks, registry watches, contextual
-service visibility, and automatic provider ranking are not implemented yet.
+a replacement can start. Exact-epoch activation failures likewise seal their
+effects and target pending after clean teardown; non-clean cleanup remains
+blocked. Component callbacks, registry watches, contextual service visibility,
+and automatic provider ranking are not implemented yet.
 
 A stable desired component slot now fences caller-sequenced generations bound
 to a process-unique slot incarnation and immutable component/configuration
@@ -171,6 +173,13 @@ disabled or removed intent unmounted. Stale generations and revision-ID reuse
 fail without disturbing the live instance; cleanups that report failure remain
 blocked unless the owning authority explicitly records abandonment. This is a
 single-component mechanism, not a host-wide scheduler or durable desired graph.
+
+An independently authored
+[composition semantic conformance corpus](docs/composition-conformance.md)
+now exercises nested cleanup, explicit pending dependency convergence, exact
+provider replacement, registry-domain separation, activation failure rollback,
+and latest-desired revision churn across those public primitives. The corpus
+does not claim contextual realm isolation, automatic injection, or file HMR.
 
 The repository already contains a model-free Rust kernel and evidence harness:
 

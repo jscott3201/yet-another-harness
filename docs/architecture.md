@@ -86,6 +86,11 @@ clean teardown must finish before a later pass can start a fresh activation.
 A failed cleanup report leaves the component blocked in `stopping` rather than
 risk duplicating a resource that may still be live.
 
+An exact-epoch activation failure records its starting or active phase, begins
+controlled teardown toward pending, and synchronously seals the same owned
+effect scope. Retry remains a later explicit reconciliation decision; this
+layer does not run callbacks or choose backoff policy.
+
 One stable desired-state slot adds a caller-sequenced generation token bound to
 that slot's process-unique incarnation. A revision freezes one exact
 definition and scope; the loader remains responsible for the configuration and
@@ -118,6 +123,8 @@ This model is inspired by Cordis and its paper on spatiotemporal composability,
 but will be implemented idiomatically in Rust rather than porting JavaScript
 Proxy or Node module behavior. The pinned sources are listed in the root
 [README](../README.md#prior-art-and-attribution).
+The independently authored [semantic conformance corpus](composition-conformance.md)
+records the observable subset currently proved and its deliberate non-claims.
 
 ## Harness Components
 

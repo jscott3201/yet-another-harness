@@ -10,9 +10,9 @@
 //! The dependency layer owns one frozen mounted component and converges it
 //! toward caller-selected exact providers through fenced start and teardown.
 //! A desired component slot additionally fences create, revision replacement,
-//! disable, and removal without claiming host-wide graph scheduling. It does
-//! not yet run component callbacks, choose provider policy, or watch the
-//! registry.
+//! disable, removal, and exact-epoch activation failure without claiming
+//! host-wide graph scheduling. It does not yet run component callbacks, choose
+//! provider policy, or watch the registry.
 
 mod component;
 mod desired_state;

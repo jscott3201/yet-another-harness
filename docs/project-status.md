@@ -7,8 +7,9 @@ graph-backed, plugin-extensible agent harness.
 There is no usable release. The repository contains a tested reliability
 foundation and the first process-local composition lifecycle, cleanup, typed
 service-binding, exact-assignment dependency reconciliation, and fenced desired
-component-revision primitives; it does not yet contain a runnable composition
-host, plugin host, agent loop, sandbox, daemon, or client.
+component-revision primitives, plus an independently authored semantic
+conformance corpus; it does not yet contain a runnable composition host, plugin
+host, agent loop, sandbox, daemon, or client.
 
 ## Evidence Status
 
@@ -16,7 +17,7 @@ host, plugin host, agent loop, sandbox, daemon, or client.
 |---|---|---|
 | G02 storage fan-in and crash recovery | Atomic state, receipt, and journal commits under kill/reopen, writer takeover, and corruption drills | Passed across 1,440 scored trials: [report](gates/G02-storage-fanin-recovery.md) |
 | Current model-free kernel | Deterministic tests for command, fencing, cancellation, effect, provider, recovery, and Adapter 1 behavior | Available for reuse; pivot integration has not started |
-| Contextual composition runtime | Component definition/instance/scope identities, epoch-fenced lifecycle, reversible nested effects, typed requirements, exact revocable bindings, exact-assignment recomposition, and fenced desired revisions | Initial slices; no callbacks, provider-ranking policy, contextual visibility, or host-wide scheduler |
+| Contextual composition runtime | Component definition/instance/scope identities, epoch-fenced lifecycle, reversible nested effects, typed requirements, exact revocable bindings, exact-assignment recomposition, fenced desired revisions, and six cross-layer semantic cases | Initial slices with deterministic conformance evidence; no callbacks, provider-ranking policy, contextual visibility, or host-wide scheduler |
 | Plugin manifest, SDK, and conformance suite | No implementation in this repository | Not started |
 | Wasm, Node/TypeScript, and Python plugin drivers | No implementation in this repository | Not started |
 | Selene work, session, memory, evidence, and plugin-lineage domains | Only the current kernel graph exists | Design/spike stage |
@@ -97,6 +98,9 @@ Live service values are not serialized or stored in Selene.
   must reach pending before a later level-triggered pass can start current
   assignments; non-clean cleanup reports remain observable and blocked in
   stopping.
+- Exact-epoch activation failure records the inferred starting or active phase,
+  synchronously seals the same activation effects, and enters controlled
+  teardown toward pending without selecting automatic retry policy.
 
 This layer deliberately supplies no implicit first-provider policy. Additional
 candidates do not disturb an explicit live assignment. Registry watches,
@@ -128,6 +132,26 @@ callback execution, durable configuration payloads, automatic watches,
 concurrent desired writers, rollback, retry/backoff, and persistence remain
 unimplemented. Exact provider registration IDs are live values and are not
 durable desired state.
+
+### Composition semantic conformance
+
+- Six independently authored black-box cases compose the public lifecycle,
+  effect, service, dependency, and desired-state APIs rather than restating one
+  module's unit behavior.
+- The cases cover tree-aware cleanup, provider readiness and explicit pending
+  assignment, controlled exact replacement, separate registry visibility
+  domains, activation-failure rollback with sibling survival, and latest-intent
+  revision churn during suspended cleanup.
+- Manual polling and explicit signals keep the scenarios deterministic. The
+  corpus records observable traces, revocation, retained reports, epochs, and
+  mounted revisions.
+- The [corpus contract](composition-conformance.md) documents its pinned Cordis
+  inspiration and the behaviors deliberately not copied.
+
+Registry-domain separation is a coarse process-local boundary, not contextual
+scope inheritance or shared isolation realms. Desired churn is caller-driven,
+not filesystem HMR. Concurrent fault injection remains a separate validation
+slice.
 
 ### Selene-backed mutation and recovery
 
