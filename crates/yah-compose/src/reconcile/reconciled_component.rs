@@ -8,10 +8,12 @@ use crate::{
 };
 
 use super::{
-    DependencyIssue, DependencyReadiness, DependencyStopReason, ProviderAssignments,
-    ProviderChange, ProviderSelection, ProviderSelectionEpoch, ReconcileError, ReconcileOutcome,
-    StopCompletion,
+    ComponentStopReason, DependencyIssue, DependencyReadiness, DependencyStopReason,
+    DesiredStopReason, ProviderAssignments, ProviderChange, ProviderSelection,
+    ProviderSelectionEpoch, ReconcileError, ReconcileOutcome, StopCompletion,
 };
+
+mod desired_stop;
 
 /// Unique live owner of one mounted component's dependency lifecycle.
 ///
@@ -127,13 +129,14 @@ impl ReconciledComponent {
                 operation: "reconcile dependencies",
                 state: ComponentStateKind::Failed,
             }),
-            ComponentState::Stopping { .. } => {
+            ComponentState::Stopping { target, .. } => {
                 let resources = self
                     .activation
                     .as_ref()
                     .expect("reconciled stopping state owns activation resources");
                 Ok(ReconcileOutcome::Stopping {
                     selection_epoch: resources.selection.epoch(),
+                    target,
                     reason: resources
                         .stop_reason
                         .clone()
@@ -281,10 +284,10 @@ impl ReconciledComponent {
             .assignments()
             .clone();
         if desired != &committed {
-            let reason = DependencyStopReason::AssignmentChanged(
+            let reason = ComponentStopReason::Dependency(DependencyStopReason::AssignmentChanged(
                 self.assignment_changes(&committed, desired),
-            );
-            return self.begin_stop(reason);
+            ));
+            return self.begin_stop(reason, StopTarget::Pending);
         }
 
         match self.resolve_assignments(registry, &committed)? {
@@ -292,9 +295,10 @@ impl ReconciledComponent {
                 self.instance.complete_start(selection_epoch.activation())?;
                 Ok(ReconcileOutcome::Active { selection_epoch })
             }
-            AssignmentResolution::Pending(issues) => {
-                self.begin_stop(DependencyStopReason::ProviderUnavailable(issues))
-            }
+            AssignmentResolution::Pending(issues) => self.begin_stop(
+                ComponentStopReason::Dependency(DependencyStopReason::ProviderUnavailable(issues)),
+                StopTarget::Pending,
+            ),
         }
     }
 
@@ -314,6 +318,15 @@ impl ReconciledComponent {
             });
         }
         self.require_epoch(selection_epoch)?;
+        let target = match self.instance.state() {
+            ComponentState::Stopping { target, .. } => *target,
+            _ => unreachable!("finish_stop validates the stopping state"),
+        };
+        let reason = self
+            .activation
+            .as_ref()
+            .and_then(|resources| resources.stop_reason.clone())
+            .expect("a stopping reconciled component records its reason");
         let report = {
             let resources = self
                 .activation
@@ -331,6 +344,8 @@ impl ReconciledComponent {
         if !report.is_clean() {
             return Ok(StopCompletion::Blocked {
                 selection_epoch,
+                target,
+                reason,
                 report,
             });
         }
@@ -339,6 +354,8 @@ impl ReconciledComponent {
         self.activation = None;
         Ok(StopCompletion::Completed {
             selection_epoch,
+            target,
+            reason,
             report,
         })
     }
@@ -396,16 +413,17 @@ impl ReconciledComponent {
         let selection_epoch = resources.selection.epoch();
         let committed = resources.selection.assignments().clone();
         if desired != &committed {
-            let reason = DependencyStopReason::AssignmentChanged(
+            let reason = ComponentStopReason::Dependency(DependencyStopReason::AssignmentChanged(
                 self.assignment_changes(&committed, desired),
-            );
-            return self.begin_stop(reason);
+            ));
+            return self.begin_stop(reason, StopTarget::Pending);
         }
 
         match self.resolve_assignments(registry, &committed)? {
-            AssignmentResolution::Pending(issues) => {
-                self.begin_stop(DependencyStopReason::ProviderUnavailable(issues))
-            }
+            AssignmentResolution::Pending(issues) => self.begin_stop(
+                ComponentStopReason::Dependency(DependencyStopReason::ProviderUnavailable(issues)),
+                StopTarget::Pending,
+            ),
             AssignmentResolution::Ready(_) => match state {
                 ComponentStateKind::Starting => {
                     Ok(ReconcileOutcome::AwaitingStart { selection_epoch })
@@ -418,7 +436,8 @@ impl ReconciledComponent {
 
     fn begin_stop(
         &mut self,
-        reason: DependencyStopReason,
+        reason: ComponentStopReason,
+        target: StopTarget,
     ) -> Result<ReconcileOutcome, ReconcileError> {
         let selection_epoch = self
             .activation
@@ -427,7 +446,7 @@ impl ReconciledComponent {
             .selection
             .epoch();
         self.instance
-            .begin_stop(selection_epoch.activation(), StopTarget::Pending)?;
+            .begin_stop(selection_epoch.activation(), target)?;
         let resources = self
             .activation
             .as_mut()
@@ -436,6 +455,7 @@ impl ReconciledComponent {
         drop(resources.effects.close());
         Ok(ReconcileOutcome::StopBegun {
             selection_epoch,
+            target,
             reason,
         })
     }
@@ -563,7 +583,7 @@ impl ReconciledComponent {
 struct ActivationResources {
     selection: ProviderSelection,
     effects: EffectScope,
-    stop_reason: Option<DependencyStopReason>,
+    stop_reason: Option<ComponentStopReason>,
     close_report: Option<CloseReport>,
 }
 

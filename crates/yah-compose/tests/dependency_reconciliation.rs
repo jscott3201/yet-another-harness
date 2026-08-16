@@ -1,6 +1,6 @@
 use yah_compose::{
-    ComponentDefinition, ComponentInstance, ComponentState, DependencyIssue, DependencyReadiness,
-    DependencyStopReason, EffectScope, ProviderAssignments, ProviderCandidate,
+    ComponentDefinition, ComponentInstance, ComponentState, ComponentStopReason, DependencyIssue,
+    DependencyReadiness, DependencyStopReason, EffectScope, ProviderAssignments, ProviderCandidate,
     ProviderSelectionEpoch, ReconcileError, ReconcileOutcome, ReconciledComponent, Scope,
     ServiceDefinition, ServiceHandleError, ServiceRegistry, StopCompletion,
 };
@@ -245,7 +245,10 @@ async fn assignment_change_cancels_old_handles_before_replacement_starts() {
         consumer.reconcile(&registry, &desired).unwrap(),
         ReconcileOutcome::StopBegun {
             selection_epoch,
-            reason: DependencyStopReason::AssignmentChanged(_),
+            reason: ComponentStopReason::Dependency(
+                DependencyStopReason::AssignmentChanged(_)
+            ),
+            ..
         } if selection_epoch == first_epoch
     ));
     assert!(matches!(
@@ -339,7 +342,7 @@ async fn provider_withdrawal_revokes_immediately_then_reconciles_to_pending() {
     assert!(matches!(
         consumer.reconcile(&registry, &assignments).unwrap(),
         ReconcileOutcome::StopBegun {
-            reason: DependencyStopReason::ProviderUnavailable(_),
+            reason: ComponentStopReason::Dependency(DependencyStopReason::ProviderUnavailable(_)),
             ..
         }
     ));
@@ -388,7 +391,7 @@ async fn provider_loss_during_start_prevents_active_publication() {
             .complete_start(selection_epoch, &registry, &assignments)
             .unwrap(),
         ReconcileOutcome::StopBegun {
-            reason: DependencyStopReason::ProviderUnavailable(_),
+            reason: ComponentStopReason::Dependency(DependencyStopReason::ProviderUnavailable(_)),
             ..
         }
     ));
@@ -427,7 +430,7 @@ async fn selection_change_during_start_rejects_delayed_completion() {
             .complete_start(selection_epoch, &registry, &second_assignment)
             .unwrap(),
         ReconcileOutcome::StopBegun {
-            reason: DependencyStopReason::AssignmentChanged(_),
+            reason: ComponentStopReason::Dependency(DependencyStopReason::AssignmentChanged(_)),
             ..
         }
     ));

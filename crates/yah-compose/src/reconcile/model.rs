@@ -1,8 +1,9 @@
 use std::{collections::BTreeMap, error::Error, fmt};
 
 use crate::{
-    ActivationEpoch, CloseReport, ComponentInstanceId, ComponentStateKind, EffectScopeError,
-    LifecycleError, ProviderCandidate, ProviderRegistrationId, ServiceId, ServiceRegistryError,
+    ActivationEpoch, CloseReport, ComponentInstanceId, ComponentRevisionId, ComponentStateKind,
+    EffectScopeError, LifecycleError, ProviderCandidate, ProviderRegistrationId, ServiceId,
+    ServiceRegistryError, StopTarget,
 };
 
 /// Fence for one immutable provider assignment owned by one activation.
@@ -210,6 +211,24 @@ pub enum DependencyStopReason {
     ProviderUnavailable(Vec<DependencyIssue>),
 }
 
+/// Desired-state change that invalidated one mounted component revision.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DesiredStopReason {
+    Disabled,
+    Removed,
+    RevisionChanged {
+        previous: ComponentRevisionId,
+        desired: ComponentRevisionId,
+    },
+}
+
+/// Frozen reason one activation entered controlled teardown.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ComponentStopReason {
+    Dependency(DependencyStopReason),
+    Desired(DesiredStopReason),
+}
+
 /// Observable result of one level-triggered reconciliation pass.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ReconcileOutcome {
@@ -227,11 +246,13 @@ pub enum ReconcileOutcome {
     },
     StopBegun {
         selection_epoch: ProviderSelectionEpoch,
-        reason: DependencyStopReason,
+        target: StopTarget,
+        reason: ComponentStopReason,
     },
     Stopping {
         selection_epoch: ProviderSelectionEpoch,
-        reason: DependencyStopReason,
+        target: StopTarget,
+        reason: ComponentStopReason,
         cleanup_blocked: bool,
     },
     Removed,
@@ -242,10 +263,22 @@ pub enum ReconcileOutcome {
 pub enum StopCompletion {
     Completed {
         selection_epoch: ProviderSelectionEpoch,
+        target: StopTarget,
+        reason: ComponentStopReason,
         report: CloseReport,
     },
     Blocked {
         selection_epoch: ProviderSelectionEpoch,
+        target: StopTarget,
+        reason: ComponentStopReason,
+        report: CloseReport,
+    },
+    /// The composition authority explicitly accepted a non-clean teardown and
+    /// advanced the already-frozen stop target without retrying cleanup.
+    Abandoned {
+        selection_epoch: ProviderSelectionEpoch,
+        target: StopTarget,
+        reason: ComponentStopReason,
         report: CloseReport,
     },
 }
@@ -253,12 +286,34 @@ pub enum StopCompletion {
 impl StopCompletion {
     pub fn report(&self) -> &CloseReport {
         match self {
-            Self::Completed { report, .. } | Self::Blocked { report, .. } => report,
+            Self::Completed { report, .. }
+            | Self::Blocked { report, .. }
+            | Self::Abandoned { report, .. } => report,
+        }
+    }
+
+    pub const fn target(&self) -> StopTarget {
+        match self {
+            Self::Completed { target, .. }
+            | Self::Blocked { target, .. }
+            | Self::Abandoned { target, .. } => *target,
+        }
+    }
+
+    pub fn reason(&self) -> &ComponentStopReason {
+        match self {
+            Self::Completed { reason, .. }
+            | Self::Blocked { reason, .. }
+            | Self::Abandoned { reason, .. } => reason,
         }
     }
 
     pub fn is_completed(&self) -> bool {
-        matches!(self, Self::Completed { .. })
+        matches!(self, Self::Completed { .. } | Self::Abandoned { .. })
+    }
+
+    pub fn was_abandoned(&self) -> bool {
+        matches!(self, Self::Abandoned { .. })
     }
 }
 
@@ -287,6 +342,7 @@ pub enum ReconcileError {
         operation: &'static str,
         state: ComponentStateKind,
     },
+    CleanupNotBlocked,
     Lifecycle(LifecycleError),
     EffectScope(EffectScopeError),
     Registry(ServiceRegistryError),
@@ -321,6 +377,9 @@ impl fmt::Display for ReconcileError {
                     f,
                     "cannot {operation} while reconciled component is {state}"
                 )
+            }
+            Self::CleanupNotBlocked => {
+                f.write_str("cleanup abandonment requires a terminal non-clean close report")
             }
             Self::Lifecycle(error) => error.fmt(f),
             Self::EffectScope(error) => error.fmt(f),
