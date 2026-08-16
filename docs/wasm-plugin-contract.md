@@ -105,12 +105,12 @@ and the guest reaches that decision at its next epoch deadline. A stop is also
 read on the way into a call, not only at a deadline: a call short enough to
 return before the epoch advances would otherwise never consult it.
 
-Two bounds apply, and only one of them is currently demonstrated. The
-mechanism's own bound is a single tick: once deactivation raises the stop, the
-next deadline the guest reaches ends the call. What the fixture corpus actually
-exercises is the budget ceiling, `call_budget_ticks * epoch_tick`, because no
-case yet tears an activation down while one of its calls is still running. The
-one-tick figure is a claim about the code, not a measured result.
+The mechanism's own bound is a single tick: once deactivation raises the stop,
+the next deadline the guest reaches ends the call. A case does kill a live call
+— under a budget large enough that only the kill can end it — so the stop is
+demonstrated. The *one-tick* figure is not: that case bounds the stop generously
+rather than at one tick, because a tight bound would fail on a loaded machine
+for reasons that have nothing to do with the mechanism.
 
 The driver passes the five portable host lifecycle cases, and a separate smoke
 test compiles a component, activates it, calls `fixture-tool.invoke`, and drops
@@ -137,7 +137,10 @@ byte ceiling nothing and costs the host a reservation, so a guest bounded only
 by bytes could exhaust the host's address space without ever exceeding its
 "memory ceiling". The driver bounds the number of memories, tables, and
 instances, and sizes the per-memory reservation to the byte ceiling rather than
-leaving it at Wasmtime's 4 GiB default.
+leaving it at Wasmtime's 4 GiB default — including the reservation a memory
+gets when it outgrows the first one, which otherwise defaults to 2 GiB, and the
+guard region on each side, which otherwise defaults to 32 MiB and would dominate
+what a memory costs at this ceiling.
 
 A call deadline *terminates*. The world's cancellation import is advisory, so a
 guest that never asks whether it should stop would otherwise run forever. The
@@ -193,9 +196,10 @@ This slice does not provide:
 WIT strings and lists are not byte-bounded by the ABI, and the memory ceiling
 does not bound them either: a guest can point every element of a list at one
 buffer, so a small guest memory can name a very large lifted value. Two other
-things bound them. The driver sets a per-store host-call byte budget
-(`host_call_bytes`), which is charged as the canonical ABI copies a value out
-of guest memory, and the host clips and counts what it keeps from a `logging`
+things bound them. The driver sets a per-host-call byte budget on the store
+(`host_call_bytes`), charged as the canonical ABI copies a value out of guest
+memory. It bounds one call, not a store's lifetime: Wasmtime copies the
+allowance into each lift and never writes it back, so it refills per call. and the host clips and counts what it keeps from a `logging`
 call — record count, message bytes, and field count — copying the clipped text
 into its own allocation so a clipped record does not retain the guest's.
 

@@ -15,7 +15,7 @@ use wasmtime::{
     component::{Component, HasSelf, Linker},
 };
 use yah_plugin_wasm::{
-    GuestProgram, RETAINED_LOG_RECORDS, WasmLimits,
+    GuestProgram, LogRecord, RETAINED_LOG_RECORDS, WasmLimits,
     bindings::{
         Conformance,
         yah::plugin::{
@@ -157,8 +157,11 @@ fn log_values_are_clipped_to_the_byte_ceiling_and_the_loss_is_counted() {
     // 4 KiB of message here against a 16-byte ceiling. Reading capacity from
     // the stored records is the only assertion that can see that; the clones
     // `records()` returns have capacity exactly equal to their length.
+    let per_record = limits.max_log_message_bytes
+        + limits.max_log_fields * 2 * limits.max_log_message_bytes
+        + limits.max_log_fields * std::mem::size_of::<(String, String)>();
     let ceiling =
-        limits.max_log_message_bytes + limits.max_log_fields * 2 * limits.max_log_message_bytes;
+        records.len() * per_record + RETAINED_LOG_RECORDS * std::mem::size_of::<LogRecord>();
     assert!(
         observer.retained_bytes() <= ceiling,
         "host retains {} bytes against a ceiling of {ceiling}",
@@ -193,5 +196,42 @@ fn the_epoch_ticker_thread_stops_when_its_ticker_is_dropped() {
     assert!(
         settled <= after_drop + 1,
         "the ticker thread kept running after its ticker was dropped: {after_drop} -> {settled}"
+    );
+}
+
+#[test]
+fn a_flood_of_empty_fields_does_not_leave_the_host_holding_the_guest_vector() {
+    // The escape a string-only ceiling cannot see. Every field here is two
+    // empty strings, so every string capacity is zero and a metric that counted
+    // only strings would report nothing - while the vector carrying them is
+    // sized by the guest. Building the record through `collect` would hand that
+    // vector straight to the host, because `LogField` and `(String, String)`
+    // have the same layout and Rust reuses the buffer in place.
+    let limits = WasmLimits {
+        max_log_fields: 2,
+        ..WasmLimits::default()
+    };
+    let observer = HostObserver::new();
+    let mut state = HostState::with_limits(observer.clone(), limits);
+
+    let flood = 20_000;
+    state.log(
+        LogLevel::Warn,
+        String::new(),
+        (0..flood)
+            .map(|_| LogField {
+                key: String::new(),
+                value: String::new(),
+            })
+            .collect(),
+    );
+
+    let records = observer.records();
+    assert_eq!(records[0].fields.len(), limits.max_log_fields);
+    let guest_sized = flood * std::mem::size_of::<(String, String)>();
+    assert!(
+        observer.retained_bytes() < guest_sized / 100,
+        "host retains {} bytes of a {guest_sized}-byte guest vector",
+        observer.retained_bytes()
     );
 }

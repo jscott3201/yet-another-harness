@@ -269,6 +269,16 @@ impl WasmComponentDriver {
         // lower. Sizing the reservation to the ceiling is what stops a guest
         // from claiming address space the byte ceiling never charges it for.
         config.memory_reservation(limits.memory_reservation_bytes);
+        // A memory that outgrows its reservation is re-mapped with a *new*
+        // reservation, and that one defaults to 2 GiB - so leaving it alone
+        // would let a guest reopen a multi-gigabyte window simply by growing.
+        config.memory_reservation_for_growth(limits.memory_reservation_bytes);
+        // Wasmtime brackets every memory with a 32 MiB guard on each side, so
+        // the address space one memory costs is the reservation plus 64 MiB
+        // unless this is set too. The guard exists to turn out-of-bounds
+        // accesses into faults without a bounds check; it stays, but sized to
+        // something proportionate to the ceiling rather than to a 4 GiB memory.
+        config.memory_guard_size(limits.memory_guard_bytes);
         let engine = Engine::new(&config).map_err(|error| {
             WasmDriverBuildError::new(format!("engine did not accept its configuration: {error}"))
         })?;
@@ -708,15 +718,22 @@ mod interrupt_tests {
 
     use super::*;
 
-    fn core(program: GuestProgram, limits: WasmLimits) -> Arc<ActivationCore> {
+    /// One engine, as the driver has: activations that shared nothing could not
+    /// falsify an engine-scoped or ticker-scoped kill, which is the only way
+    /// "one activation's kill reaches another" could plausibly go wrong.
+    fn engine(limits: WasmLimits) -> Engine {
         let mut config = Config::new();
         config.epoch_interruption(true);
         config.memory_reservation(limits.memory_reservation_bytes);
-        let engine = Engine::new(&config).expect("engine accepts its configuration");
-        let component =
-            Component::new(&engine, program.text()).expect("fixture component compiles");
+        config.memory_reservation_for_growth(limits.memory_reservation_bytes);
+        config.memory_guard_size(limits.memory_guard_bytes);
+        Engine::new(&config).expect("engine accepts its configuration")
+    }
+
+    fn core(engine: &Engine, program: GuestProgram, limits: WasmLimits) -> Arc<ActivationCore> {
+        let component = Component::new(engine, program.text()).expect("fixture component compiles");
         Arc::new(ActivationCore {
-            engine,
+            engine: engine.clone(),
             component,
             limits,
             interrupt: GuestInterrupt::new(),
@@ -740,8 +757,9 @@ mod interrupt_tests {
     #[test]
     fn a_kill_stops_a_call_that_is_already_running() {
         let limits = kill_only_limits();
-        let core = core(GuestProgram::Runaway, limits);
-        let ticker = EpochTicker::start(&core.engine, limits.epoch_tick);
+        let engine = engine(limits);
+        let core = core(&engine, GuestProgram::Runaway, limits);
+        let ticker = EpochTicker::start(&engine, limits.epoch_tick);
         core.instantiate().expect("the runaway instantiates");
 
         // The result comes back over a channel rather than from `join`. The
@@ -753,9 +771,14 @@ mod interrupt_tests {
         let calling = Arc::clone(&core);
         thread::spawn(move || done.send(calling.call_activate()));
 
-        // Let the guest get properly under way, so this is a kill of a live
-        // call rather than a race with the entry check.
-        thread::sleep(limits.epoch_tick * 4);
+        // Wait for evidence the guest is actually inside the call, rather than
+        // sleeping and hoping. A nonzero tick count means the guest reached an
+        // epoch deadline, which it can only do from inside `activate`. Sleeping
+        // instead would let a slow scheduler turn this into a test of the entry
+        // check, which passes for the wrong reason.
+        while core.interrupt.ticks_used() == 0 {
+            thread::sleep(Duration::from_millis(1));
+        }
         let killed_at = Instant::now();
         core.interrupt.kill();
 
@@ -782,8 +805,9 @@ mod interrupt_tests {
     #[test]
     fn a_killed_activation_is_refused_before_it_enters_the_guest() {
         let limits = kill_only_limits();
-        let core = core(GuestProgram::Conformant, limits);
-        let _ticker = EpochTicker::start(&core.engine, limits.epoch_tick);
+        let engine = engine(limits);
+        let core = core(&engine, GuestProgram::Conformant, limits);
+        let _ticker = EpochTicker::start(&engine, limits.epoch_tick);
         core.instantiate()
             .expect("the conformant guest instantiates");
 
@@ -804,9 +828,11 @@ mod interrupt_tests {
     #[test]
     fn a_live_activation_still_runs_after_a_sibling_core_is_killed() {
         let limits = kill_only_limits();
-        let killed = core(GuestProgram::Conformant, limits);
-        let live = core(GuestProgram::Conformant, limits);
-        let _ticker = EpochTicker::start(&live.engine, limits.epoch_tick);
+        // Both cores on one engine under one ticker, as the driver runs them.
+        let engine = engine(limits);
+        let killed = core(&engine, GuestProgram::Conformant, limits);
+        let live = core(&engine, GuestProgram::Conformant, limits);
+        let _ticker = EpochTicker::start(&engine, limits.epoch_tick);
         killed.instantiate().expect("first guest instantiates");
         live.instantiate().expect("second guest instantiates");
 

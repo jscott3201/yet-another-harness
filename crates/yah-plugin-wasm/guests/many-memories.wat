@@ -26,11 +26,14 @@
     (func (export "cabi_realloc")
       (param $old_ptr i32) (param $old_len i32) (param $align i32) (param $new_len i32)
       (result i32)
-      ;; Unreachable in practice: the count ceiling refuses this guest at
-      ;; instantiation, so no lift or lower ever asks it for memory.
+      ;; Unreachable in practice: `activate` takes no parameters, so the host
+      ;; has nothing to lower, and its `ok` arm carries no payload to lift.
+      ;; This holds on both paths - the count ceiling refuses this guest under
+      ;; a tight count, and admits it under a generous one, where `activate`
+      ;; runs and still never needs an allocation.
       unreachable)
 
-    ;; Reached only if the ceiling admitted both memories.
+    ;; Reached only if the count ceiling admitted all eight memories.
     (func (export "activate") (result i32)
       (i32.store8 (i32.const 1024) (i32.const 0))
       (i32.const 1024))

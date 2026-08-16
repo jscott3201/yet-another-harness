@@ -4,9 +4,9 @@
 ;; so a guest that spreads its allocation across several memories would be
 ;; admitted well above the total a host believed it had set. This fixture is
 ;; that guest. Its two memories are declared with initial pages, so the total is
-;; the total is claimed at instantiation: the limiter still sees both
-;; requests, but there is no `memory.grow` instruction to answer with -1, so the
-;; refusal aborts instantiation instead.
+;; claimed at instantiation: the limiter still sees both requests, but there is
+;; no `memory.grow` instruction to answer with -1, so the refusal aborts
+;; instantiation instead.
 ;;
 ;; See `conformant.wat` for the ABI and named-type rules.
 

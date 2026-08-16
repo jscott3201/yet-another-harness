@@ -62,10 +62,10 @@ fn test_limits() -> WasmLimits {
 /// Wide enough that a loaded machine will not fail the assertion, narrow enough
 /// that "the deadline never fired" cannot pass.
 fn kill_bound() -> Duration {
-    // 40x the deadline, and the deadline itself is 20ms. The bound only has to
-    // separate "terminated" from "never terminates", so it is set well past
-    // anything scheduling noise can produce: a false positive here aborts the
-    // whole test binary, which is a far worse outcome than a slow pass.
+    // 250x the deadline, which is itself 20ms, so about five seconds. The bound
+    // only has to separate "terminated" from "never terminates", so it is set
+    // well past anything scheduling noise can produce: a false positive here
+    // aborts the whole test binary, which is far worse than a slow pass.
     test_limits().call_deadline() * 250
 }
 
@@ -112,14 +112,12 @@ impl Watchdog {
             if flag.load(Ordering::Acquire) {
                 return;
             }
-            // Straight to fd 2, not `eprintln!`. libtest captures stderr for
-            // the thread that spawned this one, and `abort` discards the
-            // captured buffer - so a captured message is a message nobody ever
-            // reads, and the crash would name nothing.
+            // `stderr()`, not `eprintln!`. libtest captures the latter through
+            // `io::set_output_capture`, and `abort` discards the captured
+            // buffer - so the message would be one nobody ever reads and the
+            // crash would name nothing. Writing to the handle bypasses capture.
             let message = format!("watchdog: {what} did not finish within {bound:?}\n");
-            unsafe {
-                libc::write(2, message.as_ptr().cast(), message.len());
-            }
+            let _ = std::io::Write::write_all(&mut std::io::stderr(), message.as_bytes());
             std::process::abort();
         });
         Self { finished }
@@ -408,9 +406,12 @@ async fn the_memory_ceiling_is_a_total_across_every_memory_a_guest_declares() {
         other => panic!("a guest over the total ceiling must fail, got {other:?}"),
     };
     assert_eq!(failure.kind(), DriverActivationErrorKind::Failed);
+    // Naming the ceiling, not just the phase. "instantiation" alone also
+    // matches a count refusal and a kill on entry, so it would not distinguish
+    // this case from its neighbours.
     assert!(
-        failure.summary().contains("instantiation"),
-        "the memories are claimed at instantiation: {}",
+        failure.summary().contains("memory") && failure.summary().contains("limit"),
+        "the byte ceiling must say it was the thing that refused: {}",
         failure.summary()
     );
 
@@ -472,8 +473,8 @@ async fn a_guest_may_not_hold_more_memories_than_the_host_allows() {
     };
     assert_eq!(failure.kind(), DriverActivationErrorKind::Failed);
     assert!(
-        failure.summary().contains("instantiation"),
-        "the memories are declared, so the refusal lands at instantiation: {}",
+        failure.summary().contains("memory count"),
+        "the count ceiling must say it was the count that refused: {}",
         failure.summary()
     );
 

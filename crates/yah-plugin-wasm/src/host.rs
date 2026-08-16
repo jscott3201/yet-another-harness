@@ -91,22 +91,31 @@ impl HostObserver {
     /// rather than a copy. Both matter: a clipped `String` keeps whatever
     /// capacity the guest's message arrived with unless the clip reallocates,
     /// and `records()` hands out clones whose capacity is exactly their length,
-    /// so a copy cannot show the difference. The retention ceiling is a claim
-    /// about held heap, and this is the only view that can falsify it.
+    /// so a copy cannot show the difference.
+    ///
+    /// The same is true of the vectors, which is why they are counted too. A
+    /// guest can send a very large number of fields whose strings are all
+    /// empty; every string capacity is then zero while the field vector behind
+    /// them is enormous. Counting only the strings would report nothing.
     pub fn retained_bytes(&self) -> usize {
-        self.records
+        let records = self
+            .records
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let spine = records.capacity() * std::mem::size_of::<LogRecord>();
+        records
             .iter()
             .map(|record| {
                 record.message.capacity()
+                    + record.fields.capacity() * std::mem::size_of::<(String, String)>()
                     + record
                         .fields
                         .iter()
                         .map(|(key, value)| key.capacity() + value.capacity())
                         .sum::<usize>()
             })
-            .sum()
+            .sum::<usize>()
+            + spine
     }
 
     pub fn dropped_records(&self) -> usize {
@@ -185,20 +194,28 @@ impl logging::Host for HostState {
         // the record is evidence, and a clipped record is better evidence than
         // none. Truncation is counted so the doc claim stays checkable.
         let message = truncate_utf8(message, self.limits.max_log_message_bytes, &self.observer);
-        let fields = fields
-            .into_iter()
-            .take(self.limits.max_log_fields)
-            .map(|field| {
-                (
-                    truncate_utf8(field.key, self.limits.max_log_message_bytes, &self.observer),
-                    truncate_utf8(
-                        field.value,
-                        self.limits.max_log_message_bytes,
-                        &self.observer,
-                    ),
-                )
-            })
-            .collect::<Vec<_>>();
+        // Built by pushing into a pre-sized vector rather than by `collect`.
+        // `LogField` and `(String, String)` have the same size and alignment,
+        // which is exactly the condition for Rust's in-place collect
+        // specialisation: `collect` would hand back the guest's own buffer with
+        // its length set to the field ceiling and its capacity untouched. The
+        // host would then retain a vector sized by the guest while holding only
+        // the fields it kept - the same escape as clipping a `String` in place,
+        // one level up, and a larger one, because a field costs 48 bytes even
+        // when both of its strings are empty.
+        let kept = self.limits.max_log_fields.min(fields.len());
+        let mut clipped = Vec::with_capacity(kept);
+        for field in fields.into_iter().take(kept) {
+            clipped.push((
+                truncate_utf8(field.key, self.limits.max_log_message_bytes, &self.observer),
+                truncate_utf8(
+                    field.value,
+                    self.limits.max_log_message_bytes,
+                    &self.observer,
+                ),
+            ));
+        }
+        let fields = clipped;
         records.push(LogRecord {
             level,
             message,

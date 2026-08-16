@@ -42,14 +42,29 @@ pub struct WasmLimits {
     pub max_tables: usize,
     /// How many core instances one activation may hold.
     pub max_instances: usize,
-    /// Address space Wasmtime reserves per linear memory.
+    /// Address space Wasmtime reserves per linear memory, guards excluded.
     ///
     /// Wasmtime's default is 4 GiB, which lets a memory grow without ever
     /// moving. That trade only makes sense when a memory is allowed to reach
     /// 4 GiB; here the host's own ceiling is far lower, so the reservation is
     /// sized to the ceiling and the difference stops being address space a
     /// guest can claim for free.
+    ///
+    /// This is not the whole per-memory cost. A memory is bracketed by a guard
+    /// region on each side, so the address space one memory occupies is this
+    /// plus twice [`Self::memory_guard_bytes`]. Nothing derives this field from
+    /// [`Self::memory_bytes`]: a caller that raises the ceiling and leaves this
+    /// alone gets memories that outgrow their reservation and are re-mapped,
+    /// which costs more address space, not less.
     pub memory_reservation_bytes: u64,
+    /// Address space reserved on each side of a linear memory.
+    ///
+    /// The guard is what lets Wasmtime turn an out-of-bounds guest access into
+    /// a fault instead of a bounds check on every access, so it is worth
+    /// keeping. Wasmtime's default is 32 MiB per side, sized for a memory that
+    /// may reach 4 GiB; against this host's ceiling that is most of what an
+    /// activation costs.
+    pub memory_guard_bytes: u64,
     /// Bytes one guest-to-host call may transfer into host memory.
     ///
     /// A guest can point every element of a list at the same buffer, so the
@@ -183,6 +198,7 @@ impl Default for WasmLimits {
             max_tables: 4,
             max_instances: 16,
             memory_reservation_bytes: 16 * 1024 * 1024,
+            memory_guard_bytes: 1024 * 1024,
             host_call_bytes: 4 * 1024 * 1024,
             epoch_tick: Duration::from_millis(10),
             call_budget_ticks: 100,

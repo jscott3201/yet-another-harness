@@ -6,9 +6,15 @@
 //!
 //! [`PluginDriver`]: yah_plugin_host::PluginDriver
 //!
-//! This crate does not load plugin packages, enforce memory, deadline, fuel, or
-//! host-call limits, transport capability grants across the ABI, or contain
-//! hostile guest code. Its fixture components are corpus, not a guest SDK.
+//! Activations run under host-owned bounds ([`limits`]): ceilings on total
+//! memory and table size and on how many memories, tables, and instances one
+//! activation may hold, a call deadline, and caps on what a guest-to-host call
+//! may transfer and what the host retains from it.
+//!
+//! This crate does not load plugin packages, meter fuel, transport capability
+//! grants across the ABI, or contain hostile guest code. Bounding what a guest
+//! costs is not isolating what it can reach, and its fixture components are
+//! corpus, not a guest SDK.
 
 pub mod bindings;
 pub mod driver;
