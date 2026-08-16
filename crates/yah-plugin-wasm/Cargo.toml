@@ -1,0 +1,13 @@
+[package]
+name = "yah-plugin-wasm"
+version = "0.0.1"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+description = "Provisional WIT contract and future Wasmtime driver boundary for YAH"
+
+[dev-dependencies]
+wasmtime.workspace = true
+wit-bindgen.workspace = true
+wit-parser.workspace = true

@@ -11,9 +11,11 @@ component-revision primitives, plus independently authored semantic and fault
 corpora, a strict plugin manifest, and a runtime-neutral prepared-driver
 lifecycle with activation-scoped capability brokerage. One trusted local
 authoring example connects an example-only host capability to a built-in driver
-and passes the reusable lifecycle corpus. The repository does not yet contain
-a general callback host, production execution backend, agent loop, sandbox,
-daemon, or client; no guest runtime or cross-runtime equivalence is proven.
+and passes the reusable lifecycle corpus. A provisional WIT conformance world
+now compile-checks native host and guest bindings without executing a
+component. The repository does not yet contain a general callback host,
+production execution backend, agent loop, sandbox, daemon, or client; no guest
+runtime or cross-runtime equivalence is proven.
 
 ## Evidence Status
 
@@ -26,6 +28,7 @@ daemon, or client; no guest runtime or cross-runtime equivalence is proven.
 | Plugin driver lifecycle | Dyn-compatible exact-revision driver preparation, cancellation-safe host start ownership, effect-owned deactivation, readiness revalidation, panic containment, and fenced advisory health | Deterministic reference and trusted local authoring drivers pass; no production backend, loader, scheduler, or general callback runner |
 | Activation-scoped capability broker | Revision-bound requested subsets, exact typed registrations, weak mediated handles, provider/activation ABA fencing, and synchronous call drain before cleanup | One example-only local greeting round trip passes; no policy engine, durable attempt scope, production capability family, WIT/IPC resource table, or hostile-code sandbox |
 | Host-side driver conformance | Five stable cases cover ready lifecycle, pending-start cancellation, returned start/deactivation failures, and shared-driver isolation through public host APIs | Reusable runner is reference-proven and passed by the local authoring driver; no production guest backend or cross-runtime equivalence claim |
+| Wasm Component ABI draft | Versioned `yah:plugin@0.1.0` WIT world with exact logging/cancellation imports, lifecycle/fixture-tool exports, host and guest canonical binding compilation, parser-checked interface identities, and named-source regressions | Compile-only contract evidence; no built or executed component, runtime, resource limits, capability transport, WASI access, or sandbox claim |
 | Wasm, Node/TypeScript, and Python plugin drivers | No implementation in this repository | Not started |
 | Selene work, session, memory, evidence, and plugin-lineage domains | Only the current kernel graph exists | Design/spike stage |
 | Full harness vertical slice | No live model, tool execution, memory loop, or subagent | Not started |
@@ -229,14 +232,18 @@ or concurrent effect registration.
   request from grant, and whose exact handle remains revoked across clean stop
   and provider replacement while the same driver family passes all five
   portable lifecycle cases.
+- A `yah-plugin-wasm` crate with one canonical, versioned WIT conformance world;
+  pinned development-only Wasmtime and `wit-bindgen` host/guest compile probes;
+  and parser assertions for its exact imports, exports, functions, and declared
+  package/interface identities, plus source regressions for deferred names.
 
 Manifest parsing is not installation or admission. In particular, a built-in
 lane declaration cannot name a linked factory and still requires out-of-band
 trusted provenance plus exact host registration. Package extraction,
 signatures, configuration snapshots, policy/approval calculation, concrete
 production capability families and execution backends, plugin-provided
-services, WIT/IPC bindings, durable attempts, and actual multi-runtime or
-guest-semantic conformance are not implemented. See
+services, WIT capability-resource or process-IPC bindings, durable attempts,
+and actual multi-runtime or guest-semantic conformance are not implemented. See
 the [driver lifecycle contract](plugin-driver.md) and
 [capability broker contract](plugin-capabilities.md), plus the
 [driver conformance contract](plugin-driver-conformance.md).
@@ -284,9 +291,8 @@ plugin SDK, daemon protocol, or promised compatibility surface.
 
 ## Pivot Work
 
-The next useful proof extends the landed composition and plugin-host contracts
-beyond the completed local authoring example into a narrow vertical slice
-containing:
+The next useful proof extends the landed composition, plugin-host, and
+compile-checked WIT contracts into a narrow vertical slice containing:
 
 1. one Selene graph/memory host capability;
 2. one Wasm component plus one modern Node or Python process plugin that runs
@@ -308,7 +314,8 @@ crate or protocol boundary in advance.
   production execution backends or capability families, plugin service
   contributions, policy-derived grants, language SDKs, guest-semantic corpus,
   or demonstrated cross-runtime equivalence.
-- Wasmtime/WIT host or sandboxed Node/TypeScript and CPython workers.
+- Wasmtime component host/driver, built guest component, or sandboxed
+  Node/TypeScript and CPython workers.
 - Durable memory capture, retrieval, ranking, summaries, or evidence lineage.
 - Live model providers, prompt assembly, tool execution, workflows, schedules,
   goals, or subagents.

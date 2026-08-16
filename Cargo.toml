@@ -5,6 +5,7 @@ members = [
     "crates/yah-compose",
     "crates/yah-kernel",
     "crates/yah-plugin-host",
+    "crates/yah-plugin-wasm",
 ]
 
 # Crate boundaries are deliberately provisional during the full-harness pivot.
@@ -40,3 +41,8 @@ tokio-util = { version = "0.7", default-features = false }
 # implementations rather than growing security-sensitive ad hoc parsers.
 semver = "1.0.28"
 toml = "1.1.4"
+# WSM-001 compile-time compatibility probes. Wasmtime remains test-only until
+# yah-plugin-wasm owns an executable driver in WSM-002.
+wasmtime = { version = "=47.0.3", default-features = false, features = ["component-model", "runtime", "std"] }
+wit-bindgen = { version = "=0.57.1", default-features = false, features = ["macros", "realloc", "std"] }
+wit-parser = { version = "=0.252.0", default-features = false, features = ["std"] }

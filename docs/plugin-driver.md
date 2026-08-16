@@ -104,7 +104,10 @@ process backend exists. These layers do not implement
 package loading or admission, policy/approval evaluation, configuration
 delivery, general component callbacks, async invocation
 draining, recurring health checks, restart/backoff policy, deadlines, forced
-termination, task supervision, WIT, worker IPC, sandboxing, or durable
+termination, task supervision, WIT execution/resource transport, worker IPC,
+sandboxing, or durable
 activation identity or work-attempt fencing. Portable nonempty capability
 transport, guest ABI behavior, backend containment, and multi-runtime
-equivalence remain later evidence profiles.
+equivalence remain later evidence profiles. A separate
+[compile-checked WIT draft](wasm-plugin-contract.md) now fixes the first
+host/guest binding shape without implementing a driver or runtime.

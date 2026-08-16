@@ -96,7 +96,8 @@ This slice does not implement:
 - async calls, streams, task supervision, deadlines, rate limits, or forced
   cancellation;
 - durable work-attempt identity or child invocation scopes;
-- WIT/IPC resource encodings, production execution drivers, or sandbox enforcement;
+- WIT/IPC capability-resource encodings, production execution drivers, or
+  sandbox enforcement;
 - provider cleanup ownership, durable external effects, or Selene persistence;
   or
 - automatic lifecycle changes after a host policy decision.
@@ -105,3 +106,7 @@ Durable attempts require the full kernel fence, not a copied scalar epoch. They
 will bind into capability calls when a real invocation owner exists. Grant
 changes likewise require a fresh activation until later security policy defines
 audited revocation and dependent scheduling.
+
+The separate [WIT conformance world](wasm-plugin-contract.md) imports only
+baseline logging and cancellation for a fixed compile profile. It does not yet
+transport these capability handles or turn static imports into grants.

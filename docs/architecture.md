@@ -258,6 +258,13 @@ backend. See the
 [capability contract](plugin-capabilities.md), plus the separate
 [conformance boundary](plugin-driver-conformance.md).
 
+The `yah-plugin-wasm` crate separately owns a
+[versioned WIT conformance world](wasm-plugin-contract.md). Development-only
+host and guest generators compile bindings from that single source, and parser
+tests fix the exact baseline logging/cancellation imports and lifecycle/tool
+fixture exports. This is an ABI draft, not a component loader, capability
+resource bridge, execution backend, or sandbox.
+
 Each plugin revision has a content identity, manifest, requested capabilities,
 configuration, and execution driver. Admission separates:
 
@@ -271,8 +278,10 @@ be repaired by optimistic labeling.
 
 ## Sandbox and Credentials
 
-The planned Wasm driver will expose only explicitly linked host interfaces and
-host-enforced resource limits. Full-language workers will be launched through
+The compile-checked WIT draft contains only explicitly named baseline
+interfaces and no WASI imports. The planned Wasm driver must link only the
+interfaces admitted for its fixed profile and enforce resource limits before
+running untrusted code. Full-language workers will be launched through
 a selected sandbox backend. Each backend must advertise and be tested for the
 controls it actually enforces; unsupported required controls must fail
 admission. No plugin sandbox is implemented or audited yet.
@@ -312,7 +321,8 @@ Today the repository contains the initial process-local component lifecycle,
 effect-scope core, typed revocable service registry, strict plugin manifest,
 runtime-neutral prepared-driver lifecycle, and exact activation-scoped
 capability broker, plus the reusable host-side driver conformance testkit and a
-trusted local authoring example; the Selene-backed reliability
+trusted local authoring example; a compile-checked provisional WIT conformance
+world with no runtime; the Selene-backed reliability
 kernel; provider normalization fixtures; an in-process protocol experiment;
 and the G02 storage evidence harness. General component callbacks,
 shared/named service realms, policy interception, automatic registry watches

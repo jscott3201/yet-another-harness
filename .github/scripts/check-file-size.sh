@@ -20,7 +20,7 @@ count_blob() {
     content=$(<"$f")
   fi
   case "$f" in
-    *.rs | *.ts | *.tsx | *.js | *.jsx)
+    *.rs | *.ts | *.tsx | *.js | *.jsx | *.wit)
       printf '%s\n' "$content" | grep -cvE '^\s*(//.*)?$' || true
       ;;
     *.sh | *.toml | *.yml | *.yaml)
@@ -38,12 +38,12 @@ if $CACHED; then
     exit 2
   }
 else
-  tracked=$(git ls-files '*.rs' '*.ts' '*.tsx' '*.js' '*.jsx' '*.sh' '*.toml' '*.json' '*.yml' '*.yaml' '*.md' '*.svg' '*.css' '*.html' 'LICENSE*') || {
+  tracked=$(git ls-files '*.rs' '*.ts' '*.tsx' '*.js' '*.jsx' '*.sh' '*.toml' '*.json' '*.yml' '*.yaml' '*.wit' '*.md' '*.svg' '*.css' '*.html' 'LICENSE*') || {
     echo "FAIL: could not enumerate tracked files"
     exit 2
   }
   untracked=$(git ls-files --others --exclude-standard \
-    '*.rs' '*.ts' '*.tsx' '*.js' '*.jsx' '*.sh' '*.toml' '*.json' '*.yml' '*.yaml' '*.md' '*.svg' '*.css' '*.html' 'LICENSE*') || {
+    '*.rs' '*.ts' '*.tsx' '*.js' '*.jsx' '*.sh' '*.toml' '*.json' '*.yml' '*.yaml' '*.wit' '*.md' '*.svg' '*.css' '*.html' 'LICENSE*') || {
     echo "FAIL: could not enumerate untracked files"
     exit 2
   }
@@ -52,7 +52,7 @@ fi
 
 while IFS= read -r f; do
   case "$f" in
-    *.rs | *.ts | *.tsx | *.js | *.jsx | *.sh | *.toml | *.json | *.yml | *.yaml | *.md | *.svg | *.css | *.html | LICENSE*) ;;
+    *.rs | *.ts | *.tsx | *.js | *.jsx | *.sh | *.toml | *.json | *.yml | *.yaml | *.wit | *.md | *.svg | *.css | *.html | LICENSE*) ;;
     *) continue ;;
   esac
   $CACHED || [ -f "$f" ] || continue

@@ -16,6 +16,7 @@ proved.
 | [Plugin driver conformance](plugin-driver-conformance.md) | Reusable host-side driver cases, trusted fixture contract, evidence, and explicit non-certification limits |
 | [Plugin capabilities](plugin-capabilities.md) | Implemented activation-scoped effective grants, exact typed registrations, mediated handles, and revocation limits |
 | [Local plugin authoring](plugin-authoring.md) | Runnable trusted built-in consumer, example-only host capability, exact-grant lifecycle, and explicit limits |
+| [Wasm plugin contract](wasm-plugin-contract.md) | Compile-checked provisional WIT world, version axes, static import semantics, and runtime limits |
 | [Application protocol](protocol.md) | Current Adapter 1 experiment; not the future plugin SDK or a stable public protocol |
 | [Development](development.md) | Workspace setup, local gates, file-size policy, and pull request checklist |
 
