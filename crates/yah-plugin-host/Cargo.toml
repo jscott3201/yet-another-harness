@@ -5,7 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 publish = false
-description = "Validated plugin contracts and runtime-neutral driver lifecycle for YAH"
+description = "Validated plugin contracts, driver lifecycle, and host-side conformance for YAH"
 
 [dependencies]
 semver.workspace = true

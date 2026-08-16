@@ -3,10 +3,13 @@
 //! This crate validates declarative package manifests and immutable revision
 //! identities, defines the runtime-neutral host/driver lifecycle, and projects
 //! authority-selected manifest requests into exact activation-scoped typed
-//! handles. It does not load code, compute policy or approval, choose restart
-//! behavior, or persist plugin state.
+//! handles. Its reusable host-side conformance runner tests those driver
+//! lifecycle boundaries without choosing an executor. It does not load code,
+//! compute policy or approval, choose restart behavior, or persist plugin
+//! state.
 
 mod capability;
+pub mod conformance;
 mod driver;
 mod identity;
 mod manifest;
@@ -16,6 +19,14 @@ pub use capability::{
     CapabilityBroker, CapabilityBrokerError, CapabilityDefinition, CapabilityGrant,
     CapabilityGrantError, CapabilityHandle, CapabilityHandleError, CapabilityProviderRegistration,
     CapabilityRegistrationId, EffectiveCapabilityGrants, PluginStartContext,
+};
+pub use conformance::{
+    DriverActivationObservation, DriverConformanceCase, DriverConformanceCaseReport,
+    DriverConformanceCaseResult, DriverConformanceFailure, DriverConformancePhase,
+    DriverConformanceProbe, DriverConformanceProbeError, DriverConformanceReport,
+    DriverConformanceResourceState, DriverConformanceSetupError, DriverConformanceSubject,
+    DriverConformanceTarget, DriverConformanceTeardown, DriverConformanceTerminal,
+    run_driver_conformance, run_driver_conformance_case,
 };
 pub use driver::{
     ActivatePlugin, DriverActivationError, DriverActivationErrorKind, DriverDeactivationError,
