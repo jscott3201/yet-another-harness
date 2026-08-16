@@ -5,9 +5,10 @@ from a narrow model-free reliability kernel to a complete Rust-native,
 graph-backed, plugin-extensible agent harness.
 
 There is no usable release. The repository contains a tested reliability
-foundation and the first process-local composition lifecycle, cleanup, and
-typed service-binding primitives; it does not yet contain a runnable
-composition host, plugin host, agent loop, sandbox, daemon, or client.
+foundation and the first process-local composition lifecycle, cleanup, typed
+service-binding, and exact-assignment dependency-reconciliation primitives; it
+does not yet contain a runnable composition host, plugin host, agent loop,
+sandbox, daemon, or client.
 
 ## Evidence Status
 
@@ -15,7 +16,7 @@ composition host, plugin host, agent loop, sandbox, daemon, or client.
 |---|---|---|
 | G02 storage fan-in and crash recovery | Atomic state, receipt, and journal commits under kill/reopen, writer takeover, and corruption drills | Passed across 1,440 scored trials: [report](gates/G02-storage-fanin-recovery.md) |
 | Current model-free kernel | Deterministic tests for command, fencing, cancellation, effect, provider, recovery, and Adapter 1 behavior | Available for reuse; pivot integration has not started |
-| Contextual composition runtime | Component definition/instance/scope identities, epoch-fenced lifecycle, reversible nested effects, typed requirements, and exact revocable provider bindings | Initial slices; no callbacks, contextual provider selection, or reconciler |
+| Contextual composition runtime | Component definition/instance/scope identities, epoch-fenced lifecycle, reversible nested effects, typed requirements, exact revocable bindings, and level-triggered exact-assignment recomposition | Initial slices; no callbacks, provider-ranking policy, contextual visibility, or host-wide reconciler |
 | Plugin manifest, SDK, and conformance suite | No implementation in this repository | Not started |
 | Wasm, Node/TypeScript, and Python plugin drivers | No implementation in this repository | Not started |
 | Selene work, session, memory, evidence, and plugin-lineage domains | Only the current kernel graph exists | Design/spike stage |
@@ -76,11 +77,32 @@ but does not run its cleanup.
 - Generated provider identities reuse their unique effect registration, so a
   stale handle or delayed cleanup cannot target a replacement publication.
 
-The registry is one flat, process-local visibility domain. It reports readiness
-but does not mutate lifecycle state. Contextual inheritance and isolation,
-provider-selection epochs, watches, dependent stop/rebind/start, and automatic
-reconciliation remain future work. Live service values are not serialized or
-stored in Selene.
+The registry is one flat, process-local visibility domain. Its low-level
+inventory and binding operations do not choose providers or mutate lifecycle.
+Live service values are not serialized or stored in Selene.
+
+### Dependency reconciliation
+
+- A reconciled component uniquely owns a consumed, frozen definition, its live
+  instance, one activation effect scope, and one immutable provider selection.
+- Caller-supplied assignments must cover every frozen requirement with one
+  exact currently visible registration; missing, unassigned, ambiguous, and
+  unavailable choices remain distinguishable while the instance is pending.
+- Provider-selection epochs reuse the process-unique activation epoch because
+  changing any assignment always requires a fresh activation.
+- Assignment change or selected-provider withdrawal enters controlled stop and
+  synchronously cancels the old activation before returning. Existing handles
+  fail closed and never follow a replacement in place.
+- Start completion revalidates every committed exact provider. Clean teardown
+  must reach pending before a later level-triggered pass can start current
+  assignments; non-clean cleanup reports remain observable and blocked in
+  stopping.
+
+This layer deliberately supplies no implicit first-provider policy. Additional
+candidates do not disturb an explicit live assignment. Registry watches,
+background convergence, callback execution, contextual inheritance/isolation,
+provider ranking, cycles, retry policy, and desired component/config changes
+remain future work.
 
 ### Selene-backed mutation and recovery
 
@@ -128,9 +150,9 @@ plugin SDK, daemon protocol, or promised compatibility surface.
 The next useful proof extends the composition core into a narrow vertical slice
 containing:
 
-1. executable component callbacks and service-dependency reconciliation;
-2. provider selection and recomposition over the existing typed bindings,
-   epoch-fenced lifecycle, and effect scopes;
+1. executable component callbacks over the dependency reconciler;
+2. provider policy and contextual recomposition over the existing exact
+   assignments, typed bindings, epoch-fenced lifecycle, and effect scopes;
 3. a small plugin manifest and capability grant;
 4. one Selene graph/memory host capability;
 5. one Wasm component plus one modern Node or Python process plugin;
@@ -145,7 +167,7 @@ crate or protocol boundary in advance.
 ## Not Implemented
 
 - Component callback runner, contextual service inheritance/isolation,
-  provider-selection epochs, dependency reconciliation, concurrent scope/task
+  automatic provider ranking or registry watches, concurrent scope/task
   supervisor, desired-state reconciler, or isolation realms.
 - Plugin packages, manifests, admission, installation, updates, SDKs, or
   language conformance tests.

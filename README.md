@@ -157,8 +157,12 @@ requests or completions; activation-owned reversible effect scopes; and a
 process-local typed service registry. Required services produce deterministic
 missing reports, provider publication is owned by effect cleanup, and handles
 bind one exact provider registration and fail closed when either activation
-scope is cancelled. Component callbacks, contextual service visibility,
-automatic provider selection, and reconciliation are not implemented yet.
+scope is cancelled. A level-triggered reconciled component freezes its mounted
+definition and one explicit, exact provider assignment per activation; changing
+or losing an assigned provider cancels and tears down the old activation before
+a replacement can start. Component callbacks, registry watches, contextual
+service visibility, automatic provider ranking, and desired-state graph
+reconciliation are not implemented yet.
 
 The repository already contains a model-free Rust kernel and evidence harness:
 
@@ -246,7 +250,7 @@ projects are evolving independently and do not define YAH compatibility.
 
 | Path | Contents |
 |---|---|
-| `crates/yah-compose/` | Process-local component identity, epoch-fenced lifecycle, reversible effect scopes, and typed revocable service bindings |
+| `crates/yah-compose/` | Process-local component identity, epoch-fenced lifecycle, reversible effect scopes, typed revocable services, and exact-assignment dependency reconciliation |
 | `crates/yah-kernel/` | Current model-free durability, authority, effect, cancellation, provider, and protocol kernel |
 | `crates/exp001-harness/` | Storage fan-in and crash-recovery evidence harness |
 | `generated/protocol/` | Checked-in JSON Schemas and TypeScript bindings for the current protocol experiment |

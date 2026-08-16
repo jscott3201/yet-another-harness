@@ -12,8 +12,8 @@ static NEXT_INSTANCE_INCARNATION: AtomicU64 = AtomicU64::new(1);
 /// Stable identity of a component definition.
 ///
 /// Factories and manifest metadata remain deferred until a real activation
-/// contract exercises them. Required services are declared here so readiness
-/// can be checked before the future reconciler starts an instance.
+/// contract exercises them. Required services are declared here so a mounted
+/// reconciled component can freeze them before it starts an instance.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ComponentDefinition {
     id: ComponentId,
