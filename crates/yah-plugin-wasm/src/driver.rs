@@ -93,6 +93,20 @@ impl WasmActivationPlan {
         }
     }
 
+    /// The same, behind a guest that runs long enough to yield while it starts.
+    ///
+    /// Instantiation is a guest call, so a host polling a start can be handed
+    /// back `Pending` before there is anything to observe. With the conformant
+    /// guest that depends on a tick happening to land inside a few microseconds
+    /// of instantiation; here it is what the guest does.
+    pub const fn slow_pending_start() -> Self {
+        Self {
+            guest: GuestProgram::SlowStart,
+            start: StartBehavior::PendAfterInstantiate,
+            deactivate: DeactivateBehavior::Release,
+        }
+    }
+
     pub const fn start_failure() -> Self {
         Self {
             guest: GuestProgram::ActivateFailure,
@@ -945,9 +959,11 @@ mod interrupt_tests {
             // runaway's total. A ratio would accept a sibling that waited
             // dozens of ticks as long as the runaway ran longer still; the
             // property being claimed is that the sibling gets in within about
-            // one tick. The shipped code lands on exactly one, idle or loaded,
-            // so this leaves an order of magnitude of headroom and still fails
-            // anything that yields rarely instead of every tick.
+            // one tick. The shipped code lands on exactly one when idle and at
+            // ordinary load, and on a handful when the machine is oversubscribed
+            // several times over, so ten leaves room without being so wide that
+            // it stops failing anything that yields rarely instead of every
+            // tick.
             assert!(
                 healthy_ticks < 10,
                 "the healthy guest waited {healthy_ticks} ticks ({healthy_took:?}) \

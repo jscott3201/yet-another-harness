@@ -12,10 +12,10 @@ use std::{sync::Arc, time::Duration};
 
 use fixtures::{case_digest, revision};
 use yah_plugin_host::{
-    DriverConformanceCase, DriverConformanceProbe, DriverConformanceProbeError,
-    DriverConformanceReport, DriverConformanceResourceState, DriverConformanceSetupError,
-    DriverConformanceSubject, DriverConformanceTarget, DriverKind, PluginActivationId,
-    run_driver_conformance, run_driver_conformance_case,
+    DriverConformanceCase, DriverConformanceCaseResult, DriverConformanceProbe,
+    DriverConformanceProbeError, DriverConformanceReport, DriverConformanceResourceState,
+    DriverConformanceSetupError, DriverConformanceSubject, DriverConformanceTarget, DriverKind,
+    PluginActivationId, run_driver_conformance, run_driver_conformance_case,
 };
 use yah_plugin_wasm::{
     ResourceState, WasmActivationPlan, WasmComponentDriver, WasmLimits, WasmObserver,
@@ -24,6 +24,7 @@ use yah_plugin_wasm::{
 struct WasmTarget {
     name: &'static str,
     limits: WasmLimits,
+    pending_start: WasmActivationPlan,
 }
 
 impl WasmTarget {
@@ -32,24 +33,31 @@ impl WasmTarget {
         Self {
             name: "wasmtime-component-driver",
             limits: WasmLimits::default(),
+            pending_start: WasmActivationPlan::pending_start(),
         }
     }
 
-    /// The same driver, with a tick short enough that a call yields mid-flight.
+    /// The same driver, against a guest that yields while it is starting.
     ///
     /// Instantiation is a guest call and a guest call yields at every epoch
-    /// tick, so at this rate a start reliably comes back `Pending` before there
-    /// is a store to observe. Only the yield is under test here: the budget is
-    /// effectively infinite so that a loaded machine cannot fail this case for
-    /// the unrelated reason that the call also ran out of deadline.
+    /// tick, so a start can hand the host back `Pending` before there is a
+    /// store to observe. Forcing that by shortening the tick alone would be a
+    /// race - a small component instantiates in microseconds - so the guest
+    /// holds the fiber for milliseconds instead and the tick only has to be
+    /// shorter than that.
+    ///
+    /// Only the yield is under test: the budget is effectively infinite so a
+    /// loaded machine cannot fail this case for the unrelated reason that the
+    /// call also ran out of deadline.
     fn yielding() -> Self {
         Self {
             name: "wasmtime-component-driver (yielding)",
             limits: WasmLimits {
-                epoch_tick: Duration::from_micros(20),
+                epoch_tick: Duration::from_micros(250),
                 call_budget_ticks: u64::MAX,
                 ..WasmLimits::default()
             },
+            pending_start: WasmActivationPlan::slow_pending_start(),
         }
     }
 }
@@ -69,9 +77,7 @@ impl DriverConformanceTarget for WasmTarget {
     ) -> Result<DriverConformanceSubject, DriverConformanceSetupError> {
         let plans = match case {
             DriverConformanceCase::ReadyLifecycle => vec![WasmActivationPlan::ready()],
-            DriverConformanceCase::PendingStartCancellation => {
-                vec![WasmActivationPlan::pending_start()]
-            }
+            DriverConformanceCase::PendingStartCancellation => vec![self.pending_start],
             DriverConformanceCase::ReturnedStartFailure => {
                 vec![WasmActivationPlan::start_failure()]
             }
@@ -152,9 +158,9 @@ async fn pending_start_cancellation_is_independently_runnable() {
 /// so the suite passed; under load it did, about once in twenty runs, and the
 /// case failed for a reason that had nothing to do with cancellation.
 ///
-/// Forcing the tick makes the same path deterministic, which is what keeps the
-/// case honest: with the retry removed this fails every time rather than one
-/// run in twenty.
+/// A guest that spends milliseconds in its start section makes the same path
+/// happen on every run instead of on the unlucky ones, so this case fails
+/// rather than quietly stops covering anything.
 #[tokio::test]
 async fn pending_start_conforms_when_instantiation_yields_before_it_acquires() {
     let result = run_driver_conformance_case(
@@ -162,5 +168,19 @@ async fn pending_start_conforms_when_instantiation_yields_before_it_acquires() {
         DriverConformanceCase::PendingStartCancellation,
     )
     .await;
-    assert!(result.passed(), "{:?}", result.failure());
+    let DriverConformanceCaseResult::Passed(report) = &result else {
+        panic!("{:?}", result.failure());
+    };
+    // Assert the premise, not just the outcome. One pending poll to reach the
+    // store and one for the resumed waiter is what a guest that does not yield
+    // produces; anything beyond that is instantiation handing the thread back,
+    // which is the whole reason this target exists. Without this the case would
+    // pass by being an expensive duplicate of the one above on any machine
+    // where the yield did not happen.
+    let polls = report.activations()[0].start_pending_polls();
+    assert!(
+        polls > 2,
+        "instantiation never yielded, so this case proved nothing the standard \
+         target does not: {polls} pending start polls"
+    );
 }

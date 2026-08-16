@@ -9,9 +9,14 @@
 ;;
 ;; The depth is chosen for margin on both sides. A frame here measures 48 bytes
 ;; on aarch64, so a 512 KiB bound admits about 10,900 frames and an 8 MiB bound
-;; about 174,000; 50,000 sits roughly three times clear of each. No mainstream
-;; ABI puts a non-leaf frame holding a value across a call below about 32 bytes,
-;; which is the worst case the refused side has to survive on another target.
+;; about 174,000, and 50,000 sits between them: 4.6x above the tight bound's
+;; capacity and 3.5x below the generous one's.
+;;
+;; Stated as the property that has to survive a target with a different frame
+;; size: the refused half holds while a frame is larger than 10.5 bytes, and the
+;; admitted half while it is smaller than 168. The measured 48 is nowhere near
+;; either, and no mainstream ABI puts a non-leaf frame holding a value across a
+;; call anywhere below 32.
 ;;
 ;; See `conformant.wat` for the ABI and named-type rules.
 

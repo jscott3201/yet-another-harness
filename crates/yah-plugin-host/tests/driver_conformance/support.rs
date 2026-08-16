@@ -33,6 +33,10 @@ impl ReferenceTarget {
         Self::with_violation(Violation::RevisionMismatch)
     }
 
+    pub(super) fn with_pending_start_that_never_acquires() -> Self {
+        Self::with_violation(Violation::PendingStartNeverAcquires)
+    }
+
     pub(super) fn with_pending_start_completion() -> Self {
         Self::with_violation(Violation::PendingStartCompletes)
     }
@@ -112,6 +116,7 @@ enum Violation {
     None,
     RevisionMismatch,
     PendingStartCompletes,
+    PendingStartNeverAcquires,
     UnhealthyReady,
     ProbeFailureAfterAcquire,
     TransientProbeFailureAfterAcquire,
@@ -130,6 +135,7 @@ impl DriverConformanceTarget for ReferenceTarget {
             Violation::None => "reference-scripted-driver",
             Violation::RevisionMismatch => "reference-metadata-mismatch",
             Violation::PendingStartCompletes => "reference-pending-completes",
+            Violation::PendingStartNeverAcquires => "reference-pending-never-acquires",
             Violation::UnhealthyReady => "reference-unhealthy-ready",
             Violation::ProbeFailureAfterAcquire => "reference-probe-failure",
             Violation::TransientProbeFailureAfterAcquire => "reference-transient-probe-failure",
@@ -199,6 +205,12 @@ impl DriverConformanceTarget for ReferenceTarget {
         match (self.violation, case) {
             (Violation::PendingStartCompletes, DriverConformanceCase::PendingStartCancellation) => {
                 plans[0].start = StartBehavior::Ready;
+            }
+            (
+                Violation::PendingStartNeverAcquires,
+                DriverConformanceCase::PendingStartCancellation,
+            ) => {
+                plans[0].start = StartBehavior::PendingWithoutAcquire;
             }
             (Violation::UnhealthyReady, DriverConformanceCase::ReadyLifecycle) => {
                 plans[0].health = HealthBehavior::Unhealthy;
@@ -298,6 +310,12 @@ impl Plan {
 enum StartBehavior {
     Ready,
     Pending,
+    /// Pends without ever acquiring, which no conforming driver does.
+    ///
+    /// The pending-start case polls until the driver acquires, so this is what
+    /// makes that loop's bound reachable: without it nothing distinguishes a
+    /// bounded loop from one that would spin forever.
+    PendingWithoutAcquire,
     Failure,
 }
 
@@ -398,9 +416,11 @@ impl PreparedDriverActivation for ReferencePrepared {
 
     fn start(&self, permit: DriverStartPermit) -> DriverFuture<Result<(), DriverActivationError>> {
         debug_assert_eq!(permit.id(), &self.id);
-        self.state
-            .resource
-            .store(ResourceState::Live as u8, Ordering::Release);
+        if !matches!(self.plan.start, StartBehavior::PendingWithoutAcquire) {
+            self.state
+                .resource
+                .store(ResourceState::Live as u8, Ordering::Release);
+        }
         Box::pin(StartFuture {
             behavior: self.plan.start,
         })
@@ -439,7 +459,7 @@ impl Future for StartFuture {
     fn poll(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Self::Output> {
         match self.behavior {
             StartBehavior::Ready => Poll::Ready(Ok(())),
-            StartBehavior::Pending => Poll::Pending,
+            StartBehavior::Pending | StartBehavior::PendingWithoutAcquire => Poll::Pending,
             StartBehavior::Failure => Poll::Ready(Err(DriverActivationError::failed(
                 "reference start failure",
             ))),

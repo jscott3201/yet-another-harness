@@ -126,6 +126,29 @@ async fn probe_failure_after_acquisition_is_preserved_and_cleanup_still_runs() {
     );
 }
 
+/// The poll bound in the pending-start case, and what it says when it is hit.
+///
+/// The case polls until the driver acquires, because a driver may pend before
+/// it has anything to show. That bound is what keeps "never acquires" a failure
+/// rather than a hang, and it must name itself: a driver that never acquired
+/// has not failed to retain its start operation, which is what the next check
+/// in the case is about.
+#[tokio::test]
+async fn a_pending_start_that_never_acquires_is_failed_by_the_poll_bound() {
+    let failure = case_failure(
+        &ReferenceTarget::with_pending_start_that_never_acquires(),
+        DriverConformanceCase::PendingStartCancellation,
+    )
+    .await;
+    assert_eq!(failure.phase(), DriverConformancePhase::Start);
+    assert!(
+        failure.summary().contains("without acquiring"),
+        "the bound must name why it gave up: {}",
+        failure.summary()
+    );
+    assert_eq!(failure.teardown(), DriverConformanceTeardown::Clean);
+}
+
 #[tokio::test]
 async fn transient_probe_failure_remains_in_final_structured_evidence() {
     let failure = case_failure(

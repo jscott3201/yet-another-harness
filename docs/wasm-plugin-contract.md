@@ -45,11 +45,12 @@ either. So a loader here will own identity, versioning, and verification
 itself. That is a real cost of this path and it lands on a later slice.
 
 Two consequences already apply. A loader must cache compiled artifacts:
-compilation costs roughly one hundred and twenty to two hundred and thirty
-times instantiation for the fixtures here, and around sixteen hundred times for
-a JavaScript guest, so compiling per activation is not viable. And Component Model async stays off —
-it works end to end under this pin, but the JavaScript toolchain cannot compile
-a world that uses it, and enabling it would make async a Rust-only capability.
+compilation costs roughly seventy-five to two hundred and seventy times
+instantiation for the fixtures here, and around sixteen hundred times for a
+JavaScript guest, so compiling per activation is not viable. And Component
+Model async stays off — it works end to end under this pin, but the JavaScript
+toolchain cannot compile a world that uses it, and enabling it would make async
+a Rust-only capability.
 
 Run `cargo run -p yah-plugin-wasm --example startup_cost --release` for the
 compile-versus-instantiate figures on the checked-in fixtures.
@@ -198,9 +199,11 @@ the stack a call runs on; the other bounds how deep the guest may recurse on
 it. Setting only the first would leave the recursion bound at Wasmtime's
 default rather than the host's. The driver also requires room between them:
 Wasmtime rejects a recursion bound larger than the stack but accepts one a page
-smaller, and that pair aborts the process on the first guest call rather than
-failing anything a host could handle, so the driver refuses it at build time
-instead. The stack is charged per *activation*, not per call in flight:
+smaller, and that pair aborts the process on the first guest call that runs
+deep enough to use its bound — rather than failing anything a host could
+handle — so the driver refuses it at build time instead. How much room is the
+host's number too, defaulting to twenty times the deepest host frames measured
+above a guest here. The stack is charged per *activation*, not per call in flight:
 Wasmtime parks a finished call's stack in its store and reuses it, releasing it
 only when the store is dropped, and since instantiation is itself a guest call
 every live activation holds one from its first call until teardown. A host
