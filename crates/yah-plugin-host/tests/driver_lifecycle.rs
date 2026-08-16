@@ -8,16 +8,19 @@ use std::{
     task::{Context, Poll, Waker},
 };
 
-use support::{DeactivateMode, FakeDriver, FakePlan, Gate, HealthMode, PrepareMode, StartMode};
+use support::{
+    DeactivateMode, FakeDriver, FakePlan, Gate, HealthMode, PrepareMode, StartMode,
+    prepare_activation,
+};
 use yah_compose::{
     CleanupError, ComponentDefinition, ComponentRevision, ComponentSlot, ComponentSlotOutcome,
     ComponentStateKind, DesiredComponentState, ProviderAssignments, ProviderSelectionEpoch,
     ReconcileOutcome, Scope, ServiceRegistry, StopDisposition, StopTarget,
 };
 use yah_plugin_host::{
-    DriverActivationErrorKind, HostPluginActivation, HostPluginActivationError, PackageDigest,
-    PluginActivationHandle, PluginDriver, PluginHealth, PluginHealthError, PluginPackageId,
-    PluginRevisionId, PluginStartError, PluginVersion,
+    DriverActivationErrorKind, HostPluginActivationError, PackageDigest, PluginActivationHandle,
+    PluginDriver, PluginHealth, PluginHealthError, PluginPackageId, PluginRevisionId,
+    PluginStartError, PluginVersion,
 };
 
 fn package_revision(name: &str, digest_byte: char) -> PluginRevisionId {
@@ -87,7 +90,7 @@ async fn dyn_driver_happy_path_registers_deactivation_first_and_fences_health() 
         [FakePlan::ready()],
     ));
     let erased: Arc<dyn PluginDriver> = driver.clone();
-    let mut activation = HostPluginActivation::prepare(&mut slot, epoch, erased).unwrap();
+    let mut activation = prepare_activation(&mut slot, epoch, erased).unwrap();
     let id = activation.id().clone();
     let probe = driver.probe(&id);
 
@@ -158,7 +161,7 @@ async fn dropped_start_and_finish_waiters_resume_after_cancel_before_future_drop
         package_revision("acme.resume", 'b'),
         [plan],
     ));
-    let mut activation = HostPluginActivation::prepare(&mut slot, epoch, driver.clone()).unwrap();
+    let mut activation = prepare_activation(&mut slot, epoch, driver.clone()).unwrap();
     let probe = driver.probe(activation.id());
 
     let mut first_waiter = Box::pin(activation.activate(&registry));
@@ -215,8 +218,7 @@ async fn activation_errors_and_unwind_panics_seal_and_roll_back_without_escaping
                 ..FakePlan::ready()
             }],
         ));
-        let mut activation =
-            HostPluginActivation::prepare(&mut slot, epoch, driver.clone()).unwrap();
+        let mut activation = prepare_activation(&mut slot, epoch, driver.clone()).unwrap();
         let probe = driver.probe(activation.id());
 
         let error = activation.activate(&registry).await.unwrap_err();
@@ -250,7 +252,7 @@ async fn cancellation_contains_a_pending_start_future_destructor_panic() {
             ..FakePlan::ready()
         }],
     ));
-    let mut activation = HostPluginActivation::prepare(&mut slot, epoch, driver.clone()).unwrap();
+    let mut activation = prepare_activation(&mut slot, epoch, driver.clone()).unwrap();
     let probe = driver.probe(activation.id());
     let mut waiter = Box::pin(activation.activate(&registry));
     assert!(poll_once(waiter.as_mut()).is_pending());
@@ -291,8 +293,7 @@ async fn deactivation_failures_aggregate_cache_and_require_explicit_abandonment(
                 ..FakePlan::ready()
             }],
         ));
-        let mut activation =
-            HostPluginActivation::prepare(&mut slot, epoch, driver.clone()).unwrap();
+        let mut activation = prepare_activation(&mut slot, epoch, driver.clone()).unwrap();
         let probe = driver.probe(activation.id());
         activation.activate(&registry).await.unwrap();
         let (slot, _) = activation.release_active().unwrap();
@@ -344,10 +345,8 @@ async fn one_multiplexing_driver_keeps_activation_and_health_state_exact() {
     let epoch_a = begin_start(&mut slot_a, &registry, &revision_a, 1);
     let epoch_b = begin_start(&mut slot_b, &registry, &revision_b, 1);
 
-    let mut activation_a =
-        HostPluginActivation::prepare(&mut slot_a, epoch_a, driver.clone()).unwrap();
-    let mut activation_b =
-        HostPluginActivation::prepare(&mut slot_b, epoch_b, driver.clone()).unwrap();
+    let mut activation_a = prepare_activation(&mut slot_a, epoch_a, driver.clone()).unwrap();
+    let mut activation_b = prepare_activation(&mut slot_b, epoch_b, driver.clone()).unwrap();
     let mut waiter_a = Box::pin(activation_a.activate(&registry));
     let mut waiter_b = Box::pin(activation_b.activate(&registry));
     assert!(poll_once(waiter_a.as_mut()).is_pending());
@@ -431,8 +430,7 @@ async fn whole_owner_drop_seals_but_does_not_claim_asynchronous_cleanup() {
     let never_probe;
     {
         let activation =
-            HostPluginActivation::prepare(&mut never_slot, never_epoch, never_driver.clone())
-                .unwrap();
+            prepare_activation(&mut never_slot, never_epoch, never_driver.clone()).unwrap();
         never_cancellation = activation.cancellation().clone();
         never_probe = never_driver.probe(activation.id());
         assert_eq!(never_probe.start_constructs(), 0);
@@ -462,8 +460,7 @@ async fn whole_owner_drop_seals_but_does_not_claim_asynchronous_cleanup() {
     let pending_probe;
     {
         let mut activation =
-            HostPluginActivation::prepare(&mut pending_slot, pending_epoch, pending_driver.clone())
-                .unwrap();
+            prepare_activation(&mut pending_slot, pending_epoch, pending_driver.clone()).unwrap();
         pending_cancellation = activation.cancellation().clone();
         pending_probe = pending_driver.probe(activation.id());
         let mut waiter = Box::pin(activation.activate(&registry));
@@ -498,7 +495,7 @@ async fn late_success_cannot_activate_a_replaced_component_incarnation() {
     ));
     let old_id;
     {
-        let mut old = HostPluginActivation::prepare(&mut slot, epoch_a, driver.clone()).unwrap();
+        let mut old = prepare_activation(&mut slot, epoch_a, driver.clone()).unwrap();
         old_id = old.id().clone();
         let mut waiter = Box::pin(old.activate(&registry));
         assert!(poll_once(waiter.as_mut()).is_pending());
@@ -520,8 +517,7 @@ async fn late_success_cannot_activate_a_replaced_component_incarnation() {
 
     let epoch_b = begin_start(&mut slot, &registry, &revision_b, 2);
     assert_ne!(epoch_a, epoch_b);
-    let mut replacement =
-        HostPluginActivation::prepare(&mut slot, epoch_b, driver.clone()).unwrap();
+    let mut replacement = prepare_activation(&mut slot, epoch_b, driver.clone()).unwrap();
     let new_handle = replacement.activate(&registry).await.unwrap();
     assert_ne!(new_handle.id(), &old_id);
     let (slot, _) = replacement.release_active().unwrap();
@@ -543,7 +539,7 @@ fn rejected_preparation_never_constructs_or_polls_driver_activation() {
         [FakePlan::ready()],
     ));
     assert!(matches!(
-        HostPluginActivation::prepare(&mut slot, epoch, driver.clone()),
+        prepare_activation(&mut slot, epoch, driver.clone()),
         Err(HostPluginActivationError::Composition(_))
     ));
     assert_eq!(driver.prepare_calls(), 0);
@@ -559,7 +555,7 @@ fn rejected_preparation_never_constructs_or_polls_driver_activation() {
         }],
     ));
     assert!(matches!(
-        HostPluginActivation::prepare(&mut new_slot, new_epoch, mismatch.clone()),
+        prepare_activation(&mut new_slot, new_epoch, mismatch.clone()),
         Err(HostPluginActivationError::PreparedIdentityMismatch { .. })
     ));
     assert!(
@@ -587,7 +583,7 @@ fn rejected_preparation_never_constructs_or_polls_driver_activation() {
             }],
         ));
         assert!(matches!(
-            HostPluginActivation::prepare(&mut rejected_slot, rejected_epoch, rejected),
+            prepare_activation(&mut rejected_slot, rejected_epoch, rejected),
             Err(HostPluginActivationError::Driver(_)
                 | HostPluginActivationError::DriverPanicked { .. })
         ));

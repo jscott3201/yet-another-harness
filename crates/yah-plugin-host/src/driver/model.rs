@@ -4,7 +4,7 @@ use yah_compose::{
     ComponentSlotError, ProviderSelectionEpoch, ReconcileOutcome, ScopeCancellation,
 };
 
-use crate::{DriverKind, PluginRevisionId};
+use crate::{CapabilityBrokerError, DriverKind, PluginRevisionId, PluginStartContext};
 
 macro_rules! simple_error {
     ($name:ident) => {
@@ -72,10 +72,10 @@ impl fmt::Display for PluginActivationId {
 
 /// Read-only input used to prepare one exact driver activation.
 ///
-/// This request remains inert identity, cancellation, and metadata. SDK-003
-/// will deliver actionable capability handles through a separate start
-/// context only after deactivation cleanup has been admitted. Drivers cannot
-/// issue cancellation through this value.
+/// This request remains inert identity, cancellation, and metadata. Actionable
+/// capability handles arrive through the separate start context only after
+/// deactivation cleanup has been admitted. Drivers cannot issue cancellation
+/// through this value.
 #[derive(Clone, Debug)]
 pub struct PluginActivationRequest {
     id: PluginActivationId,
@@ -154,20 +154,30 @@ pub trait PreparedDriverActivation: Send + Sync + 'static {
     ) -> DriverFuture<Result<(), DriverDeactivationError>>;
 }
 
-/// Opaque authority to begin the exact prepared activation.
+/// Opaque authority and admitted capability context for one exact start.
 #[derive(Debug)]
 pub struct DriverStartPermit {
     id: PluginActivationId,
+    context: PluginStartContext,
     _private: (),
 }
 
 impl DriverStartPermit {
-    pub(crate) fn new(id: PluginActivationId) -> Self {
-        Self { id, _private: () }
+    pub(crate) fn new(id: PluginActivationId, context: PluginStartContext) -> Self {
+        Self {
+            id,
+            context,
+            _private: (),
+        }
     }
 
     pub const fn id(&self) -> &PluginActivationId {
         &self.id
+    }
+
+    /// Exact activation-scoped capability context admitted by the host.
+    pub const fn context(&self) -> &PluginStartContext {
+        &self.context
     }
 }
 
@@ -299,6 +309,7 @@ impl Error for DriverActivationError {}
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum HostPluginActivationError {
     Composition(ComponentSlotError),
+    Capability(CapabilityBrokerError),
     Driver(DriverPrepareError),
     DriverPanicked {
         summary: String,
@@ -306,6 +317,14 @@ pub enum HostPluginActivationError {
     PreparedIdentityMismatch {
         expected: PluginActivationId,
         received: PluginActivationId,
+    },
+    DriverRevisionMismatch {
+        expected: Box<PluginRevisionId>,
+        received: Box<PluginRevisionId>,
+    },
+    DriverKindMismatch {
+        expected: DriverKind,
+        received: DriverKind,
     },
     DriverControlDropPanicked {
         summary: String,
@@ -316,6 +335,7 @@ impl fmt::Display for HostPluginActivationError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Composition(error) => error.fmt(f),
+            Self::Capability(error) => write!(f, "capability grants were rejected: {error}"),
             Self::Driver(error) => write!(f, "driver rejected activation preparation: {error}"),
             Self::DriverPanicked { summary } => {
                 write!(f, "driver panicked while preparing activation: {summary}")
@@ -323,6 +343,14 @@ impl fmt::Display for HostPluginActivationError {
             Self::PreparedIdentityMismatch { expected, received } => write!(
                 f,
                 "prepared activation identity {received} does not match requested {expected}"
+            ),
+            Self::DriverRevisionMismatch { expected, received } => write!(
+                f,
+                "driver revision {received} does not match host-selected revision {expected}"
+            ),
+            Self::DriverKindMismatch { expected, received } => write!(
+                f,
+                "driver lane {received:?} does not match host-selected lane {expected:?}"
             ),
             Self::DriverControlDropPanicked { summary } => {
                 write!(
@@ -338,9 +366,12 @@ impl Error for HostPluginActivationError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::Composition(error) => Some(error),
+            Self::Capability(error) => Some(error),
             Self::Driver(error) => Some(error),
             Self::DriverPanicked { .. }
             | Self::PreparedIdentityMismatch { .. }
+            | Self::DriverRevisionMismatch { .. }
+            | Self::DriverKindMismatch { .. }
             | Self::DriverControlDropPanicked { .. } => None,
         }
     }

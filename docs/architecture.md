@@ -191,11 +191,11 @@ scopes serially in reverse registration order. Close reports are cached for
 idempotence, aggregate returned errors and panics without short-circuiting, and
 a later `close()` can resume pending cleanup after an earlier close waiter is
 dropped. Before the first cleanup, explicit close rejects new mediated service
-calls and drains calls already admitted against the provider and consumer scope
-trees. Dropping the scope itself only requests cancellation and abandons the
-drain and unrun cleanup, so its owner must drive close to completion. This layer
-does not supervise tasks, impose deadlines, force a callback to return, or prove
-that cooperatively cancelled work terminated.
+and capability calls and drains callback-scoped work already admitted against
+the relevant scope trees. Dropping the scope itself only requests cancellation
+and abandons the drain and unrun cleanup, so its owner must drive close to
+completion. This layer does not supervise tasks, impose deadlines, force a
+callback to return, or prove that cooperatively cancelled work terminated.
 
 ### Durable external effects
 
@@ -235,16 +235,21 @@ protocols and WIT may encode values differently while conforming to the same
 plugin lifecycle and capability behavior.
 
 The implemented `yah-plugin-host` boundary validates strict manifest and
-revision data and defines a runtime-neutral driver lifecycle. A host-owned
+revision data, defines a runtime-neutral driver lifecycle, and brokers exact
+activation-scoped typed capability handles. A host-owned
 prepared-activation guard binds an exact package revision to a process-local
 provider-selection epoch, transfers deactivation into that component's effect
 scope before the first start poll, contains ordinary start unwind failures,
 revalidates composition readiness before publishing active, and exposes
-exact-activation advisory health. The object-safe driver futures choose no
-executor. These values and interfaces do not load or verify a package,
-authorize a reserved namespace or built-in registration, choose providers,
-grant authority, or implement a concrete execution backend. See the
-[driver lifecycle contract](plugin-driver.md).
+exact-activation advisory health. A trusted effective grant snapshot selects an
+immutable subset of manifest requests and exact broker registrations; the start
+permit exposes the resulting weak context only after cleanup admission, and
+synchronous calls join the activation cleanup drain. The object-safe driver
+futures choose no executor. These values and interfaces do not load or verify a
+package, authorize a reserved namespace or built-in registration, compute
+policy/approval, or implement a concrete execution backend. See the
+[driver lifecycle contract](plugin-driver.md) and
+[capability contract](plugin-capabilities.md).
 
 Each plugin revision has a content identity, manifest, requested capabilities,
 configuration, and execution driver. Admission separates:
@@ -298,11 +303,13 @@ future session, work, memory, and evidence identities survive process loss.
 
 Today the repository contains the initial process-local component lifecycle,
 effect-scope core, typed revocable service registry, strict plugin manifest,
-and runtime-neutral prepared-driver lifecycle; the Selene-backed reliability
+runtime-neutral prepared-driver lifecycle, and exact activation-scoped
+capability broker; the Selene-backed reliability
 kernel; provider normalization fixtures; an in-process protocol experiment;
 and the G02 storage evidence harness. General component callbacks,
 shared/named service realms, policy interception, automatic registry watches
-and provider ranking, effective plugin grants and SDK handles, concrete
+and provider ranking, concrete capability families, dynamic grant policy,
+durable attempt handles, concrete
 built-in/Wasm/process drivers, graph memory domains, sandbox, live agent loop,
 daemon, and clients described above are not implemented yet.
 

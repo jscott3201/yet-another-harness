@@ -82,9 +82,11 @@ revision to a static registration. Package-ID text alone is never sufficient.
 Required/provided services are compatibility and routing claims. Requested
 capabilities express desired authority. Neither is an effective grant, and
 neither authorizes a sensitive bind, publication, reserved namespace, secret,
-network destination, filesystem path, or other host operation. The capability
-broker will derive a separate activation-scoped grant from policy, approval,
-and backend enforceability.
+network destination, filesystem path, or other host operation. The implemented
+[capability broker](plugin-capabilities.md) accepts a separate trusted
+activation-scoped snapshot whose exact grants must be a subset of these
+requests. Policy, approval, and backend-enforceability evaluation remain outside
+the broker.
 
 The manifest cannot declare its own digest. A host-side staging boundary later
 supplies a canonical `blake3:<64 lowercase hex>` package digest. YAH then forms
@@ -95,6 +97,6 @@ not part of package revision identity.
 
 The runtime-neutral [driver lifecycle](plugin-driver.md) is now a separate
 implemented layer over these values. Package loading and verification,
-configuration binding, effective grants, concrete driver backends, WIT,
-process IPC, sandbox enforcement, persistence, and cross-driver conformance
-remain later roadmap slices.
+configuration binding, concrete capability contracts, concrete driver backends,
+WIT, process IPC, sandbox enforcement, persistence, and cross-driver
+conformance remain later roadmap slices.

@@ -4,7 +4,7 @@ use std::{
     future::Future,
     panic::{AssertUnwindSafe, catch_unwind},
     pin::Pin,
-    sync::{Arc, Weak},
+    sync::Arc,
     task::{Context, Poll},
 };
 
@@ -14,12 +14,12 @@ use yah_compose::{
     ScopeCancellation, ServiceRegistry, StopRecord,
 };
 
-use crate::DriverKind;
+use crate::{CapabilityBroker, DriverKind, EffectiveCapabilityGrants, PluginStartContext};
 
 use super::{
     DriverActivationError, DriverFuture, DriverStartPermit, HostPluginActivationError,
-    PluginActivationId, PluginActivationRequest, PluginDriver, PluginHealth, PluginHealthError,
-    PluginStartError, PreparedDriverActivation,
+    PluginActivationHandle, PluginActivationId, PluginActivationRequest, PluginDriver,
+    PluginStartError,
     control::{DriverDeactivation, PreparedControl},
 };
 
@@ -52,13 +52,17 @@ impl<'slot> HostPluginActivation<'slot> {
     /// Prepare one exact activation and admit its deactivation finalizer.
     ///
     /// The component must already be `Starting` at `selection_epoch`. Driver
-    /// preparation is required to be inert; on any admission error no start or
-    /// deactivation operation is invoked. Errors before cleanup admission leave
-    /// that exact component `Starting`; its owner must retry, reconcile a newer
+    /// preparation is required to be inert. The effective grants supply the
+    /// host-selected revision and lane, and the broker must still own every
+    /// exact registration. Actionable context is placed in the start permit only
+    /// after deactivation cleanup admission. Errors before that admission leave
+    /// the exact component `Starting`; its owner must retry, reconcile a newer
     /// desired state, or explicitly report activation failure.
     pub fn prepare(
         slot: &'slot mut ComponentSlot,
         selection_epoch: ProviderSelectionEpoch,
+        broker: &CapabilityBroker,
+        grants: &EffectiveCapabilityGrants,
         driver: Arc<dyn PluginDriver>,
     ) -> Result<Self, HostPluginActivationError> {
         let control = Arc::new(PreparedControl::new(driver));
@@ -79,6 +83,10 @@ impl<'slot> HostPluginActivation<'slot> {
             Ok(cancellation) => cancellation,
             Err(error) => return Err(reject_control(&control, error.into())),
         };
+        let activity = match slot.activity(selection_epoch) {
+            Ok(activity) => activity,
+            Err(error) => return Err(reject_control(&control, error.into())),
+        };
         let (kind, revision) = match catch_unwind(AssertUnwindSafe(|| {
             control.with_driver(|driver| (driver.kind(), driver.revision_id().clone()))
         })) {
@@ -96,6 +104,33 @@ impl<'slot> HostPluginActivation<'slot> {
                 return Err(reject_control(
                     &control,
                     HostPluginActivationError::DriverPanicked { summary },
+                ));
+            }
+        };
+        if revision != *grants.revision_id() {
+            return Err(reject_control(
+                &control,
+                HostPluginActivationError::DriverRevisionMismatch {
+                    expected: Box::new(grants.revision_id().clone()),
+                    received: Box::new(revision),
+                },
+            ));
+        }
+        if kind != grants.driver_kind() {
+            return Err(reject_control(
+                &control,
+                HostPluginActivationError::DriverKindMismatch {
+                    expected: grants.driver_kind(),
+                    received: kind,
+                },
+            ));
+        }
+        let prepared_capabilities = match broker.prepare_bindings(grants) {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                return Err(reject_control(
+                    &control,
+                    HostPluginActivationError::Capability(error),
                 ));
             }
         };
@@ -173,13 +208,19 @@ impl<'slot> HostPluginActivation<'slot> {
             ));
         }
 
+        let start_context = PluginStartContext::new(
+            id.clone(),
+            cancellation.clone(),
+            activity,
+            prepared_capabilities,
+        );
         Ok(Self {
             slot: Some(slot),
             id: id.clone(),
             kind,
             cancellation,
             control,
-            start: StartState::Prepared(Some(DriverStartPermit::new(id))),
+            start: StartState::Prepared(Some(DriverStartPermit::new(id, start_context))),
         })
     }
 
@@ -378,12 +419,12 @@ impl<'slot> HostPluginActivation<'slot> {
     fn complete_ready(&mut self, registry: &ServiceRegistry) -> PluginStartResult {
         let epoch = self.id.selection_epoch();
         let result = match self.slot_mut().complete_start(epoch, registry) {
-            Ok(ReconcileOutcome::Active { .. }) => Ok(PluginActivationHandle {
-                id: self.id.clone(),
-                kind: self.kind,
-                cancellation: self.cancellation.clone(),
-                control: Arc::downgrade(&self.control),
-            }),
+            Ok(ReconcileOutcome::Active { .. }) => Ok(PluginActivationHandle::new(
+                self.id.clone(),
+                self.kind,
+                self.cancellation.clone(),
+                Arc::downgrade(&self.control),
+            )),
             Ok(stop) => Err(PluginStartError::Superseded {
                 activation_id: self.id.clone(),
                 stop: Some(Box::new(stop)),
@@ -560,76 +601,6 @@ impl Future for ActivatePlugin<'_, '_> {
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let this = &mut *self;
         this.activation.poll_activate(this.registry, cx)
-    }
-}
-
-/// Cloneable exact-activation handle for advisory health observation.
-#[derive(Clone)]
-pub struct PluginActivationHandle {
-    id: PluginActivationId,
-    kind: DriverKind,
-    cancellation: ScopeCancellation,
-    control: Weak<PreparedControl>,
-}
-
-impl PluginActivationHandle {
-    pub const fn id(&self) -> &PluginActivationId {
-        &self.id
-    }
-
-    pub const fn kind(&self) -> DriverKind {
-        self.kind
-    }
-
-    /// Read the driver's current nonblocking health snapshot.
-    ///
-    /// Cancellation is checked before and after the driver call so a stopped
-    /// or replaced activation cannot surface a fresh observation. Health never
-    /// mutates lifecycle state. A probe may race teardown, but its panic payload
-    /// is normalized before cancellation can suppress the stale result.
-    pub fn health(&self) -> Result<PluginHealth, PluginHealthError> {
-        if self.cancellation.is_cancelled() {
-            return Err(PluginHealthError::Inactive {
-                activation_id: self.id.clone(),
-            });
-        }
-        let Some(control) = self.control.upgrade() else {
-            return Err(PluginHealthError::Inactive {
-                activation_id: self.id.clone(),
-            });
-        };
-        let observed = match catch_unwind(AssertUnwindSafe(|| {
-            control.with_prepared(PreparedDriverActivation::health)
-        })) {
-            Ok(Some(Ok(health))) => Ok(health),
-            Ok(Some(Err(error))) => Err(PluginHealthError::Driver {
-                activation_id: self.id.clone(),
-                error,
-            }),
-            Ok(None) => Err(PluginHealthError::Inactive {
-                activation_id: self.id.clone(),
-            }),
-            Err(payload) => Err(PluginHealthError::DriverPanicked {
-                activation_id: self.id.clone(),
-                summary: consume_panic_payload(payload),
-            }),
-        };
-        if self.cancellation.is_cancelled() {
-            return Err(PluginHealthError::Inactive {
-                activation_id: self.id.clone(),
-            });
-        }
-        observed
-    }
-}
-
-impl fmt::Debug for PluginActivationHandle {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("PluginActivationHandle")
-            .field("id", &self.id)
-            .field("kind", &self.kind)
-            .field("cancelled", &self.cancellation.is_cancelled())
-            .finish_non_exhaustive()
     }
 }
 

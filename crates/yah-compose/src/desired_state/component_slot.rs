@@ -226,6 +226,15 @@ impl ComponentSlot {
         Ok(self.mounted_component()?.cancellation(selection_epoch)?)
     }
 
+    /// Join synchronous activity for the exact live activation.
+    pub fn activity(
+        &self,
+        selection_epoch: ProviderSelectionEpoch,
+    ) -> Result<crate::ScopeActivity, ComponentSlotError> {
+        self.require_active_revision()?;
+        Ok(self.mounted_component()?.activity(selection_epoch)?)
+    }
+
     /// Record an activation failure and synchronously seal its effects.
     ///
     /// Clean cleanup returns the mounted revision to pending; a non-clean

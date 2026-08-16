@@ -30,6 +30,7 @@ use tokio_util::sync::CancellationToken;
 use crate::ActivationEpoch;
 
 pub(crate) use activity::{ActivityAdmission, ActivityAdmissionError, ActivityDrain, ActivityGate};
+pub use activity::{ScopeActivity, ScopeActivityError};
 pub use cancellation::ScopeCancellation;
 pub use report::{
     CleanupError, CleanupFailure, CleanupFailureKind, CleanupOutcome, CleanupRecord, CloseReport,
@@ -49,9 +50,10 @@ type AsyncCleanup = Box<dyn FnOnce() -> BoxCleanupFuture + Send + 'static>;
 /// The scope is intentionally uniquely owned. Cleanup is sequential and may
 /// be resumed after a pending [`CloseScope`] future is dropped, provided the
 /// scope itself survives. Concurrent effect registration and multi-owner close
-/// policy remain outside this slice. Service handles use a private hierarchical
-/// admission fence: explicit close rejects new calls and waits for already
-/// admitted synchronous calls in this subtree before running any cleanup.
+/// policy remain outside this slice. A private hierarchical admission fence
+/// powers service handles and callback-scoped [`ScopeActivity`] tokens:
+/// explicit close rejects new calls and waits for already admitted synchronous
+/// calls in this subtree before running any cleanup.
 ///
 /// Dropping a scope requests cancellation as a fail-safe, then abandons any
 /// cleanup that has not run. Owners must explicitly drive [`Self::close`] to
@@ -111,6 +113,10 @@ impl EffectScope {
 
     pub fn cancellation(&self) -> ScopeCancellation {
         ScopeCancellation::new(self.cancellation.clone())
+    }
+
+    pub(crate) fn scope_activity(&self) -> ScopeActivity {
+        ScopeActivity::new(self.activation(), Arc::clone(&self.activity))
     }
 
     pub(crate) fn activity_gate(&self) -> Arc<ActivityGate> {

@@ -141,13 +141,13 @@ The current local scope implementation binds cleanup to one activation,
 requests cancellation before teardown, unwinds mixed synchronous/asynchronous
 and nested registrations in deterministic reverse order, and reports every
 returned error or unwind panic without short-circuiting later cleanup. Explicit
-close also rejects new mediated service calls and drains calls already admitted
-against the provider and consumer scope trees before running any cleanup.
+close also rejects new mediated service and capability calls and drains calls
+already admitted against the relevant scope trees before running any cleanup.
 Owners must drive close to completion; dropping a scope requests cancellation
 but does not drain calls or run registered cleanup. The drain covers synchronous
-`ServiceHandle::try_with` callbacks, not spawned tasks, escaped authority, or a
-callback that never returns. Cancellation is still a request, not proof that
-other work or an escaped action stopped.
+callback-scoped admission, not spawned tasks, escaped authority, or a callback
+that never returns. Cancellation is still a request, not proof that other work
+or an escaped action stopped.
 
 A clean plugin unload cannot prove that an external action did not happen. That
 distinction is a hard runtime invariant.
@@ -207,8 +207,15 @@ binds one package revision to one exact composition epoch, admits deactivation
 cleanup before constructing driver start, preserves pending start across
 dropped waiters, contains ordinary unwind failures, revalidates composition
 readiness before publishing active, and fences advisory health after stop.
-The deterministic fake proves this lifecycle; no package loader, real built-in,
-Wasm, or process driver, capability broker, scheduler, or sandbox exists yet.
+
+An [activation-scoped capability broker](docs/plugin-capabilities.md) now maps a
+trusted host-selected subset of manifest requests to exact typed provider
+registrations. The driver receives its weak, revocable context only in the
+post-cleanup-admission start permit. Synchronous capability calls participate in
+the activation's pre-cleanup drain, and stale contexts never follow provider or
+activation replacement. This is an in-process authority seam, not package
+admission or a hostile-code sandbox. No real built-in, Wasm, or process driver,
+policy engine, durable attempt binding, scheduler, or sandbox exists yet.
 
 The repository already contains a model-free Rust kernel and evidence harness:
 
@@ -297,7 +304,7 @@ projects are evolving independently and do not define YAH compatibility.
 | Path | Contents |
 |---|---|
 | `crates/yah-compose/` | Process-local component identity, epoch-fenced lifecycle, reversible effect scopes, typed revocable services, exact-assignment dependency reconciliation, and fenced desired component revisions |
-| `crates/yah-plugin-host/` | Strict runtime-neutral plugin manifest, contract identities, entrypoints, capability requests, and package revision values |
+| `crates/yah-plugin-host/` | Strict plugin manifest/revision contracts, runtime-neutral driver lifecycle, and exact activation-scoped capability grants and handles |
 | `crates/yah-kernel/` | Current model-free durability, authority, effect, cancellation, provider, and protocol kernel |
 | `crates/exp001-harness/` | Storage fan-in and crash-recovery evidence harness |
 | `generated/protocol/` | Checked-in JSON Schemas and TypeScript bindings for the current protocol experiment |

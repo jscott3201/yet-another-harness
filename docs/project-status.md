@@ -9,8 +9,9 @@ foundation and the first process-local composition lifecycle, cleanup, typed
 service-binding, exact-assignment dependency reconciliation, and fenced desired
 component-revision primitives, plus independently authored semantic and fault
 corpora, a strict plugin manifest, and a runtime-neutral prepared-driver
-lifecycle. It does not yet contain a general callback host, concrete executable
-driver, agent loop, sandbox, daemon, or client.
+lifecycle with activation-scoped capability brokerage. It does not yet contain
+a general callback host, concrete executable driver, agent loop, sandbox,
+daemon, or client.
 
 ## Evidence Status
 
@@ -20,8 +21,9 @@ driver, agent loop, sandbox, daemon, or client.
 | Current model-free kernel | Deterministic tests for command, fencing, cancellation, effect, provider, recovery, and Adapter 1 behavior | Available for reuse; pivot integration has not started |
 | Contextual composition runtime | Component definition/instance/scope identities, immutable ancestor-scoped service visibility, epoch-fenced lifecycle, reversible nested effects, typed requirements, exact revocable bindings, exact-assignment recomposition, fenced desired revisions, six cross-layer semantic cases, and four concurrent fault cases | Initial slices with deterministic conformance evidence; no callbacks, task supervisor, provider-ranking policy, shared/named realms, or host-wide scheduler |
 | Plugin manifest and revision vocabulary | Strict bounded TOML, canonical package/service/capability/version/path types, typed driver entrypoints, request-only declarations, and host-supplied revision identity | Initial data-contract slice; no loading, admission, grants, or execution |
-| Plugin driver lifecycle | Dyn-compatible exact-revision driver preparation, cancellation-safe host start ownership, effect-owned deactivation, readiness revalidation, panic containment, and fenced advisory health | Runtime-neutral deterministic fake passes; no concrete backend, loader, scheduler, grants, or general callback runner |
-| Capability broker, SDK handles, and cross-driver conformance suite | No implementation in this repository | Not started |
+| Plugin driver lifecycle | Dyn-compatible exact-revision driver preparation, cancellation-safe host start ownership, effect-owned deactivation, readiness revalidation, panic containment, and fenced advisory health | Runtime-neutral deterministic fake passes; no concrete backend, loader, scheduler, or general callback runner |
+| Activation-scoped capability broker | Revision-bound requested subsets, exact typed registrations, weak mediated handles, provider/activation ABA fencing, and synchronous call drain before cleanup | Initial in-process slice; no policy engine, durable attempt scope, concrete capability family, WIT/IPC resource table, or hostile-code sandbox |
+| Cross-driver conformance suite | No reusable driver-neutral harness in this repository | Not started |
 | Wasm, Node/TypeScript, and Python plugin drivers | No implementation in this repository | Not started |
 | Selene work, session, memory, evidence, and plugin-lineage domains | Only the current kernel graph exists | Design/spike stage |
 | Full harness vertical slice | No live model, tool execution, memory loop, or subagent | Not started |
@@ -58,18 +60,20 @@ resolve services, or reconcile desired state.
 - Cached close reports and resumable pending close. When close is driven to
   completion, every callback is attempted once; repeated or resumed closes do
   not rerun completed callbacks.
-- A private hierarchical activity fence rejects new service calls at close and
-  drains already-admitted provider and consumer callbacks before any cleanup;
-  parent close includes descendant activity while direct child close remains
-  isolated from its parent and siblings.
+- A private hierarchical activity fence rejects new mediated service or
+  capability calls at close and drains already-admitted synchronous callbacks
+  before any cleanup. Scope-bound service handles and callback-scoped host
+  activity tokens cannot leak the underlying guard; parent close includes
+  descendant activity while direct child close remains isolated from its
+  parent and siblings.
 - Aggregation of returned errors and unwind panics without short-circuiting.
 - Explicit separation from durable external-effect settlement.
 
 Cleanup is executor-neutral and sequential. The current layer does not provide
 deadlines, forced termination, concurrent effect registration, multi-owner
-close, or task supervision. A mediated service callback that never returns can
-keep explicit close pending. Dropping a scope requests cancellation but does not
-drain admitted calls or run its cleanup.
+close, or task supervision. A mediated synchronous callback that never returns
+can keep explicit close pending. Dropping a scope requests cancellation but
+does not drain admitted calls or run its cleanup.
 
 ### Typed live services
 
@@ -201,14 +205,23 @@ or concurrent effect registration.
   and close-report aggregation for teardown failures.
 - Cloneable exact-activation health handles whose nonblocking healthy,
   degraded, unhealthy, error, and panic observations never mutate lifecycle.
+- Immutable effective grants that bind one host-selected plugin revision to a
+  subset of requested capability IDs and exact broker registrations.
+- Invariant typed capability definitions, process-unique registration
+  identities, weak start contexts, and cloneable handles that never follow a
+  provider or activation replacement.
+- Synchronous capability calls that join the activation effect scope's
+  pre-cleanup activity drain, reject late results, and retain no provider after
+  the call lease ends.
 
 Manifest parsing is not installation or admission. In particular, a built-in
 lane declaration cannot name a linked factory and still requires out-of-band
 trusted provenance plus exact host registration. Package extraction,
-signatures, configuration snapshots, effective grants, concrete driver
-backends, WIT/IPC bindings, and cross-driver conformance are not implemented.
-See the [driver lifecycle contract](plugin-driver.md) for cleanup, Drop, panic,
-and health boundaries.
+signatures, configuration snapshots, policy/approval calculation, concrete
+capability families and driver backends, WIT/IPC bindings, durable attempts,
+and cross-driver conformance are not implemented. See the
+[driver lifecycle contract](plugin-driver.md) and
+[capability broker contract](plugin-capabilities.md).
 
 ### Selene-backed mutation and recovery
 
@@ -256,15 +269,13 @@ plugin SDK, daemon protocol, or promised compatibility surface.
 The next useful proof extends the composition core into a narrow vertical slice
 containing:
 
-1. an activation-scoped capability broker and effective grant model over the
-   landed runtime-neutral `PluginDriver` lifecycle;
-2. a reusable semantic driver conformance harness extracted from the current
+1. a reusable semantic driver conformance harness extracted from the current
    deterministic fake;
-3. one Selene graph/memory host capability;
-4. one Wasm component plus one modern Node or Python process plugin;
-5. a durable external action demonstrating that plugin unload and action
+2. one Selene graph/memory host capability;
+3. one Wasm component plus one modern Node or Python process plugin;
+4. a durable external action demonstrating that plugin unload and action
    settlement remain distinct; and
-6. crash/restart reconstruction with behavioral conformance tests.
+5. crash/restart reconstruction with behavioral conformance tests.
 
 After that slice, the harness can grow model, prompt, tool, session, workflow,
 subagent, sandbox, daemon, and client components without fixing every final
@@ -276,15 +287,16 @@ crate or protocol boundary in advance.
   automatic provider ranking or registry watches, concurrent effect-registration
   or task supervisor, or host-wide desired-graph scheduler.
 - Plugin package loading, verification, admission, installation, updates,
-  concrete executable drivers, effective grants, language SDKs, or cross-driver
-  conformance tests.
+  concrete executable drivers or capability families, policy-derived grants,
+  language SDKs, or cross-driver conformance tests.
 - Wasmtime/WIT host or sandboxed Node/TypeScript and CPython workers.
 - Durable memory capture, retrieval, ranking, summaries, or evidence lineage.
 - Live model providers, prompt assembly, tool execution, workflows, schedules,
   goals, or subagents.
 - Filesystem, process, Git, network, container, or VM sandbox enforcement.
 - Artifact storage and oversized-result substitution.
-- Approval requests, credential brokerage, or effective capability grants.
+- Approval requests, credential brokerage, dynamic grant policy, or durable
+  attempt-scoped capability authority.
 - Daemon lifecycle, discovery, installation, CLI, TUI, web UI, or native
   embedding SDK.
 - MCP lifecycle, remote transports, multi-user identity, or hosted operation.

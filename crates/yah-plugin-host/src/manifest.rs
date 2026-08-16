@@ -63,7 +63,8 @@ impl PluginEntrypoint {
 /// A manifest request for one namespaced host capability.
 ///
 /// This is deliberately not a grant. Admission policy may deny the request,
-/// and SDK-003 will own the effective grant and its scoped handles.
+/// and the capability broker separately owns the effective grant and its
+/// activation-scoped handles.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct CapabilityRequest(CapabilityId);

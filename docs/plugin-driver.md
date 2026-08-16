@@ -2,8 +2,8 @@
 
 YAH's runtime-neutral driver contract connects one exact plugin package
 revision to one process-local composition activation. It defines lifecycle
-ownership and failure behavior without loading a package, choosing an
-executor, granting capabilities, or implementing a Wasm or process backend.
+ownership and failure behavior without loading a package, choosing an executor,
+computing capability policy, or implementing a Wasm or process backend.
 
 ## Two-phase activation
 
@@ -14,13 +14,16 @@ acquire an external resource.
 
 `HostPluginActivation` then enforces this order:
 
-1. derive an exact `PluginActivationId` from the driver revision and the
-   component's provider-selection epoch;
-2. obtain read-only cancellation from that exact starting component;
-3. prepare and identity-check the driver control;
+1. validate the exact starting component epoch and obtain its read-only
+   cancellation plus callback-scoped activity token;
+2. read driver metadata and validate its revision, lane, and exact capability
+   registrations against a host-selected effective grant snapshot;
+3. derive the `PluginActivationId`, then prepare and identity-check the inert
+   driver control;
 4. register its asynchronous deactivation as the oldest plugin effect; and
-5. only after successful registration, mint the one-shot permit that can
-   construct and poll driver start.
+5. only after successful registration, mint the one-shot permit containing the
+   exact [capability context](plugin-capabilities.md) that can construct and poll
+   driver start.
 
 Later activation effects therefore unwind before driver deactivation. A
 driver must retain partial resources in its prepared control rather than only
@@ -33,12 +36,11 @@ production contract. One `Arc<dyn PluginDriver>` may prepare multiple exact
 activations. Start and deactivation use host-only exact-activation permits;
 health uses an exact cancellation-fenced handle.
 
-Preparation or metadata failure before finalizer admission deliberately leaves
-the component `Starting`: the owner must retry, reconcile a newer desired
+Grant, preparation, or metadata failure before finalizer admission deliberately
+leaves the component `Starting`: the owner must retry, reconcile a newer desired
 snapshot, or report failure for that exact epoch. A future loader/admission
-boundary must also match the selected driver lane and revision against the
-admitted manifest entrypoint and SDK requirement; driver-reported metadata is
-not package provenance.
+boundary must still prove package provenance and SDK compatibility;
+driver-reported metadata and a syntactically valid revision are not admission.
 
 ## Readiness, cancellation, and cleanup
 
@@ -92,11 +94,11 @@ cancellation, but SDK-002 does not drain health calls.
 
 ## Deliberate boundary
 
-This slice does not implement package loading or admission, effective grants,
-configuration delivery, general component callbacks, async invocation
+The adjacent capability slice implements immutable activation-scoped effective
+grant bindings and mediated synchronous handles. Neither layer implements
+package loading or admission, policy/approval evaluation, configuration
+delivery, general component callbacks, async invocation
 draining, recurring health checks, restart/backoff policy, deadlines, forced
 termination, task supervision, WIT, worker IPC, sandboxing, or durable
-activation identity. SDK-003 will add activation-scoped capability handles;
-SDK-004 will extract a reusable cross-driver conformance suite from concrete
-backend evidence. Actionable SDK-003 handles will be delivered only after
-cleanup admission, not through inert preparation input.
+activation identity or work-attempt fencing. SDK-004 will extract a
+reusable cross-driver conformance suite from concrete backend evidence.

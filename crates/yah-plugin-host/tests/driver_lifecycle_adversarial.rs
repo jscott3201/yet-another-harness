@@ -8,7 +8,7 @@ use std::{
     task::{Context, Poll, Waker},
 };
 
-use support::{FakeDriver, FakePlan, Gate, HealthBlock, HealthMode, StartMode};
+use support::{FakeDriver, FakePlan, Gate, HealthBlock, HealthMode, StartMode, prepare_activation};
 use yah_compose::{
     CloseStep, ComponentDefinition, ComponentInstance, ComponentRevision, ComponentSlot,
     ComponentSlotOutcome, ComponentStateKind, DesiredComponentState, EffectScope,
@@ -16,8 +16,8 @@ use yah_compose::{
     ServiceRegistry, StopDisposition,
 };
 use yah_plugin_host::{
-    HostPluginActivation, HostPluginActivationError, PackageDigest, PluginHealthError,
-    PluginPackageId, PluginRevisionId, PluginStartError, PluginVersion,
+    HostPluginActivationError, PackageDigest, PluginHealthError, PluginPackageId, PluginRevisionId,
+    PluginStartError, PluginVersion,
 };
 
 fn package_revision(name: &str, digest_byte: char) -> PluginRevisionId {
@@ -73,7 +73,7 @@ async fn concurrent_health_panic_is_consumed_before_stop_suppresses_the_result()
             ..FakePlan::ready()
         }],
     ));
-    let mut activation = HostPluginActivation::prepare(&mut slot, epoch, driver).unwrap();
+    let mut activation = prepare_activation(&mut slot, epoch, driver).unwrap();
     let handle = activation.activate(&registry).await.unwrap();
     let (slot, _) = activation.release_active().unwrap();
 
@@ -110,7 +110,7 @@ async fn prepared_control_destructor_is_reported_before_stale_handles_are_releas
             ..FakePlan::ready()
         }],
     ));
-    let mut activation = HostPluginActivation::prepare(&mut slot, epoch, driver).unwrap();
+    let mut activation = prepare_activation(&mut slot, epoch, driver).unwrap();
     let stale = activation.activate(&registry).await.unwrap();
     let (slot, _) = activation.release_active().unwrap();
     slot.reconcile(
@@ -146,8 +146,7 @@ async fn active_owner_drop_and_premature_release_both_seal_before_cleanup() {
     let active_probe;
     {
         let mut activation =
-            HostPluginActivation::prepare(&mut active_slot, active_epoch, active_driver.clone())
-                .unwrap();
+            prepare_activation(&mut active_slot, active_epoch, active_driver.clone()).unwrap();
         active_probe = active_driver.probe(activation.id());
         activation.activate(&registry).await.unwrap();
     }
@@ -171,7 +170,7 @@ async fn active_owner_drop_and_premature_release_both_seal_before_cleanup() {
         }],
     ));
     let mut activation =
-        HostPluginActivation::prepare(&mut early_slot, early_epoch, early_driver.clone()).unwrap();
+        prepare_activation(&mut early_slot, early_epoch, early_driver.clone()).unwrap();
     let probe = early_driver.probe(activation.id());
     let mut waiter = Box::pin(activation.activate(&registry));
     assert!(poll_once(waiter.as_mut()).is_pending());
@@ -237,7 +236,7 @@ async fn provider_withdrawal_wins_when_pending_driver_start_later_reports_ready(
             ..FakePlan::ready()
         }],
     ));
-    let mut activation = HostPluginActivation::prepare(&mut slot, epoch, driver).unwrap();
+    let mut activation = prepare_activation(&mut slot, epoch, driver).unwrap();
     let mut waiter = Box::pin(activation.activate(&registry));
     assert!(poll_once(waiter.as_mut()).is_pending());
     drop(waiter);
@@ -280,7 +279,7 @@ fn rejected_preparation_contains_driver_and_prepared_control_destructors() {
             )
             .with_drop_panic(),
         );
-        let error = HostPluginActivation::prepare(&mut slot, epoch, driver).unwrap_err();
+        let error = prepare_activation(&mut slot, epoch, driver).unwrap_err();
         let HostPluginActivationError::DriverControlDropPanicked { summary } = error else {
             panic!("expected contained control destructor panic, got {error:?}");
         };
@@ -348,8 +347,7 @@ async fn compound_deactivation_panics_are_aggregated_before_control_disposal() {
         } else {
             driver
         };
-        let mut activation =
-            HostPluginActivation::prepare(&mut slot, epoch, Arc::new(driver)).unwrap();
+        let mut activation = prepare_activation(&mut slot, epoch, Arc::new(driver)).unwrap();
         activation.activate(&registry).await.unwrap();
         let (slot, _) = activation.release_active().unwrap();
         slot.reconcile(

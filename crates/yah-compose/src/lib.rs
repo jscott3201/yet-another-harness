@@ -6,9 +6,10 @@
 //! none of its values are durable records. The durable kernel and future
 //! desired-state authority may decide *which* components should exist; this
 //! crate governs one process-local desired slot and its live instance.
-//! Explicit effect-scope close drains synchronous service calls already
-//! admitted against the provider and consumer activation trees before running
-//! local cleanup; it is not a task supervisor or deadline mechanism.
+//! Explicit effect-scope close drains synchronous mediated service and
+//! capability calls already admitted against the relevant activation trees
+//! before running local cleanup; it is not a task supervisor or deadline
+//! mechanism.
 //!
 //! The dependency layer owns one frozen mounted component and converges it
 //! toward caller-selected exact providers through fenced start and teardown.
@@ -34,7 +35,7 @@ pub use desired_state::{
 pub use effect_scope::{
     CleanupError, CleanupFailure, CleanupFailureKind, CleanupOutcome, CleanupRecord, CleanupResult,
     CloseReport, CloseScope, CloseStep, EffectRegistrationId, EffectScope, EffectScopeError,
-    EffectScopeId, EffectScopeState, ScopeCancellation,
+    EffectScopeId, EffectScopeState, ScopeActivity, ScopeActivityError, ScopeCancellation,
 };
 pub use id::{ComponentId, ComponentInstanceId, ComponentRevisionId, ScopeId, ServiceId};
 pub use lifecycle::{
