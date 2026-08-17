@@ -234,18 +234,34 @@ const EQUIVALENCE_INPUTS: &[&str] = &[
     r#"{"big":12345678901234567890}"#,
 ];
 
-/// The claim the pair exists to support.
+/// The two claims the pair exists to support, over one pair of runs.
 ///
 /// Same world, same input, same answer apart from the value of the one field
-/// each guest uses to name itself. If the host could tell them apart in any
-/// other way, the world would not be the contract - so this asks across inputs
-/// that give the two toolchains every opportunity to disagree, not just the one
-/// that suits them.
+/// each guest uses to name itself; and both guests reaching the host through
+/// both of the world's imports. If the host could tell them apart in any other
+/// way, the world would not be the contract - so this asks across inputs that
+/// give the two toolchains every opportunity to disagree, not just the one that
+/// suits them.
+///
+/// One test rather than two, because Nextest runs each test in its own process
+/// and the two properties are views of the same run. Split, each 12 MB
+/// component is compiled by Cranelift twice instead of once, and the two
+/// processes saturate every core concurrently at the start of the run - which
+/// measurably pushed a co-scheduled trivial test past the suite's 1s
+/// leak-timeout and failed the pre-push gate. The assertions stay separated,
+/// and each still names which property and which guest broke.
 #[tokio::test]
-async fn both_example_guests_answer_the_same_tool_call_the_same_way() {
+async fn both_example_guests_behave_identically_through_the_host() {
     let rust = run_guest("wasm.example.rust", '1', &rust_component()).await;
     let typescript = run_guest("wasm.example.ts", '2', &ts_component()).await;
 
+    assert_answers_are_indistinguishable(&rust, &typescript);
+    assert_reached_the_host("rust", &rust);
+    assert_reached_the_host("typescript", &typescript);
+}
+
+/// Same input, same answer, apart from the value of the self-naming field.
+fn assert_answers_are_indistinguishable(rust: &GuestRun, typescript: &GuestRun) {
     assert_eq!(rust.answers[0], "{\"echo\":{\"n\":1},\"from\":\"rust\"}");
     assert_eq!(
         typescript.answers[0],
@@ -351,50 +367,43 @@ async fn a_guest_that_declines_is_reported_as_declining_and_then_as_gone() {
 
 /// The gap the fixture corpus leaves: a guest that calls back into the host.
 ///
-/// Both imports, from both guests, observed on the host side. The fixtures
-/// import nothing, so before this the host's guest-to-host path was enforced
-/// and never entered.
-#[tokio::test]
-async fn both_example_guests_reach_the_host_through_its_imports() {
-    for (name, component) in [("rust", rust_component()), ("typescript", ts_component())] {
-        let digest = if name == "rust" { '3' } else { '4' };
-        let run = run_guest(&format!("wasm.example.imports.{name}"), digest, &component).await;
-
-        assert_eq!(
-            run.records.len(),
-            EQUIVALENCE_INPUTS.len() + 1,
-            "{name} guest should log once at activation and once per call: {:?}",
-            run.records
-        );
-        assert_eq!(run.records[0].level, LogLevel::Info);
-        assert!(
-            run.records[0].message.contains("activated"),
-            "{name}: {:?}",
-            run.records[0]
-        );
-        assert_eq!(run.records[1].level, LogLevel::Debug);
-        // The field carries the request size, which is the one thing in these
-        // records the guest computed rather than spelled out - so it is the one
-        // that can disagree between toolchains without the answer changing.
-        // Read on a non-ASCII input on purpose: a JavaScript string's length is
-        // in UTF-16 code units, so an ASCII-only assertion cannot tell the two
-        // quantities apart, and this one reported 15 where Rust reported 18
-        // until the TypeScript guest was made to count bytes.
-        let non_ascii = EQUIVALENCE_INPUTS
-            .iter()
-            .position(|input| !input.is_ascii())
-            .expect("the corpus must hold a non-ASCII input for this to mean anything");
-        assert_eq!(
-            run.records[non_ascii + 1].fields,
-            vec![(
-                "bytes".to_owned(),
-                EQUIVALENCE_INPUTS[non_ascii].len().to_string()
-            )],
-            "{name} guest should report the request size in UTF-8 bytes"
-        );
-        assert!(
-            run.cancellation_polls >= 1,
-            "{name} guest should ask whether it was cancelled"
-        );
-    }
+/// Both imports, observed on the host side. The fixtures import nothing, so
+/// before this the host's guest-to-host path was enforced and never entered.
+fn assert_reached_the_host(name: &str, run: &GuestRun) {
+    assert_eq!(
+        run.records.len(),
+        EQUIVALENCE_INPUTS.len() + 1,
+        "{name} guest should log once at activation and once per call: {:?}",
+        run.records
+    );
+    assert_eq!(run.records[0].level, LogLevel::Info);
+    assert!(
+        run.records[0].message.contains("activated"),
+        "{name}: {:?}",
+        run.records[0]
+    );
+    assert_eq!(run.records[1].level, LogLevel::Debug);
+    // The field carries the request size, which is the one thing in these
+    // records the guest computed rather than spelled out - so it is the one
+    // that can disagree between toolchains without the answer changing.
+    // Read on a non-ASCII input on purpose: a JavaScript string's length is
+    // in UTF-16 code units, so an ASCII-only assertion cannot tell the two
+    // quantities apart, and this one reported 15 where Rust reported 18
+    // until the TypeScript guest was made to count bytes.
+    let non_ascii = EQUIVALENCE_INPUTS
+        .iter()
+        .position(|input| !input.is_ascii())
+        .expect("the corpus must hold a non-ASCII input for this to mean anything");
+    assert_eq!(
+        run.records[non_ascii + 1].fields,
+        vec![(
+            "bytes".to_owned(),
+            EQUIVALENCE_INPUTS[non_ascii].len().to_string()
+        )],
+        "{name} guest should report the request size in UTF-8 bytes"
+    );
+    assert!(
+        run.cancellation_polls >= 1,
+        "{name} guest should ask whether it was cancelled"
+    );
 }
