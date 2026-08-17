@@ -325,9 +325,11 @@ crate or protocol boundary in advance.
   production execution backends or capability families, plugin service
   contributions, policy-derived grants, language SDKs, guest-semantic corpus,
   or demonstrated cross-runtime equivalence.
-- Guest components built from a language toolchain, any guest that calls a host
-  import, fuel metering, host-call flood coverage, or sandboxed Node/TypeScript
-  and CPython workers.
+- Any route from a Wasm guest to a brokered capability. The broker and its
+  activation-scoped handles exist and are driven by a trusted local driver; no
+  guest reaches one across the ABI, which is the open half of the Wasm lane.
+- Fuel metering, a bound on what a component costs to compile, a check of a
+  guest's exports, or sandboxed Node/TypeScript and CPython workers.
 - Durable memory capture, retrieval, ranking, summaries, or evidence lineage.
 - Live model providers, prompt assembly, tool execution, workflows, schedules,
   goals, or subagents.
