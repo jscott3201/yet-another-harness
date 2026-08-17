@@ -114,7 +114,7 @@ mod tests {
                 .expect_err("an import outside the world must be refused");
             assert!(
                 refused.contains(expected),
-                "the refusal must name the interface the guest asked for,                  expected {expected:?} in {refused:?}"
+                "the refusal must name what the guest asked for: expected {expected:?} in {refused:?}"
             );
         }
     }

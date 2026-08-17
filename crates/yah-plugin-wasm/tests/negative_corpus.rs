@@ -239,3 +239,50 @@ async fn a_component_that_implements_none_of_the_world_is_refused_at_activation(
     activation.finish_stop().await.expect("cleanup completes");
     assert_eq!(observer.resource_state(&id), Ok(ResourceState::NotAcquired));
 }
+
+/// The two shapes the import check does not catch, pinned as behaviour.
+///
+/// Both are disclosed in `docs/wasm-plugin-contract.md` and the status ledger as
+/// limits of an exact-name, root-level check. They are asserted here rather than
+/// only described, for two reasons: a disclosure with a test behind it is worth
+/// more than one without, and if someone later widens the check these cases fail
+/// and force the disclosure to be revisited rather than left stale.
+///
+/// Deliberately asserting that they are *accepted*. That is the current
+/// behaviour, not the desired one.
+#[test]
+fn the_import_check_does_not_reach_nested_components_or_item_kinds() {
+    let cases: &[(&str, &str)] = &[
+        (
+            // The root imports nothing; the child does, and
+            // `component_type().imports()` reports only the root's.
+            "an undeclared import inside a nested component",
+            r#"(component
+                 (component $inner
+                   (type $empty (instance))
+                   (import "wasi:cli/environment@0.2.0" (instance (type $empty)))))"#,
+        ),
+        (
+            // The name is allowlisted; the item kind is not the instance the
+            // world declares. The check compares names, so it passes here and
+            // the linker is left to refuse it at instantiation.
+            "an allowlisted name imported as the wrong item kind",
+            r#"(component (import "yah:plugin/logging@0.1.0" (func)))"#,
+        ),
+    ];
+
+    for (case, text) in cases {
+        let revision =
+            revision(DriverConformanceCase::ReadyLifecycle, '0').expect("fixture revision");
+        assert!(
+            WasmComponentDriver::for_component(
+                revision.id().clone(),
+                text.as_bytes(),
+                WasmLimits::default(),
+            )
+            .is_ok(),
+            "{case}: this is a disclosed gap, so it must still build - if it now \
+             refuses, the disclosure needs removing rather than this test"
+        );
+    }
+}

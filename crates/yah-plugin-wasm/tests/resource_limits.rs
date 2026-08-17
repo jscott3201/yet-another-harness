@@ -11,7 +11,7 @@
 //! is never reached. See [`Watchdog`] for why the watchdog is a thread rather
 //! than `tokio::time::timeout`.
 //!
-//! Two ceilings are proved by pairs, not by a single failing case. A test that
+//! Each ceiling is proved by a pair, not by a single failing case. A test that
 //! only ever sees a failure cannot tell "the ceiling refused" from "the fixture
 //! was broken", so each ceiling also has a case where a generous ceiling admits
 //! the same guest.
