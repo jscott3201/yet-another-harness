@@ -17,8 +17,21 @@ export const lifecycle = {
 
 export const fixtureTool = {
   // Echo the request back inside a fixed envelope, exactly as the Rust guest
-  // does. `JSON.stringify` is free here and a hand-rolled serialiser is not,
-  // which is the one place the two examples differ in how rather than what.
+  // does — by concatenation, without parsing.
+  //
+  // `JSON.parse` then `JSON.stringify` would be the idiomatic thing to write
+  // here and it is wrong for this example, because it makes the two guests
+  // answer differently. Round-tripping through JavaScript normalises
+  // whitespace, rewrites `1.0` as `1`, and quietly rounds any integer past 2^53
+  // to a double; and on input that is not JSON at all it throws, which crosses
+  // the component boundary as a trap rather than as the `invalid-input` this
+  // world declares. None of that is visible until someone sends something other
+  // than canonical, small-number JSON.
+  //
+  // The world says `input-json`, and neither this contract nor the host parses
+  // it. Treating it as an opaque string is what the contract actually promises,
+  // and it is what lets the pair claim the same answer for every input rather
+  // than for the convenient one.
   invoke(inputJson: string): string {
     // Cancellation is advisory and read-only, so a guest that means to be
     // interruptible has to ask. Host teardown does not depend on the answer.
@@ -31,6 +44,6 @@ export const fixtureTool = {
     log('debug', 'typescript example invoked', [
       { key: 'bytes', value: String(inputJson.length) },
     ]);
-    return JSON.stringify({ echo: JSON.parse(inputJson), from: 'typescript' });
+    return '{"echo":' + inputJson + ',"from":"typescript"}';
   },
 };

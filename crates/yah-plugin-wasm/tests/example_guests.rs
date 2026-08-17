@@ -119,7 +119,8 @@ impl Rig {
 
 /// What one guest did when the host activated it and called its tool.
 struct GuestRun {
-    answer: String,
+    /// One answer per [`EQUIVALENCE_INPUTS`] entry, in order.
+    answers: Vec<String>,
     records: Vec<LogRecord>,
     cancellation_polls: usize,
 }
@@ -157,16 +158,23 @@ async fn run_guest(label: &str, digest: char, component: &[u8]) -> GuestRun {
         .expect("the example guest activates");
     assert_eq!(observer.resource_state(&id), Ok(ResourceState::Live));
 
-    let answer = driver
-        .call_fixture_tool(&id, "{\"n\":1}")
-        .await
-        .expect("the example guest answers its tool call");
+    // Every input on one activation, because that is also how a plugin is used:
+    // a tool is called repeatedly on a store that stays live between calls.
+    let mut answers = Vec::with_capacity(EQUIVALENCE_INPUTS.len());
+    for input in EQUIVALENCE_INPUTS {
+        answers.push(
+            driver
+                .call_fixture_tool(&id, input)
+                .await
+                .unwrap_or_else(|error| panic!("guest refused {input}: {error:?}")),
+        );
+    }
 
     let host = observer
         .host_observer(&id)
         .expect("a live activation has a host observer");
     let run = GuestRun {
-        answer,
+        answers,
         records: host.records(),
         cancellation_polls: host.cancellation_polls(),
     };
@@ -196,26 +204,53 @@ async fn run_guest(label: &str, digest: char, component: &[u8]) -> GuestRun {
     run
 }
 
+/// Inputs chosen because a JavaScript guest could plausibly answer them
+/// differently from a Rust one.
+///
+/// Every one of these diverged while the TypeScript guest round-tripped its
+/// input through `JSON.parse` and `JSON.stringify`, and one input - canonical
+/// JSON with a small number - did not. Testing only that one is what made an
+/// equivalence claim look true. Whitespace and `1.0` survive a JavaScript
+/// round trip changed; an integer past 2^53 comes back rounded; input that is
+/// not JSON throws, which reaches the host as a trap rather than as the
+/// `invalid-input` the world declares.
+const EQUIVALENCE_INPUTS: &[&str] = &[
+    r#"{"n":1}"#,
+    r#"{"n": 1}"#,
+    r#"{ "a" : [1, 2] }"#,
+    r#"{"s":"héllo ☃"}"#,
+    r#"{"q":"a\"b\\c"}"#,
+    r#"[1,2,3]"#,
+    r#"not json"#,
+    r#"{"b":1.0}"#,
+    r#"{"big":12345678901234567890}"#,
+];
+
 /// The claim the pair exists to support.
 ///
 /// Same world, same input, same answer apart from the one field each guest
 /// uses to name itself. If the host could tell them apart in any other way,
-/// the world would not be the contract.
+/// the world would not be the contract - so this asks across inputs that give
+/// the two toolchains every opportunity to disagree, not just the one that
+/// suits them.
 #[tokio::test]
 async fn both_example_guests_answer_the_same_tool_call_the_same_way() {
     let rust = run_guest("wasm.example.rust", '1', &rust_component()).await;
     let typescript = run_guest("wasm.example.ts", '2', &ts_component()).await;
 
-    assert_eq!(rust.answer, "{\"echo\":{\"n\":1},\"from\":\"rust\"}");
+    assert_eq!(rust.answers[0], "{\"echo\":{\"n\":1},\"from\":\"rust\"}");
     assert_eq!(
-        typescript.answer,
+        typescript.answers[0],
         "{\"echo\":{\"n\":1},\"from\":\"typescript\"}"
     );
-    assert_eq!(
-        rust.answer.replace("rust", "typescript"),
-        typescript.answer,
-        "the two guests must differ only in how they name themselves"
-    );
+    for (index, input) in EQUIVALENCE_INPUTS.iter().enumerate() {
+        assert_eq!(
+            rust.answers[index].replace("rust", "typescript"),
+            typescript.answers[index],
+            "the two guests must differ only in how they name themselves, but they \
+             answered {input} differently"
+        );
+    }
 }
 
 /// The gap the fixture corpus leaves: a guest that calls back into the host.
@@ -231,7 +266,7 @@ async fn both_example_guests_reach_the_host_through_its_imports() {
 
         assert_eq!(
             run.records.len(),
-            2,
+            EQUIVALENCE_INPUTS.len() + 1,
             "{name} guest should log once at activation and once per call: {:?}",
             run.records
         );
@@ -246,7 +281,7 @@ async fn both_example_guests_reach_the_host_through_its_imports() {
         // records the guest computed rather than spelled out.
         assert_eq!(
             run.records[1].fields,
-            vec![("bytes".to_owned(), "7".to_owned())],
+            vec![("bytes".to_owned(), EQUIVALENCE_INPUTS[0].len().to_string())],
             "{name} guest should report the request size it saw"
         );
         assert!(

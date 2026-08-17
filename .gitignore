@@ -3,6 +3,10 @@
 /target
 **/target
 
+# Agent worktrees. Transient, and each is its own git repository - `git add -A`
+# picks them up as gitlinks that point at nothing a clone can resolve.
+.claude/
+
 # Guest build outputs. DEC-038: every guest artifact is built from source at
 # gate time, so a committed `.wasm` is never the evidence — and the TypeScript
 # one is 12 MB of compiled SpiderMonkey that no reviewer could read.
