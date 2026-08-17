@@ -334,6 +334,56 @@ fn a_hand_built_spilled_reply_passes_the_same_admission() {
             "digest is not 64 lowercase hex characters"
         ))
     );
+    let over_bytes = ArtifactOffer {
+        handle: HandleId(3),
+        bytes: 9_007_199_254_740_992,
+        media_type: "text/plain".to_owned(),
+        digest_blake3: "ab".repeat(32),
+    };
+    assert_eq!(
+        session.reply_to_worker(
+            CallId(1),
+            Outcome::Spilled {
+                artifact: over_bytes
+            }
+        ),
+        Err(AppError::InvalidField("offer bytes outside wire range"))
+    );
+    // Shape-valid but naming nothing: the reads and release this offer
+    // obliges the worker to send would die against it.
+    let unheld = ArtifactOffer {
+        handle: HandleId(3),
+        bytes: 4,
+        media_type: "text/plain".to_owned(),
+        digest_blake3: "ab".repeat(32),
+    };
+    assert_eq!(
+        session.reply_to_worker(CallId(1), Outcome::Spilled { artifact: unheld }),
+        Err(AppError::InvalidField(
+            "spilled offer for a handle the session does not hold"
+        ))
+    );
+    let offer = session
+        .offer_artifact(CallId(1), vec![7; 4], "text/plain")
+        .expect("a real offer is minted");
+    let mismatched = ArtifactOffer {
+        bytes: offer.bytes + 1,
+        ..offer.clone()
+    };
+    assert_eq!(
+        session.reply_to_worker(
+            CallId(1),
+            Outcome::Spilled {
+                artifact: mismatched
+            }
+        ),
+        Err(AppError::InvalidField(
+            "spilled offer does not match the held artifact"
+        ))
+    );
+    session
+        .reply_to_worker(CallId(1), Outcome::Spilled { artifact: offer })
+        .expect("the exact offer goes out");
 }
 
 #[test]

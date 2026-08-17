@@ -7,7 +7,10 @@
 
 use super::{AppError, HostCall, HostSession, Phase, SessionEvent, WorkerCall};
 use crate::types::*;
-use crate::{MAX_CALL_PAYLOAD_BYTES, MAX_INLINE_RESULT_BYTES, MAX_METHOD_CHARS, MAX_WIRE_ID};
+use crate::{
+    MAX_CALL_PAYLOAD_BYTES, MAX_INLINE_RESULT_BYTES, MAX_MEDIA_TYPE_CHARS, MAX_METHOD_CHARS,
+    MAX_WIRE_ID,
+};
 
 impl HostSession {
     /// A worker-initiated call. Refusable faults answer this call and only
@@ -112,8 +115,13 @@ impl HostSession {
                 if bytes > MAX_INLINE_RESULT_BYTES {
                     return Err(AppError::SpillRequired { bytes });
                 }
+                if !super::value_within_ijson(result) {
+                    return Err(AppError::InvalidField(
+                        "integer outside the I-JSON safe range",
+                    ));
+                }
             }
-            Outcome::Spilled { artifact } => validate_outbound_offer(artifact)?,
+            Outcome::Spilled { artifact } => self.validate_outbound_offer(artifact)?,
             Outcome::Err { error } => {
                 error.message = super::clip_detail(&error.message);
             }
@@ -144,16 +152,19 @@ impl HostSession {
         if self.phase != Phase::Active {
             return Err(AppError::NotActive);
         }
-        if self.host_calls.len() as u32 >= self.config.ceilings.host_calls_in_flight {
-            return Err(AppError::CallCeiling);
-        }
         // The session refuses to queue a frame the worker is contracted to
-        // kill: the method and payload bounds bind this side's application
-        // too.
+        // kill, and bounds precede the ceiling exactly as they do inbound:
+        // a call that can never be admitted must not report the
+        // retry-shaped ceiling error.
         let method_chars = method.chars().count();
         if method_chars == 0 || method_chars > MAX_METHOD_CHARS {
             return Err(AppError::InvalidField(
                 "method name outside its length bound",
+            ));
+        }
+        if !super::value_within_ijson(&payload) {
+            return Err(AppError::InvalidField(
+                "integer outside the I-JSON safe range",
             ));
         }
         let payload_bytes = serde_json::to_vec(&payload)
@@ -163,6 +174,9 @@ impl HostSession {
             return Err(AppError::PayloadTooLarge {
                 bytes: payload_bytes,
             });
+        }
+        if self.host_calls.len() as u32 >= self.config.ceilings.host_calls_in_flight {
+            return Err(AppError::CallCeiling);
         }
         let call_id = CallId(self.next_host_call);
         self.next_host_call += 1;
@@ -229,14 +243,26 @@ impl HostSession {
                 return;
             }
         }
-        if let Outcome::Spilled { artifact } = &reply.outcome
-            && artifact.bytes == 0
-        {
-            self.fatal(
-                WireErrorKind::InvalidFrame,
-                "spilled artifact of zero bytes",
-            );
-            return;
+        if let Outcome::Spilled { artifact } = &reply.outcome {
+            if artifact.bytes == 0 {
+                self.fatal(
+                    WireErrorKind::InvalidFrame,
+                    "spilled artifact of zero bytes",
+                );
+                return;
+            }
+            // A worker handle id is spent once the host's release for it
+            // went out or was acked; offering it again is the same
+            // id-reuse desync a double release is.
+            if self.retired_worker_handles.contains(&artifact.handle)
+                || self.pending_worker_releases.contains_key(&artifact.handle)
+            {
+                self.fatal(
+                    WireErrorKind::UnknownHandle,
+                    "spilled offer reuses a spent worker handle",
+                );
+                return;
+            }
         }
         self.host_calls.remove(&call_id);
         self.retired_host_calls.insert(call_id);
@@ -295,33 +321,57 @@ impl HostSession {
             self.settle_host_call_locally(call_id, WireErrorKind::DeadlineExceeded, true);
         }
     }
-}
 
-/// [`HostSession::offer_artifact`] only mints conforming offers, but the
-/// reply API accepts any [`Outcome`] — so a hand-built spilled offer is
-/// held to the inbound admission bounds, named with the same strings.
-fn validate_outbound_offer(artifact: &ArtifactOffer) -> Result<(), AppError> {
-    if !(1..=MAX_WIRE_ID).contains(&artifact.handle.0) {
-        return Err(AppError::InvalidField("handle id outside wire range"));
+    /// [`HostSession::offer_artifact`] only mints conforming offers, but
+    /// the reply API accepts any [`Outcome`] — so a hand-built spilled
+    /// offer is held to the inbound admission bounds, named with the same
+    /// strings, and to the one rule admission cannot check: it must
+    /// exactly describe an artifact the session holds, or the reads and
+    /// release the offer obliges the worker to send would die against a
+    /// handle the session cannot serve.
+    fn validate_outbound_offer(&self, artifact: &ArtifactOffer) -> Result<(), AppError> {
+        if !(1..=MAX_WIRE_ID).contains(&artifact.handle.0) {
+            return Err(AppError::InvalidField("handle id outside wire range"));
+        }
+        if artifact.bytes == 0 {
+            return Err(AppError::InvalidField("spilled artifact of zero bytes"));
+        }
+        if artifact.bytes > MAX_WIRE_ID {
+            return Err(AppError::InvalidField("offer bytes outside wire range"));
+        }
+        let media_chars = artifact.media_type.chars().count();
+        if media_chars == 0 || media_chars > MAX_MEDIA_TYPE_CHARS {
+            return Err(AppError::InvalidField(
+                "media type outside its length bound",
+            ));
+        }
+        if artifact.digest_blake3.len() != 64
+            || !artifact
+                .digest_blake3
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+        {
+            return Err(AppError::InvalidField(
+                "digest is not 64 lowercase hex characters",
+            ));
+        }
+        let held = self
+            .handles
+            .get(&artifact.handle)
+            .and_then(|entry| entry.artifact.as_ref());
+        let Some(held) = held else {
+            return Err(AppError::InvalidField(
+                "spilled offer for a handle the session does not hold",
+            ));
+        };
+        if held.bytes.len() as u64 != artifact.bytes
+            || held.media_type != artifact.media_type
+            || held.digest_blake3 != artifact.digest_blake3
+        {
+            return Err(AppError::InvalidField(
+                "spilled offer does not match the held artifact",
+            ));
+        }
+        Ok(())
     }
-    if artifact.bytes == 0 {
-        return Err(AppError::InvalidField("spilled artifact of zero bytes"));
-    }
-    let media_chars = artifact.media_type.chars().count();
-    if media_chars == 0 || media_chars > 128 {
-        return Err(AppError::InvalidField(
-            "media type outside its length bound",
-        ));
-    }
-    if artifact.digest_blake3.len() != 64
-        || !artifact
-            .digest_blake3
-            .bytes()
-            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
-    {
-        return Err(AppError::InvalidField(
-            "digest is not 64 lowercase hex characters",
-        ));
-    }
-    Ok(())
 }

@@ -65,7 +65,7 @@
     },
     "Ceilings": {
       "additionalProperties": false,
-      "description": "Count ceilings the session enforces by refusal.",
+      "description": "Count ceilings the session enforces by refusal — except\n`initial_stream_credit`, which is an announced default, not a law.",
       "properties": {
         "host_calls_in_flight": {
           "description": "Host-initiated calls that may be in flight toward the worker.",
@@ -74,7 +74,7 @@
           "type": "integer"
         },
         "initial_stream_credit": {
-          "description": "Frames of credit a stream opens with.",
+          "description": "The opening credit window an SDK should grant when it has no\nbetter number. Advisory, not enforced: any opening grant in\n`1..=max_stream_credit` is legal.",
           "format": "uint32",
           "minimum": 0,
           "type": "integer"
@@ -130,7 +130,7 @@
       ]
     },
     "Outcome": {
-      "description": "How a call ended. Three-valued on purpose: cancelled is an outcome, not\nan error — a call that was asked to stop and stopped did what it was\ntold. A completion racing a cancel is legal and the completion wins.",
+      "description": "How a call ended, in exactly one of four ways. Cancelled is an outcome,\nnot an error — a call that was asked to stop and stopped did what it\nwas told. A completion racing a cancel is legal and the completion\nwins.",
       "oneOf": [
         {
           "additionalProperties": false,
@@ -227,7 +227,7 @@
           "type": "boolean"
         },
         "retryable": {
-          "description": "Whether the same call may be retried on this session as-is.",
+          "description": "Whether the same request may be retried on this session under a\nfresh call id — the refused id is spent, so as-is resubmission is\nthe `duplicate-call` fault.",
           "type": "boolean"
         }
       },
@@ -304,12 +304,12 @@
         },
         {
           "const": "unknown-handle",
-          "description": "A release, read, or use named a handle the owner does not hold.",
+          "description": "A handle desync: a release, read, or use named a handle the owner\ndoes not hold, a release or release-ack named the wrong kind, an\nack answered a release that was never sent, or an offer reused a\nspent handle id.",
           "type": "string"
         },
         {
           "const": "invalid-read",
-          "description": "An artifact pull-read went outside the offered byte range or over\nthe per-read bound.",
+          "description": "An artifact pull-read went outside the offered byte range, over\nthe per-read bound, or asked for zero bytes.",
           "type": "string"
         },
         {

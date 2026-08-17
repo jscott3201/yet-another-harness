@@ -433,6 +433,35 @@ fn drops_declared_after_the_last_item_are_refused() {
 }
 
 #[test]
+fn an_outbound_stream_item_with_an_unsafe_integer_is_refused() {
+    let mut session = peer::negotiated();
+    feed_streaming_call(&mut session, 5);
+    session.open_stream(CallId(5), 4).expect("ack goes out");
+    assert_eq!(
+        session.stream_item(CallId(5), StreamClass::Lossless, true, json!(u64::MAX)),
+        Err(AppError::InvalidField(
+            "integer outside the I-JSON safe range"
+        ))
+    );
+}
+
+#[test]
+fn a_drop_count_outside_the_wire_range_is_refused_at_the_bound() {
+    let mut session = peer::negotiated();
+    feed_streaming_call(&mut session, 5);
+    session.open_stream(CallId(5), 4).expect("ack goes out");
+    session
+        .note_lossy_drops(CallId(5), 9_007_199_254_740_991)
+        .expect("the bound itself is recordable");
+    // One more would sum past the I-JSON range the peer's admission — and
+    // the generated schema's maximum — hold the frame to.
+    assert_eq!(
+        session.note_lossy_drops(CallId(5), 1),
+        Err(AppError::InvalidField("drop count outside wire range"))
+    );
+}
+
+#[test]
 fn an_outbound_stream_item_over_the_byte_bound_is_refused() {
     let mut session = peer::negotiated();
     feed_streaming_call(&mut session, 5);

@@ -37,8 +37,8 @@ impl fmt::Display for StrictJsonError {
     }
 }
 
-const SAFE_MAX: u64 = (1 << 53) - 1;
-const SAFE_MIN: i64 = -((1 << 53) - 1);
+pub(crate) const SAFE_MAX: u64 = (1 << 53) - 1;
+pub(crate) const SAFE_MIN: i64 = -((1 << 53) - 1);
 
 /// Parse one JSON value under the strict rules.
 ///

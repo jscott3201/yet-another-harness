@@ -137,7 +137,8 @@ pub struct WireLimits {
     pub max_artifact_read_bytes: u64,
 }
 
-/// Count ceilings the session enforces by refusal.
+/// Count ceilings the session enforces by refusal — except
+/// `initial_stream_credit`, which is an announced default, not a law.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema, TS)]
 #[serde(deny_unknown_fields)]
 pub struct Ceilings {
@@ -149,7 +150,9 @@ pub struct Ceilings {
     /// artifact alike — an artifact handle pins its bytes host-side, so an
     /// uncounted kind would be unbounded memory behind a bounded gauge.
     pub live_handles: u32,
-    /// Frames of credit a stream opens with.
+    /// The opening credit window an SDK should grant when it has no
+    /// better number. Advisory, not enforced: any opening grant in
+    /// `1..=max_stream_credit` is legal.
     pub initial_stream_credit: u32,
     /// Ceiling on one stream's outstanding credit — the unspent frames a
     /// producer may hold at a moment, checked at open and at every
@@ -189,9 +192,10 @@ pub struct Reply {
     pub outcome: Outcome,
 }
 
-/// How a call ended. Three-valued on purpose: cancelled is an outcome, not
-/// an error — a call that was asked to stop and stopped did what it was
-/// told. A completion racing a cancel is legal and the completion wins.
+/// How a call ended, in exactly one of four ways. Cancelled is an outcome,
+/// not an error — a call that was asked to stop and stopped did what it
+/// was told. A completion racing a cancel is legal and the completion
+/// wins.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema, TS)]
 #[serde(tag = "outcome", rename_all = "kebab-case", deny_unknown_fields)]
 pub enum Outcome {
@@ -365,7 +369,9 @@ pub struct WireError {
     pub kind: WireErrorKind,
     #[schemars(length(max = 512))]
     pub message: String,
-    /// Whether the same call may be retried on this session as-is.
+    /// Whether the same request may be retried on this session under a
+    /// fresh call id — the refused id is spent, so as-is resubmission is
+    /// the `duplicate-call` fault.
     pub retryable: bool,
     /// Whether the caller must reconcile external state before retrying —
     /// set on every outcome-unknown settlement.
@@ -420,10 +426,13 @@ pub enum WireErrorKind {
     /// frame arrived. Distinct from a worker terminal with
     /// [`Outcome::Cancelled`], which is the call itself answering.
     Cancelled,
-    /// A release, read, or use named a handle the owner does not hold.
+    /// A handle desync: a release, read, or use named a handle the owner
+    /// does not hold, a release or release-ack named the wrong kind, an
+    /// ack answered a release that was never sent, or an offer reused a
+    /// spent handle id.
     UnknownHandle,
-    /// An artifact pull-read went outside the offered byte range or over
-    /// the per-read bound.
+    /// An artifact pull-read went outside the offered byte range, over
+    /// the per-read bound, or asked for zero bytes.
     InvalidRead,
     /// The peer is gone and the outcome of in-flight work is unknowable
     /// from this side. Reconciliation is required before unsafe repetition.

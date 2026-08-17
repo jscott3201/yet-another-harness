@@ -43,7 +43,9 @@ worker_calls_in_flight: number,
  */
 live_handles: number, 
 /**
- * Frames of credit a stream opens with.
+ * The opening credit window an SDK should grant when it has no
+ * better number. Advisory, not enforced: any opening grant in
+ * `1..=max_stream_credit` is legal.
  */
 initial_stream_credit: number, 
 /**
@@ -115,7 +117,9 @@ export type Goodbye = { reason: string, };
 
 export type WireError = { kind: WireErrorKind, message: string, 
 /**
- * Whether the same call may be retried on this session as-is.
+ * Whether the same request may be retried on this session under a
+ * fresh call id — the refused id is spent, so as-is resubmission is
+ * the `duplicate-call` fault.
  */
 retryable: boolean, 
 /**

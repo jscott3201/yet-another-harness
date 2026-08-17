@@ -71,17 +71,26 @@ pub const MAX_ERROR_DETAIL_CHARS: usize = 512;
 /// Character bound on a call's method name.
 pub const MAX_METHOD_CHARS: usize = 128;
 
-/// Frames of initial credit a stream opens with, and the default ceiling
-/// any window may reach (announced in the accept as
-/// `ceilings.max_stream_credit`). Credit is counted in frames, not bytes:
-/// every stream frame is already byte-bounded, so frame count is the
-/// dimension a hostile producer could still flood.
+/// Character bound on an artifact offer's media type.
+pub const MAX_MEDIA_TYPE_CHARS: usize = 128;
+
+/// Character bound on each half of a hello's SDK identity.
+pub const MAX_SDK_IDENTITY_CHARS: usize = 64;
+
+/// The opening credit window an SDK should use when it has no better
+/// number — announced in the accept as `ceilings.initial_stream_credit`
+/// but advisory, not enforced: any opening grant in `1..=max_stream_credit`
+/// is legal. Credit is counted in frames, not bytes: every stream frame is
+/// already byte-bounded, so frame count is the dimension a hostile
+/// producer could still flood. `MAX_STREAM_CREDIT` is the default ceiling
+/// any window may reach, and that one is enforced.
 pub const INITIAL_STREAM_CREDIT: u32 = 16;
 pub const MAX_STREAM_CREDIT: u32 = 1024;
 
 /// Default directional in-flight ceilings, announced in the handshake
 /// accept. Exceeding one is refused with `resource-exhausted`, never
-/// queued: refusal is the only bound that does not become host memory.
+/// queued — a queue here is unbounded memory the other side controls,
+/// where a refusal retains only the spent id.
 pub const DEFAULT_HOST_CALLS_IN_FLIGHT: u32 = 16;
 pub const DEFAULT_WORKER_CALLS_IN_FLIGHT: u32 = 32;
 

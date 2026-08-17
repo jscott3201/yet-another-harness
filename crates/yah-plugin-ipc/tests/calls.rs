@@ -223,6 +223,45 @@ fn an_outbound_method_name_outside_its_length_bound_is_refused() {
 }
 
 #[test]
+fn an_outbound_integer_outside_the_ijson_range_is_refused() {
+    let mut session = peer::negotiated();
+    session
+        .call_worker(
+            "guest.big",
+            json!({"at": 9_007_199_254_740_991u64}),
+            None,
+            false,
+        )
+        .expect("the safe bound itself goes out");
+    // The peer's strict admission kills any frame carrying an unsafe
+    // integer; the mirror refuses the value before it becomes a frame.
+    for payload in [
+        json!({"at": 9_007_199_254_740_992u64}),
+        json!([-9_007_199_254_740_992i64]),
+    ] {
+        assert_eq!(
+            session.call_worker("guest.big", payload, None, false),
+            Err(AppError::InvalidField(
+                "integer outside the I-JSON safe range"
+            ))
+        );
+    }
+    session.feed(&wire(&call(1, "tool.run", json!(null))));
+    session.drain_events();
+    assert_eq!(
+        session.reply_to_worker(
+            CallId(1),
+            Outcome::Ok {
+                result: json!({"ts": u64::MAX}),
+            },
+        ),
+        Err(AppError::InvalidField(
+            "integer outside the I-JSON safe range"
+        ))
+    );
+}
+
+#[test]
 fn an_outbound_error_message_is_clipped_to_the_detail_bound() {
     let mut session = peer::negotiated();
     session.feed(&wire(&call(1, "tool.run", json!(null))));

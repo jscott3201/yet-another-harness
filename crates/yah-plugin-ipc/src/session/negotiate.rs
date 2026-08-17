@@ -36,7 +36,8 @@ impl HostSession {
         // Same numbers as `validate_bounds` and the generated schema; the
         // refuse frame still goes out, because a worker whose only sin is a
         // long build string deserves the version diagnostic too.
-        let name_ok = |name: &str| (1..=64).contains(&name.chars().count());
+        let name_ok =
+            |name: &str| (1..=crate::MAX_SDK_IDENTITY_CHARS).contains(&name.chars().count());
         if !name_ok(&hello.sdk_name) || !name_ok(&hello.sdk_version) {
             self.outbox.push(HostMessage::Refuse(Refuse {
                 error: refusal(

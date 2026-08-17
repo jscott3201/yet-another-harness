@@ -10,7 +10,7 @@ The crate is sans-io: `frame` turns bytes into frames incrementally, and
 in it can block, sleep, spawn, or open a socket. The process driver that
 supplies the transport, the spawned child, the bootstrap file descriptor, and
 the kill path is not implemented; neither is any worker-side SDK.
-One hundred one deterministic fixtures in `crates/yah-plugin-ipc/tests/`
+One hundred seven deterministic fixtures in `crates/yah-plugin-ipc/tests/`
 drive the host side of every rule below with a scripted byte-level peer.
 
 ## Framing and strict JSON
@@ -73,7 +73,10 @@ first, or a second hello, ends the connection.
 The host answers `accept` with the chosen version, the feature intersection
 in force, and every byte bound and count ceiling the session will enforce —
 announced, not negotiable; a worker that cannot live with a ceiling says
-goodbye. A version mismatch is refused with the host's supported list, so the
+goodbye. One announced number is advisory rather than law:
+`initial_stream_credit` is the opening window an SDK should grant when it
+has no better one, and any opening grant up to `max_stream_credit` is
+legal. A version mismatch is refused with the host's supported list, so the
 worker fails with a diagnostic instead of a bare close. A required feature
 the host does not know fails closed. A hello whose own fields fail
 admission — an SDK identity outside its length bound — is refused with the
@@ -102,15 +105,16 @@ indistinguishable from a late reply racing a local settlement, so it is
 ignored, while a terminal for an id never minted is fatal.
 
 In-flight ceilings are enforced by refusal (`resource-exhausted`,
-retryable), never by queueing — a queue here is unbounded memory a hostile
-worker controls. A refusal does retain one thing: the spent id. Ids are
-never reused, so every id the session has seen stays in a retired set for
-the session's lifetime; that is a few bytes per call, and bounding it is
-the supervising driver's job, by bounding how long a session lives. A deadline the worker outlives is enforced by the host —
-a `cancel` goes out and the call settles as `deadline-exceeded` with
-reconciliation required, because the worker may have acted before the budget
-ran out. A late reply after that settlement is a tolerated race, not a
-fault.
+retryable — under a fresh id, since the refused one is spent), never by
+queueing: a queue here is unbounded memory a hostile worker controls. A
+refusal does retain one thing, the spent id. Ids are never reused, so
+every id the session has seen stays in a retired set for the session's
+lifetime; that is a few bytes per call, and bounding it is the supervising
+driver's job, by bounding how long a session lives. A deadline the worker
+outlives is enforced by the host — a `cancel` goes out and the call
+settles as `deadline-exceeded` with reconciliation required, because the
+worker may have acted before the budget ran out. A late reply after that
+settlement is a tolerated race, not a fault.
 
 ## Streams
 
@@ -123,7 +127,11 @@ Credit is counted in frames, not bytes — every stream frame is already
 byte-bounded, so frame count is the dimension a hostile producer could still
 flood. `lossless` items spend credit and exceeding the window is fatal;
 `lossy` items (progress, logs) spend none but must carry a monotonic count
-of what was dropped. `credit` frames widen the window up to the
+of what was dropped. The count rides data frames and nothing else: drops
+recorded after a stream's final item are refused on the recording side,
+and drops recorded before a terminal that follows with no further item are
+lost — the gap information has no frame left to travel on. `credit`
+frames widen the window up to the
 `max_stream_credit` ceiling the accept announced (1024 by default) — a
 bound on the outstanding, unspent window at any moment, not on the sum of
 grants over the stream's life — and they widen it in both directions: the
@@ -144,11 +152,15 @@ continues: an oversize call payload, a ceiling, and everything a served
 unknown, released, or the wrong kind, a read outside the offer — because
 those arrive inside a call the session can answer. A fatal fault poisons
 the session: framing violations, strict-JSON and field-bound violations, id
-reuse, credit overdraw, handle desyncs, and the stream-order family — data
-before open, a sequence gap, a second open, a drop count going backwards, a
-zero-byte spilled offer. The same kind can sit on both sides of the split:
-`invalid-frame` and `unknown-handle` are fatal at frame admission and
-refusable inside a served read. On a fatal fault the host says goodbye
+reuse, credit overdraw, handle desyncs, an oversize inline result or
+stream item — the sender had the spill path or the byte bound and violated
+it instead — and the stream-order family: data before open, a sequence
+gap, a second open, a drop count going backwards, a zero-byte spilled
+offer. A kind can sit on both sides of the split: `invalid-frame` and
+`unknown-handle` are fatal at frame admission and refusable inside a
+served read, `payload-too-large` is refusable on a call payload and fatal
+on a result or stream item, and `resource-exhausted` is refusable at a
+ceiling and fatal on a credit overdraw. On a fatal fault the host says goodbye
 naming the kind and nothing else, settles in-flight work, and ignores every
 later input.
 
@@ -164,8 +176,11 @@ option the protocol offers. The producing side keeps the bytes and replies
 and a BLAKE3 digest, so the reader can refuse before the first pull and
 verify after the last.
 
-The consumer pull-reads through ordinary calls to `artifact.read`
-(handle, offset, length), served by the session itself. Chunks cross the
+The consumer pull-reads through ordinary calls to `artifact.read`, served
+by the session itself. The request payload is `{"handle", "offset",
+"len"}` — exactly those three members, unknown members refused — and the
+result is `{"bytes_hex", "media_type"}`; these two shapes live in this
+prose and the serving code, not yet in the generated artifacts. Chunks cross the
 wire hex-encoded inside a normal call result, bounded at 24 KiB of raw bytes
 per read so a maximal chunk stays under the inline ceiling — more round
 trips for a large artifact, and no third framing rule for two SDKs to get
@@ -196,7 +211,11 @@ application a second release of it. The paths a release frame never
 travels are reclaimed host-side: a call that minted handles and then settled
 `err` or `cancelled` reclaims them, and goodbye, disconnect, and fatal
 faults reclaim everything — including pending releases, whose acks will
-never come.
+never come. One crossing is tolerated: a worker that learned a handle id
+mid-call may have a `release` in flight when the reclaiming terminal
+passes it on the wire, so a release naming a reclaimed id is answered with
+the ordinary ack rather than a fault — the ack spends the id, and a second
+release for it is the double-release desync again.
 
 ## Cancellation and loss
 

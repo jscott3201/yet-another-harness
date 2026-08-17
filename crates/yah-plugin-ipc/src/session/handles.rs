@@ -13,7 +13,7 @@
 
 use super::{AppError, ArtifactBytes, Handle, HostSession, Phase, SessionEvent};
 use crate::types::*;
-use crate::{MAX_ARTIFACT_READ_BYTES, MAX_WIRE_ID};
+use crate::{MAX_ARTIFACT_READ_BYTES, MAX_MEDIA_TYPE_CHARS, MAX_WIRE_ID};
 
 /// The one method the session serves itself: a pull-read against an
 /// artifact handle the host owns. Everything else is the application's.
@@ -63,7 +63,7 @@ impl HostSession {
             return Err(AppError::InvalidField("spilled artifact of zero bytes"));
         }
         let media_chars = media_type.chars().count();
-        if media_chars == 0 || media_chars > 128 {
+        if media_chars == 0 || media_chars > MAX_MEDIA_TYPE_CHARS {
             return Err(AppError::InvalidField(
                 "media type outside its length bound",
             ));
@@ -75,6 +75,7 @@ impl HostSession {
             Some(ArtifactBytes {
                 bytes,
                 media_type: media_type.to_owned(),
+                digest_blake3: digest.clone(),
             }),
         )?;
         self.worker_calls
@@ -152,6 +153,26 @@ impl HostSession {
     /// dispose for the same reason.
     pub(super) fn on_release(&mut self, release: Release) {
         let Some(entry) = self.handles.get(&release.handle) else {
+            // A release for a handle the host reclaimed is a tolerated
+            // race, not a desync: the worker may have learned the id
+            // mid-call, and its release can cross the reclaiming terminal
+            // on the wire. Acked so the worker's table closes cleanly; no
+            // event, because the application already heard the
+            // reclamation. The kind still has to agree, and the ack spends
+            // the id, so releasing it twice stays fatal.
+            if let Some(kind) = self.reclaimed_handles.get(&release.handle).copied() {
+                if kind != release.kind {
+                    self.fatal(WireErrorKind::UnknownHandle, "release with the wrong kind");
+                    return;
+                }
+                self.reclaimed_handles.remove(&release.handle);
+                self.retired_handles.insert(release.handle);
+                self.outbox.push(HostMessage::ReleaseAck(ReleaseAck {
+                    handle: release.handle,
+                    kind,
+                }));
+                return;
+            }
             let detail = if self.retired_handles.contains(&release.handle) {
                 "release of a handle already released"
             } else {
@@ -165,7 +186,7 @@ impl HostSession {
             return;
         }
         let kind = entry.kind;
-        self.drop_handle(release.handle);
+        self.drop_handle(release.handle, true);
         self.outbox.push(HostMessage::ReleaseAck(ReleaseAck {
             handle: release.handle,
             kind,
@@ -182,7 +203,7 @@ impl HostSession {
         let mut count = 0;
         for handle in handles {
             if self.handles.contains_key(handle) {
-                self.drop_handle(*handle);
+                self.drop_handle(*handle, false);
                 count += 1;
             }
         }
@@ -256,10 +277,18 @@ impl HostSession {
         });
     }
 
-    fn drop_handle(&mut self, handle: HandleId) {
-        if self.handles.remove(&handle).is_some() {
+    /// Remove a live handle. `released` says a worker release frame ended
+    /// it; a reclaimed id is remembered apart with its kind, because a
+    /// release racing the reclamation is tolerated where a double release
+    /// is not.
+    fn drop_handle(&mut self, handle: HandleId, released: bool) {
+        if let Some(entry) = self.handles.remove(&handle) {
             self.live_handle_count -= 1;
-            self.retired_handles.insert(handle);
+            if released {
+                self.retired_handles.insert(handle);
+            } else {
+                self.reclaimed_handles.insert(handle, entry.kind);
+            }
         }
     }
 

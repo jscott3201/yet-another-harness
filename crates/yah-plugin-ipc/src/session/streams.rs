@@ -163,7 +163,11 @@ impl HostSession {
 
     /// The embedding host records lossy items it dropped under pressure on
     /// a worker call's stream; the next item it sends carries the count, so
-    /// the worker sees the gap rather than infers it.
+    /// the worker sees the gap rather than infers it. Only the next item:
+    /// drops noted after the stream's final item are refused, and drops
+    /// noted before a terminal that follows with no further item are
+    /// silently undeliverable — the count rides data frames and nothing
+    /// else.
     pub fn note_lossy_drops(&mut self, call_id: CallId, dropped: u64) -> Result<(), AppError> {
         if self.phase != Phase::Active {
             return Err(AppError::NotActive);
@@ -179,7 +183,14 @@ impl HostSession {
         if state.last_item_sent {
             return Err(AppError::StreamViolation("drops after the last item"));
         }
-        state.lossy_dropped = state.lossy_dropped.saturating_add(dropped);
+        // The count rides a frame the peer holds to the I-JSON bound; a
+        // sum past it would queue a frame the worker is contracted to
+        // kill.
+        let next = state.lossy_dropped.saturating_add(dropped);
+        if next > crate::MAX_WIRE_ID {
+            return Err(AppError::InvalidField("drop count outside wire range"));
+        }
+        state.lossy_dropped = next;
         Ok(())
     }
 
@@ -227,6 +238,11 @@ impl HostSession {
         };
         if state.last_item_sent {
             return Err(AppError::StreamViolation("item after the last one"));
+        }
+        if !super::value_within_ijson(&payload) {
+            return Err(AppError::InvalidField(
+                "integer outside the I-JSON safe range",
+            ));
         }
         let payload_bytes = serde_json::to_vec(&payload)
             .map(|bytes| bytes.len())

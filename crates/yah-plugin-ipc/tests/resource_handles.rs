@@ -356,6 +356,115 @@ fn an_outbound_release_for_handle_id_zero_is_refused() {
 }
 
 #[test]
+fn a_release_racing_the_reclaiming_terminal_is_acked_not_fatal() {
+    let mut session = peer::negotiated();
+    let serving = in_flight_call(&mut session, 1);
+    let handle = session.mint_capability_handle(serving).expect("minted");
+    session
+        .reply_to_worker(
+            serving,
+            Outcome::Err {
+                error: WireError {
+                    kind: WireErrorKind::Internal,
+                    message: "internal".to_owned(),
+                    retryable: false,
+                    reconcile_required: false,
+                },
+            },
+        )
+        .expect("the err terminal reclaims the mint");
+    session.drain_outbox();
+    session.drain_events();
+    // The worker may have learned the id mid-call and its release may
+    // cross the reclaiming terminal on the wire. That crossing is a race,
+    // not a desync: the ack closes the worker's table cleanly.
+    session.feed(&wire(&release(handle, HandleKind::Capability)));
+    let outbox = session.drain_outbox();
+    assert!(
+        matches!(outbox.as_slice(), [HostMessage::ReleaseAck(ack)] if ack.handle == handle),
+        "a reclaimed handle's release is acked: {outbox:?}"
+    );
+    assert!(!session.is_closed());
+    // The ack spent the id for real; a second release is the ordinary
+    // double-release desync again.
+    session.feed(&wire(&release(handle, HandleKind::Capability)));
+    assert_fatal(&mut session, WireErrorKind::UnknownHandle);
+}
+
+#[test]
+fn a_reclaimed_handles_release_still_checks_the_kind() {
+    let mut session = peer::negotiated();
+    let serving = in_flight_call(&mut session, 1);
+    let handle = session.mint_capability_handle(serving).expect("minted");
+    session
+        .reply_to_worker(
+            serving,
+            Outcome::Cancelled {
+                reason: CancelReason::Requested,
+            },
+        )
+        .expect("the cancelled terminal reclaims the mint");
+    session.drain_outbox();
+    session.drain_events();
+    session.feed(&wire(&release(handle, HandleKind::Artifact)));
+    assert_fatal(&mut session, WireErrorKind::UnknownHandle);
+}
+
+#[test]
+fn a_spilled_offer_reusing_a_spent_worker_handle_is_fatal() {
+    // Spent by ack: the worker gave the id back, then offered it again.
+    let mut session = peer::negotiated();
+    session
+        .release_worker_handle(HandleId(7), HandleKind::Artifact)
+        .expect("release goes out");
+    session.feed(&wire(&WorkerMessage::ReleaseAck(ReleaseAck {
+        handle: HandleId(7),
+        kind: HandleKind::Artifact,
+    })));
+    session.drain_outbox();
+    session.drain_events();
+    let id = session
+        .call_worker("guest.big", json!(null), None, false)
+        .expect("call goes out");
+    session.drain_outbox();
+    session.feed(&wire(&WorkerMessage::Reply(Reply {
+        call_id: id,
+        outcome: Outcome::Spilled {
+            artifact: ArtifactOffer {
+                handle: HandleId(7),
+                bytes: 9,
+                media_type: "text/plain".to_owned(),
+                digest_blake3: "ab".repeat(32),
+            },
+        },
+    })));
+    assert_fatal(&mut session, WireErrorKind::UnknownHandle);
+
+    // Spent by asking: the host's release is on the wire, still unacked.
+    let mut session = peer::negotiated();
+    session
+        .release_worker_handle(HandleId(8), HandleKind::Artifact)
+        .expect("release goes out");
+    session.drain_outbox();
+    let id = session
+        .call_worker("guest.big", json!(null), None, false)
+        .expect("call goes out");
+    session.drain_outbox();
+    session.feed(&wire(&WorkerMessage::Reply(Reply {
+        call_id: id,
+        outcome: Outcome::Spilled {
+            artifact: ArtifactOffer {
+                handle: HandleId(8),
+                bytes: 9,
+                media_type: "text/plain".to_owned(),
+                digest_blake3: "ab".repeat(32),
+            },
+        },
+    })));
+    assert_fatal(&mut session, WireErrorKind::UnknownHandle);
+}
+
+#[test]
 fn pending_releases_are_bounded_by_the_handle_ceiling() {
     let mut config = SessionConfig::default();
     config.ceilings.live_handles = 1;

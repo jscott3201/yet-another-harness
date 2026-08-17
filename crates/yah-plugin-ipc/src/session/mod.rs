@@ -32,7 +32,8 @@ use crate::{
     DEFAULT_HOST_CALLS_IN_FLIGHT, DEFAULT_LIVE_HANDLES, DEFAULT_WORKER_CALLS_IN_FLIGHT,
     INITIAL_STREAM_CREDIT, MAX_ARTIFACT_READ_BYTES, MAX_CALL_PAYLOAD_BYTES,
     MAX_CONTROL_FRAME_BYTES, MAX_ERROR_DETAIL_CHARS, MAX_FRAME_BYTES, MAX_INLINE_RESULT_BYTES,
-    MAX_METHOD_CHARS, MAX_STREAM_CREDIT, MAX_STREAM_DATA_BYTES, MAX_WIRE_ID,
+    MAX_MEDIA_TYPE_CHARS, MAX_METHOD_CHARS, MAX_SDK_IDENTITY_CHARS, MAX_STREAM_CREDIT,
+    MAX_STREAM_DATA_BYTES, MAX_WIRE_ID,
 };
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -189,6 +190,9 @@ struct Handle {
 struct ArtifactBytes {
     bytes: Vec<u8>,
     media_type: String,
+    /// Hashed at mint, so a hand-built outbound offer can be checked
+    /// against the artifact it claims to name without re-hashing.
+    digest_blake3: String,
 }
 
 /// Refused by the session's own application-facing API — the host asked for
@@ -199,7 +203,9 @@ pub enum AppError {
     NotActive,
     /// The named call is not in flight.
     UnknownCall,
-    /// The live-handle ceiling is reached; the grant must be refused.
+    /// A handle-shaped gauge is at the `live_handles` ceiling: a grant
+    /// that must be refused, or a pending-release table full of releases
+    /// the worker has not acked yet.
     HandleCeiling,
     /// The host's own in-flight ceiling is reached; initiate later.
     CallCeiling,
@@ -242,11 +248,16 @@ pub struct HostSession {
     retired_host_calls: BTreeSet<CallId>,
     next_host_call: u64,
     handles: BTreeMap<HandleId, Handle>,
-    /// Handle ids that were live once and are spent forever, released and
-    /// reclaimed alike. Never minted from again (the monotonic counter
-    /// guarantees that); read at release time so a double release names
-    /// itself instead of masquerading as a forged handle.
+    /// Handle ids the worker released, spent forever. Never minted from
+    /// again (the monotonic counter guarantees that); read at release time
+    /// so a double release names itself instead of masquerading as a
+    /// forged handle.
     retired_handles: BTreeSet<HandleId>,
+    /// Handle ids the host reclaimed without a release frame, with the
+    /// kind each had. A worker release for one of these is a tolerated
+    /// race, not a desync: its release may have crossed the reclaiming
+    /// terminal on the wire.
+    reclaimed_handles: BTreeMap<HandleId, HandleKind>,
     next_handle: u64,
     /// Live handles of both kinds, the gauge the `live_handles` ceiling
     /// bounds. Artifact handles count too: each pins its bytes host-side.
@@ -275,6 +286,7 @@ impl HostSession {
             next_host_call: 1,
             handles: BTreeMap::new(),
             retired_handles: BTreeSet::new(),
+            reclaimed_handles: BTreeMap::new(),
             next_handle: 1,
             live_handle_count: 0,
             pending_worker_releases: BTreeMap::new(),
@@ -504,7 +516,7 @@ fn validate_bounds(message: &WorkerMessage) -> Result<(), &'static str> {
     let id_ok = |id: u64| (1..=MAX_WIRE_ID).contains(&id);
     let name_ok = |name: &str| {
         let chars = name.chars().count();
-        (1..=64).contains(&chars)
+        (1..=MAX_SDK_IDENTITY_CHARS).contains(&chars)
     };
     match message {
         WorkerMessage::Hello(hello) => {
@@ -536,7 +548,7 @@ fn validate_bounds(message: &WorkerMessage) -> Result<(), &'static str> {
                         return Err("handle id outside wire range");
                     }
                     let media_chars = artifact.media_type.chars().count();
-                    if media_chars == 0 || media_chars > 128 {
+                    if media_chars == 0 || media_chars > MAX_MEDIA_TYPE_CHARS {
                         return Err("media type outside its length bound");
                     }
                     if artifact.digest_blake3.len() != 64
@@ -594,6 +606,26 @@ fn validate_bounds(message: &WorkerMessage) -> Result<(), &'static str> {
 /// only fixed strings and [`kind_name`] values.
 pub(super) fn clip_detail(detail: &str) -> String {
     detail.chars().take(MAX_ERROR_DETAIL_CHARS).collect()
+}
+
+/// The outbound mirror of the strict parser's integer rule: every integer
+/// a peer running [`crate::strict`] admission would refuse is refused here
+/// before the frame is queued. Floats pass, exactly as they do inbound.
+pub(super) fn value_within_ijson(value: &serde_json::Value) -> bool {
+    match value {
+        serde_json::Value::Number(number) => {
+            if let Some(unsigned) = number.as_u64() {
+                unsigned <= crate::strict::SAFE_MAX
+            } else if let Some(signed) = number.as_i64() {
+                signed >= crate::strict::SAFE_MIN
+            } else {
+                true
+            }
+        }
+        serde_json::Value::Array(items) => items.iter().all(value_within_ijson),
+        serde_json::Value::Object(members) => members.values().all(value_within_ijson),
+        _ => true,
+    }
 }
 
 fn is_control(message: &WorkerMessage) -> bool {
