@@ -238,7 +238,7 @@ const EQUIVALENCE_INPUTS: &[&str] = &[
 ///
 /// Same world, same input, same answer apart from the value of the one field
 /// each guest uses to name itself; and both guests reaching the host through
-/// both of the world's imports. If the host could tell them apart in any other
+/// the logging and cancellation imports. If the host could tell them apart in any other
 /// way, the world would not be the contract - so this asks across inputs that
 /// give the two toolchains every opportunity to disagree, not just the one that
 /// suits them.
@@ -375,10 +375,10 @@ async fn a_guest_that_declines_is_reported_as_declining_and_then_as_gone() {
     );
 }
 
-/// The gap the fixture corpus leaves: a guest that calls back into the host.
+/// Toolchain-built guests calling back into the host, observed host-side.
 ///
-/// Both imports, observed on the host side. The fixtures import nothing, so
-/// before this the host's guest-to-host path was enforced and never entered.
+/// Logging and cancellation both, from authored code rather than from the
+/// hand-written flood and capability fixtures that also enter this path.
 fn assert_reached_the_host(name: &str, run: &GuestRun) {
     assert_eq!(
         run.records.len(),

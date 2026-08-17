@@ -1,14 +1,17 @@
 //! The route from a guest to a granted capability, carried as a resource.
 //!
-//! The `capabilities` import is present in every activation; the authority is
-//! not the import but the handle `acquire` returns. Each resource-table entry
-//! wraps one [`CapabilityHandle`] resolved through the activation's admitted
-//! [`PluginStartContext`], so every guest call re-enters the same gates a
-//! trusted in-process consumer would: the exact registration's revocation
-//! gate, the activation's pre-cleanup activity fence, and its cancellation.
-//! The table index the guest holds is store-local bookkeeping, never bearer
-//! authority - a forged index traps inside Wasmtime before the host sees it,
-//! and the handle inside the entry refuses on its own once revoked.
+//! Three layers, three words. The guest holds a *resource* - the opaque WIT
+//! value `acquire` returns. The host stores an *entry* ([`GrantedCapability`])
+//! behind each resource, in the store's table. The entry wraps a *handle* -
+//! the activation-scoped [`CapabilityHandle`] resolved through the admitted
+//! [`PluginStartContext`]. The `capabilities` import is present in every
+//! activation; the authority is not the import but the resource, and only
+//! because of the handle its entry wraps: every guest call re-enters the same
+//! gates a trusted in-process consumer would - the exact registration's
+//! revocation gate, the activation's pre-cleanup activity fence, and its
+//! cancellation. The table index behind the resource is store-local
+//! bookkeeping, never bearer authority: a forged index traps inside Wasmtime
+//! before the host sees it, and the handle refuses on its own once revoked.
 //!
 //! Every failure is an ordinary WIT error result, never a trap: the spec's
 //! rule for optional grants is a profile the guest can observe and refuse
@@ -76,11 +79,18 @@ impl HostState {
         &mut self,
         capability_id: String,
     ) -> Result<Resource<GrantedCapability>, AcquireError> {
-        // The raw ID is guest text and is not echoed back: the identity
-        // error names the violated rule, which is the whole finding.
+        // The raw ID is guest text and must not be echoed back: rendering the
+        // identity error would embed the whole rejected value, escape_debug
+        // can grow it several-fold, and the message is lowered into the guest
+        // uncapped - a reflection path around `host_call_bytes`. `kind` and
+        // `expected` are static host text, and they are the whole finding.
         let id = CapabilityId::new(capability_id).map_err(|error| AcquireError {
             code: AcquireErrorCode::InvalidId,
-            message: error.to_string(),
+            message: format!(
+                "the requested {} is not well-formed; expected {}",
+                error.kind(),
+                error.expected()
+            ),
         })?;
         let Some(context) = self.capability_context() else {
             // Reachable only outside the host lifecycle: a store built without
@@ -113,27 +123,44 @@ impl HostState {
         // is the real bound and is far below the table's own capacity.
         self.capability_table()
             .push(entry)
-            .map_err(|error| AcquireError {
+            .map_err(|_| AcquireError {
                 code: AcquireErrorCode::HandleLimit,
-                message: error.to_string(),
+                message: "the capability handle table is full".to_owned(),
             })
     }
 }
 
 /// Map a broker refusal onto the `acquire` error surface, whole-set.
+///
+/// Messages are host-authored sentences, never the broker error's own
+/// rendering: that rendering names registration identities, activation
+/// identities, and Rust contract type paths - host internals a guest cannot
+/// act on and should not see through this boundary. The capability ID may
+/// appear, because the guest supplied it and it was validated before use.
 fn acquire_refusal(error: CapabilityBrokerError) -> AcquireError {
-    let message = error.to_string();
-    let code = match error {
-        CapabilityBrokerError::NotGranted { .. } => AcquireErrorCode::NotGranted,
+    let (code, message) = match error {
+        CapabilityBrokerError::NotGranted { capability_id, .. } => (
+            AcquireErrorCode::NotGranted,
+            format!("capability {capability_id} is not granted to this activation"),
+        ),
         // The stale-activation fence: the context outlived its activation's
         // scope, so every authority it could name is gone at once.
-        CapabilityBrokerError::ActivationInactive { .. } => AcquireErrorCode::Revoked,
+        CapabilityBrokerError::ActivationInactive { .. } => (
+            AcquireErrorCode::Revoked,
+            "the activation is closing or closed, and its grants closed with it".to_owned(),
+        ),
         // Withdrawn, dropped, or replaced: the immutable snapshot still names
         // the old exact registration and never follows a replacement, so a
         // fresh acquire after replacement lands here, not on `revoked`.
-        CapabilityBrokerError::ProviderUnavailable { .. } => AcquireErrorCode::Unavailable,
+        CapabilityBrokerError::ProviderUnavailable { capability_id, .. } => (
+            AcquireErrorCode::Unavailable,
+            format!("capability {capability_id}'s granted provider is withdrawn or replaced"),
+        ),
         // Granted, but not under the portable text contract this ABI carries.
-        CapabilityBrokerError::ContractTypeMismatch { .. } => AcquireErrorCode::Mismatched,
+        CapabilityBrokerError::ContractTypeMismatch { capability_id, .. } => (
+            AcquireErrorCode::Mismatched,
+            format!("capability {capability_id} is not granted under the portable text contract"),
+        ),
         // None of these four can escape `PluginStartContext::handle`: the two
         // exhaustions arise only in `CapabilityBroker::new`/`register`,
         // `DuplicateProvider` only in registration, and `ForeignRegistration`
@@ -143,7 +170,10 @@ fn acquire_refusal(error: CapabilityBrokerError) -> AcquireError {
         CapabilityBrokerError::BrokerIncarnationExhausted
         | CapabilityBrokerError::RegistrationIdExhausted
         | CapabilityBrokerError::DuplicateProvider { .. }
-        | CapabilityBrokerError::ForeignRegistration { .. } => AcquireErrorCode::Unavailable,
+        | CapabilityBrokerError::ForeignRegistration { .. } => (
+            AcquireErrorCode::Unavailable,
+            "the capability's registration is unavailable".to_owned(),
+        ),
     };
     AcquireError { code, message }
 }
@@ -186,9 +216,10 @@ impl HostState {
         let entry = self
             .capability_table_ref()
             .get(handle)
-            .map_err(|error| CallError {
+            .map_err(|_| CallError {
                 code: CallErrorCode::Failed,
-                message: format!("capability entry is not present: {error}"),
+                message: "the capability entry is not present in this activation's table"
+                    .to_owned(),
             })?;
         let answered = entry
             .handle
@@ -198,17 +229,27 @@ impl HostState {
     }
 }
 
-/// Map a handle refusal onto the `invoke` error surface, whole-set.
+/// Map a handle refusal onto the call error surface, whole-set.
+///
+/// Host-authored messages here for the same reason as [`acquire_refusal`]:
+/// the handle error's own rendering names registration and activation
+/// identities that must not cross the ABI.
 fn call_refusal(error: CapabilityHandleError) -> CallError {
-    let message = error.to_string();
-    let code = match error {
+    let (code, message) = match error {
         // Provider withdrawn or replaced, activation closing, or cancellation:
         // the handle folds them into one fail-closed refusal and so does the
         // ABI.
-        CapabilityHandleError::Revoked { .. } => CallErrorCode::Revoked,
-        // Requires the activity scope's admission space to run out, which has
-        // never been observed; mapped so the enum stays whole-set.
-        CapabilityHandleError::AdmissionExhausted { .. } => CallErrorCode::Exhausted,
+        CapabilityHandleError::Revoked { capability_id, .. } => (
+            CallErrorCode::Revoked,
+            format!("capability {capability_id}'s grant is revoked for this activation"),
+        ),
+        // Requires either the activity scope's or the registration gate's
+        // admission space to run out - two producers, one code - and neither
+        // has ever been observed; mapped so the enum stays whole-set.
+        CapabilityHandleError::AdmissionExhausted { capability_id, .. } => (
+            CallErrorCode::Exhausted,
+            format!("capability {capability_id} has no call admission left"),
+        ),
     };
     CallError { code, message }
 }

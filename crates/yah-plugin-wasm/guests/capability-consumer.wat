@@ -16,7 +16,8 @@
 ;;                 the outcome ("acquired" or `A<code>`)
 ;;   `d…` drop:    resource.drop the held handle ("dropped", or "nohand")
 ;;   anything else: invoke the held handle with the whole input; with no
-;;                 handle held, report the activate-time acquire code
+;;                 handle held, report the activate-time acquire code, or
+;;                 "nohand" when none was recorded (dropped, not denied)
 ;;
 ;; Structure follows `host-call-flood.wat`, with one addition it did not
 ;; need: `log` returns nothing, but `acquire` and `invoke` return strings, so
@@ -163,9 +164,15 @@
       (if (i32.eq (local.get $b) (i32.const 100))
         (then (return (call $drop-held))))
       (if (i32.eq (global.get $handle) (i32.const -1))
-        (then (return (call $answer
-          (call $render (i32.const 65) (global.get $acq-code))
-          (i32.const 2)))))
+        (then
+          ;; No refusal was ever recorded: the handle was dropped, not denied,
+          ;; and rendering the -1 sentinel would produce "A/" - a non-code
+          ;; that reads like an acquire refusal.
+          (if (i32.eq (global.get $acq-code) (i32.const -1))
+            (then (return (call $answer (i32.const 208) (i32.const 6)))))
+          (return (call $answer
+            (call $render (i32.const 65) (global.get $acq-code))
+            (i32.const 2)))))
       (call $cap-invoke (global.get $handle) (local.get $ptr) (local.get $len)
                         (i32.const 3072))
       (if (i32.eqz (i32.load8_u (i32.const 3072)))

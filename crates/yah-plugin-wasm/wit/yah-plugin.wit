@@ -22,6 +22,10 @@ interface cancellation {
 }
 
 interface capabilities {
+  // Case order is load-bearing for both error enums: the capability-consumer
+  // fixture reports discriminants as ASCII digits, and world_contract.rs
+  // freezes the ordered case lists, so a reorder is a deliberate contract
+  // change rather than a silent renumbering of test evidence.
   enum acquire-error-code {
     invalid-id,
     not-granted,

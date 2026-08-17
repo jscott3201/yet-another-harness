@@ -32,8 +32,8 @@
 //!
 //! Granted capabilities cross the ABI as opaque resources: each start permit's
 //! capability context rides in its activation's store, `acquire` resolves a
-//! grant into a table entry wrapping an activation-scoped handle, and every
-//! guest call re-enters the broker's revocation and fencing gates
+//! grant into a resource whose entry wraps an activation-scoped handle, and
+//! every guest call re-enters the broker's revocation and fencing gates
 //! ([`crate::capability`]).
 //!
 //! This driver does not load packages, meter fuel, or contain hostile guest
@@ -419,10 +419,12 @@ impl WasmComponentDriver {
     /// than selecting one from a corpus it owns. Every activation runs that
     /// component and calls its `activate`, so there is no plan queue to exhaust.
     ///
-    /// Returns the concrete driver rather than `Arc<dyn PluginDriver>` so a
-    /// caller holding it keeps the option of driver-specific evidence access;
-    /// tool calls themselves go through [`WasmObserver::call_fixture_tool`],
-    /// which is not part of the host contract.
+    /// Returns the concrete driver rather than `Arc<dyn PluginDriver>` because
+    /// the error type is this crate's own and the caller still chooses when to
+    /// unsize: an `Arc<Self>` coerces at the call that hands it to the host,
+    /// and nothing is lost by not doing it here. Tool calls go through
+    /// [`WasmObserver::call_fixture_tool`], which is not part of the host
+    /// contract.
     pub fn for_component(
         revision: PluginRevisionId,
         component: &[u8],
@@ -663,7 +665,21 @@ impl ActivationCore {
                     self.describe_stop("instantiation", &error)
                 ))
             })?;
-        *self.live.lock().await = Some(LiveInstance { store, bindings });
+        let displaced = self
+            .live
+            .lock()
+            .await
+            .replace(LiveInstance { store, bindings });
+        // One store per core, asserted rather than assumed: the live capability
+        // counter is shared through the observer, so a second store would read
+        // a ceiling the first store's entries still occupy, and the first
+        // store's entries would only release here - after the second had
+        // already consulted the count.
+        debug_assert!(
+            displaced.is_none(),
+            "an activation core must instantiate at most once"
+        );
+        drop(displaced);
         self.observation
             .resource
             .store(ResourceState::Live as u8, Ordering::Release);

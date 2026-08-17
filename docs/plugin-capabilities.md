@@ -80,9 +80,9 @@ Capability contract authors must not return or clone raw authority that bypasses
 the handle. Runtime adapters map these semantics onto authenticated opaque
 resource tables rather than serialize process-local IDs: the Wasm driver now
 does exactly this for providers registered under the portable [`TextCapability`]
-contract, wrapping each guest-held resource around an activation-scoped handle
-so every guest call re-enters `try_with` and its gates. Process adapters will
-follow the same shape.
+contract, keeping behind each guest-held resource an entry that wraps an
+activation-scoped handle, so every guest call re-enters `try_with` and its
+gates. Process adapters will follow the same shape.
 
 [`TextCapability`]: ../crates/yah-plugin-host/src/capability/text.rs
 

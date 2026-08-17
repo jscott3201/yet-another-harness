@@ -178,12 +178,12 @@ impl HostObserver {
         self.capability_call_refusals.load(Ordering::Acquire)
     }
 
-    /// Handles currently held live by the guest, on either release path.
+    /// Handles the guest currently holds live - a gauge, not a running total.
     ///
     /// Decremented when the guest calls `resource.drop` and equally when the
     /// store drops with handles still held, because both paths drop the table
-    /// entry - which is the property that makes this a release count rather
-    /// than a drop-call count.
+    /// entry - so the decrement is a release, not a `drop` call, and a guest
+    /// that never drops anything still reads zero here after teardown.
     pub fn live_capability_handles(&self) -> usize {
         self.live_capability_handles.load(Ordering::Acquire)
     }

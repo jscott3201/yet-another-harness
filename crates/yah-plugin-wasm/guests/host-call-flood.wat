@@ -1,8 +1,8 @@
 ;; Fixture guest: floods the host-call byte budget from a small memory.
 ;;
-;; The first fixture in this corpus that calls back into the host. Every other
-;; one imports nothing, so the guest-to-host path was enforced here and never
-;; entered by a fixture.
+;; The first fixture in this corpus that called back into the host; the
+;; capability-consumer fixture now does too. The rest import nothing, so this
+;; is where the byte-budget half of the guest-to-host path is entered.
 ;;
 ;; What it demonstrates is aliasing. The activation builds a 200-element list of
 ;; `log-field` records whose every key and value points at the SAME bytes - the

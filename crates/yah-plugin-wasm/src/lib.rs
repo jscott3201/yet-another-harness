@@ -16,9 +16,9 @@
 //! so one guest cannot starve another by computing.
 //!
 //! Granted capabilities reach a guest as opaque WIT resources: the authority
-//! is the activation-scoped handle `acquire` returns, never the import itself,
-//! and every use re-enters the broker's revocation and fencing gates
-//! ([`capability`]).
+//! is the resource `acquire` returns - activation-scoped through the broker
+//! handle behind it - never the import itself, and every use re-enters the
+//! broker's revocation and fencing gates ([`capability`]).
 //!
 //! This crate does not load plugin packages, meter fuel, or contain hostile
 //! guest code. Bounding what a guest costs is not isolating what it can reach,

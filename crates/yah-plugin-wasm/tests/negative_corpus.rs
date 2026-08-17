@@ -180,15 +180,18 @@ fn a_component_may_not_import_outside_the_world() {
 /// The rule refuses what is undeclared, not everything.
 ///
 /// Without this the previous test would pass against a driver that refused
-/// every import, including the two the world does declare - which would break
-/// every real guest while looking like containment.
+/// every import, including the three the world does declare - which would
+/// break every real guest while looking like containment. All three are here
+/// so a name added to the world cannot be over-refused without this control
+/// catching it.
 #[test]
 fn the_world_s_own_imports_are_not_refused() {
     let revision = revision(DriverConformanceCase::ReadyLifecycle, 'a').expect("fixture revision");
     let text = r#"(component
          (type $empty (instance))
          (import "yah:plugin/logging@0.1.0" (instance (type $empty)))
-         (import "yah:plugin/cancellation@0.1.0" (instance (type $empty))))"#;
+         (import "yah:plugin/cancellation@0.1.0" (instance (type $empty)))
+         (import "yah:plugin/capabilities@0.1.0" (instance (type $empty))))"#;
     assert!(
         WasmComponentDriver::for_component(
             revision.id().clone(),
@@ -196,7 +199,7 @@ fn the_world_s_own_imports_are_not_refused() {
             WasmLimits::default(),
         )
         .is_ok(),
-        "a component importing exactly the world's interfaces must build"
+        "a component declaring every world import must build"
     );
 }
 
