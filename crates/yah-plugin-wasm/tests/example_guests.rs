@@ -336,13 +336,15 @@ const REFUSAL_INPUTS: &[&str] = &["cap:hello"];
 /// disagree, not just the one that suits them.
 ///
 /// One test rather than three, because Nextest runs each test in its own
-/// process and the three properties are views of the same runs. Split, the pair compiled
-/// both components twice instead of once - the TypeScript one is the 12 MB half
-/// of that - and ran two multi-second compiles concurrently, mid-run, beside the
-/// two long subscription cases. The assertions stay separated, and each still
-/// names which property and which guest broke. The ungranted refusal pair
-/// lives here too, and for the same reason: it is a second activation of the
-/// same driver, not a second compile.
+/// process and the three properties are views of the same runs. When the
+/// first two properties were split as two tests, the pair compiled both
+/// components twice instead of once - the TypeScript one is the 12 MB half of
+/// that - and ran two multi-second compiles concurrently, mid-run, beside the
+/// two long subscription cases; a three-way split would compile them three
+/// times. The assertions stay separated, and each still names which property
+/// and which guest broke. The ungranted refusal pair lives here too, and for
+/// the same reason: it is a second activation of the same driver, not a
+/// second compile.
 ///
 /// What prompted it: the split failed the pre-push gate twice, both times on a
 /// three-`assert_eq!` test in another crate overrunning the suite's 1s
