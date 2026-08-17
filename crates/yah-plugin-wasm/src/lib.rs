@@ -25,6 +25,7 @@ pub mod driver;
 pub mod guest;
 pub mod host;
 pub mod limits;
+pub mod surface;
 
 pub use driver::{
     ResourceState, WasmActivationPlan, WasmComponentDriver, WasmDriverBuildError, WasmObserver,
@@ -32,6 +33,7 @@ pub use driver::{
 pub use guest::GuestProgram;
 pub use host::{HostObserver, HostState, LogRecord, RETAINED_LOG_RECORDS};
 pub use limits::{EpochTicker, GuestInterrupt, HOST_STACK_HEADROOM_BYTES, WasmLimits};
+pub use surface::{WORLD_IMPORTS, check_import_surface};
 
 /// Fully versioned WIT package the driver and contract tests share.
 pub const WIT_PACKAGE: &str = "yah:plugin@0.1.0";

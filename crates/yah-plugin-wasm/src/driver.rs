@@ -151,6 +151,24 @@ impl WasmActivationPlan {
         }
     }
 
+    /// Instantiate a guest that lifts more bytes than its memory holds.
+    pub const fn host_call_flood() -> Self {
+        Self {
+            guest: GuestProgram::HostCallFlood,
+            start: StartBehavior::CallActivate,
+            deactivate: DeactivateBehavior::Release,
+        }
+    }
+
+    /// Instantiate a guest with more tables than the host allows.
+    pub const fn many_tables() -> Self {
+        Self {
+            guest: GuestProgram::ManyTables,
+            start: StartBehavior::CallActivate,
+            deactivate: DeactivateBehavior::Release,
+        }
+    }
+
     /// Instantiate a guest that recurses until the depth bound stops it.
     pub const fn deep_recursion() -> Self {
         Self {
@@ -316,7 +334,17 @@ impl WasmComponentDriver {
             if let std::collections::hash_map::Entry::Vacant(slot) = components.entry(plan.guest) {
                 let component = Component::new(&engine, plan.guest.text()).map_err(|error| {
                     WasmDriverBuildError::new(format!(
-                        "fixture component {:?} did not compile: {error}",
+                        "fixture component {:?} did not compile: {}",
+                        plan.guest,
+                        full_cause(&error)
+                    ))
+                })?;
+                // The corpus is held to the same surface rule as an authored
+                // component. A fixture is the one guest the host wrote itself,
+                // so exempting it is how the rule would come to be untested.
+                crate::surface::check_import_surface(&engine, &component).map_err(|reason| {
+                    WasmDriverBuildError::new(format!(
+                        "fixture component {:?} was refused: {reason}",
                         plan.guest
                     ))
                 })?;
@@ -365,8 +393,16 @@ impl WasmComponentDriver {
         // cost a loader would cache: it dominates instantiation by two orders
         // of magnitude, and by three for a component built from JavaScript.
         let authored = Component::new(&engine, component).map_err(|error| {
-            WasmDriverBuildError::new(format!("authored component did not compile: {error}"))
+            WasmDriverBuildError::new(format!(
+                "authored component did not compile: {}",
+                full_cause(&error)
+            ))
         })?;
+        // Before a store, a limiter, or a deadline exists. A component whose
+        // declared surface the host will not honour is refused inert, which is
+        // where a package loader would want the refusal too.
+        crate::surface::check_import_surface(&engine, &authored)
+            .map_err(WasmDriverBuildError::new)?;
         let observations: Arc<Mutex<ObservationMap>> = Arc::new(Mutex::new(HashMap::new()));
         let observer = WasmObserver {
             observations: Arc::clone(&observations),
@@ -890,6 +926,26 @@ pub enum ResourceState {
     NotAcquired = 0,
     Live = 1,
     Released = 2,
+}
+
+/// Render an error and every cause behind it as one line.
+///
+/// Wasmtime keeps the useful half in the source chain. A truncated component, a
+/// core module handed to a component parser, and an unknown binary version all
+/// *display* as "failed to parse WebAssembly module" and differ only
+/// underneath, so formatting with `{error}` tells an operator that something was
+/// wrong with the bytes and nothing about which thing - and those want different
+/// responses. Joined on one line rather than printed as an `anyhow` report,
+/// because this ends up inside a single-line refusal summary.
+fn full_cause(error: &wasmtime::Error) -> String {
+    let mut rendered = String::new();
+    for (depth, cause) in error.chain().enumerate() {
+        if depth > 0 {
+            rendered.push_str(": ");
+        }
+        rendered.push_str(&cause.to_string());
+    }
+    rendered
 }
 
 /// Name the limit that stopped a guest, rather than pass the trap through raw.

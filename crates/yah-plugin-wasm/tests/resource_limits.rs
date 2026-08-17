@@ -584,3 +584,183 @@ async fn the_same_recursion_completes_under_a_bound_that_can_afford_it() {
         .await
         .expect("cleanup completes");
 }
+
+/// A guest may not spend more host bytes on one call than the budget allows.
+///
+/// The memory ceiling cannot stand in for this. The fixture's whole memory is
+/// one 64 KiB page, and it still asks the host to lift roughly six megabytes,
+/// because every element of the list it logs aliases the same buffer. A bound
+/// on what the guest HOLDS says nothing about what one call COSTS.
+///
+/// `host_call_bytes` is Wasmtime's hostcall fuel, so exhaustion is a trap on the
+/// guest's side rather than a value the host declines to read.
+#[tokio::test]
+async fn a_guest_may_not_lift_more_bytes_than_its_host_call_budget() {
+    let mut rig = Rig::new("wasm.limits.hostcall", 'b');
+    let limits = WasmLimits {
+        host_call_bytes: 64 * 1024,
+        ..test_limits()
+    };
+    let (driver, observer) = driver_with(
+        &rig.revision,
+        vec![WasmActivationPlan::host_call_flood()],
+        limits,
+    );
+
+    let mut activation =
+        HostPluginActivation::prepare(&mut rig.slot, rig.epoch, &rig.broker, &rig.grants, driver)
+            .expect("preparation succeeds");
+    let id = activation.id().clone();
+
+    let outcome = within_kill_bound(
+        "the host-call byte budget",
+        activation.activate(&rig.registry),
+    )
+    .await;
+    let failure = match outcome {
+        Err(PluginStartError::Driver { failure, .. }) => failure,
+        other => panic!("a guest past its host-call budget must fail activation, got {other:?}"),
+    };
+    assert_eq!(failure.kind(), DriverActivationErrorKind::Failed);
+    assert!(
+        !failure.summary().contains("call deadline"),
+        "the budget refused this, not the deadline: {}",
+        failure.summary()
+    );
+
+    activation.finish_stop().await.expect("cleanup completes");
+    assert_eq!(observer.resource_state(&id), Ok(ResourceState::Released));
+}
+
+/// The control: the same aliasing guest under a budget that can afford it.
+///
+/// Without this, the case above cannot tell a budget that refused from a
+/// fixture that would have failed anyway. The same guest, the same driver, and
+/// only `host_call_bytes` differs.
+#[tokio::test]
+async fn the_same_flooding_guest_activates_under_a_budget_that_can_afford_it() {
+    let mut rig = Rig::new("wasm.limits.hostcall.ok", 'c');
+    let limits = WasmLimits {
+        host_call_bytes: 64 * 1024 * 1024,
+        ..generous_limits()
+    };
+    let (driver, observer) = driver_with(
+        &rig.revision,
+        vec![WasmActivationPlan::host_call_flood()],
+        limits,
+    );
+
+    let mut activation =
+        HostPluginActivation::prepare(&mut rig.slot, rig.epoch, &rig.broker, &rig.grants, driver)
+            .expect("preparation succeeds");
+    let id = activation.id().clone();
+
+    within_kill_bound("the generous budget", activation.activate(&rig.registry))
+        .await
+        .expect("the same guest activates when the budget can afford the call");
+    assert_eq!(observer.resource_state(&id), Ok(ResourceState::Live));
+
+    // The pair is the amplification proof on its own: the refusing half sets the
+    // budget to 64 KiB, which is the whole of this guest's memory, and it still
+    // ran out. A call whose cost were bounded by what the guest holds could not
+    // do that.
+    //
+    // Corroborated here by what the host had to clip. The guest declares 200
+    // values of 30,000 bytes each; the host keeps `max_log_fields` of them and
+    // clips every one to `max_log_message_bytes`, so a clip count at the field
+    // ceiling means those values really did arrive at full size.
+    let host = observer
+        .host_observer(&id)
+        .expect("a live activation has a host observer");
+    assert_eq!(
+        host.truncated_values(),
+        WasmLimits::default().max_log_fields,
+        "every retained field's value should have arrived over the ceiling and been clipped"
+    );
+
+    let (slot, _handle) = activation.release_active().expect("active releases");
+    let removed = DesiredComponentState::removed(slot.generation(2));
+    slot.reconcile(&rig.registry, removed)
+        .expect("component begins stopping");
+    slot.finish_stop(rig.epoch)
+        .await
+        .expect("cleanup completes");
+    assert_eq!(observer.resource_state(&id), Ok(ResourceState::Released));
+}
+
+/// A guest may not hold more tables than the host allows.
+///
+/// The table twin of the memory-count pair. Until this case the two table
+/// ceilings had unit evidence only: nothing drove a real component past either,
+/// so `max_tables` was a field the driver set and nothing proved it honoured.
+#[tokio::test]
+async fn a_guest_may_not_hold_more_tables_than_the_host_allows() {
+    let mut rig = Rig::new("wasm.limits.tables", 'd');
+    let (driver, observer) = driver(&rig.revision, vec![WasmActivationPlan::many_tables()]);
+
+    let mut activation =
+        HostPluginActivation::prepare(&mut rig.slot, rig.epoch, &rig.broker, &rig.grants, driver)
+            .expect("preparation succeeds");
+    let id = activation.id().clone();
+
+    let outcome = within_kill_bound("the table count", activation.activate(&rig.registry)).await;
+    let failure = match outcome {
+        Err(PluginStartError::Driver { failure, .. }) => failure,
+        other => panic!("a guest with too many tables must fail activation, got {other:?}"),
+    };
+    assert_eq!(failure.kind(), DriverActivationErrorKind::Failed);
+    assert!(
+        !failure.summary().contains("call deadline"),
+        "a count ceiling refuses; it does not interrupt: {}",
+        failure.summary()
+    );
+
+    activation.finish_stop().await.expect("cleanup completes");
+    // `NotAcquired`, not `Released`. A count ceiling is read while the store is
+    // being instantiated, so the activation never got as far as acquiring the
+    // resource and there is nothing for teardown to release. The host-call
+    // budget above is the contrast: that one refuses a call on a store that
+    // already exists, and its activation does reach `Released`.
+    assert_eq!(observer.resource_state(&id), Ok(ResourceState::NotAcquired));
+}
+
+/// The control: the same empty tables under a count that allows them.
+///
+/// Every table the fixture declares is empty, so the element ceiling never
+/// charges for them. Only the count differs between this and the case above,
+/// which is what makes that one attributable to `max_tables`.
+#[tokio::test]
+async fn the_same_empty_tables_are_admitted_when_the_count_allows_them() {
+    let mut rig = Rig::new("wasm.limits.tables.ok", 'e');
+    let limits = WasmLimits {
+        max_tables: 16,
+        ..generous_limits()
+    };
+    let (driver, observer) = driver_with(
+        &rig.revision,
+        vec![WasmActivationPlan::many_tables()],
+        limits,
+    );
+
+    let mut activation =
+        HostPluginActivation::prepare(&mut rig.slot, rig.epoch, &rig.broker, &rig.grants, driver)
+            .expect("preparation succeeds");
+    let id = activation.id().clone();
+
+    within_kill_bound(
+        "the generous table count",
+        activation.activate(&rig.registry),
+    )
+    .await
+    .expect("empty tables within the count are admitted");
+    assert_eq!(observer.resource_state(&id), Ok(ResourceState::Live));
+
+    let (slot, _handle) = activation.release_active().expect("active releases");
+    let removed = DesiredComponentState::removed(slot.generation(2));
+    slot.reconcile(&rig.registry, removed)
+        .expect("component begins stopping");
+    slot.finish_stop(rig.epoch)
+        .await
+        .expect("cleanup completes");
+    assert_eq!(observer.resource_state(&id), Ok(ResourceState::Released));
+}

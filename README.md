@@ -256,8 +256,18 @@ convenient input makes an equivalence claim look true. Ceilings are proved in
 pairs — the same guest refused under a tight
 ceiling and admitted under a generous one — so a failure is attributable to the
 ceiling rather than to the fixture. Those bound a guest's cost, not its
-authority: guest code still runs in the host process, so the driver runs only
-its own fixtures and makes no capability-transport, WASI, or sandbox claim.
+authority: guest code still runs in the host process, so the driver makes no
+capability-transport, WASI, or sandbox claim.
+
+What a component is allowed to *declare* is checked separately, before it runs.
+Malformed bytes are refused with the cause named rather than collapsed into one
+message, and a guest may not declare an import the world does not — including an
+empty instance import, which Wasmtime admits on its own and which compiled,
+activated, and answered a tool call here before the check existed. Nothing
+escaped through it, since an empty instance carries no functions; what it cost
+was the claim, because "the world is the contract" has to mean the whole
+declared surface. Extra exports are still admitted unchecked, and nothing bounds
+what a component costs to compile.
 
 The repository already contains a model-free Rust kernel and evidence harness:
 

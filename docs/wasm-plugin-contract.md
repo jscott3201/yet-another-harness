@@ -262,14 +262,22 @@ This slice does not provide:
 
 - a package loader, admission path, or any execution of code that did not come
   from the checked-in fixture corpus;
-- guest SDK artifacts or a Rust/TypeScript component build;
+- guest SDK artifacts. The Rust and TypeScript example guests WSM-005 added are
+  an authoring example and a contract check, not an SDK;
 - capability-resource tables or graph, memory, artifact, tool-registry, or
   durable-effect host APIs, and no route for a guest to reach a granted
   capability;
 - WIT async/streams, fuel metering, or per-call output bounds on the ABI
   itself;
-- WASI ambient authority, sandbox enforcement, malformed-component coverage,
-  or cross-runtime equivalence.
+- WASI ambient authority, sandbox enforcement, or cross-runtime equivalence;
+- any bound on what a component costs to *compile*. `for_component` validates
+  and compiles before a store, a limiter, or a deadline exists, and nothing
+  caps input size, section count, or compile time. A component with 20,000
+  trivial functions is 385 KB and compiles in about a second; nothing here
+  refuses a larger one.
+- any rule about a component's *exports* beyond requiring the world's own. A
+  guest that also exports an undeclared interface is admitted, because the host
+  binds the exports it wants and never enumerates the rest.
 
 WIT strings and lists are not byte-bounded by the ABI, and the memory ceiling
 does not bound them either: a guest can point every element of a list at one

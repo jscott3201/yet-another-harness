@@ -154,3 +154,37 @@ fn interface_functions_remain_small_and_explicit() {
         assert_eq!(functions(&resolve, id), expected_functions);
     }
 }
+
+/// The driver's import allowlist is the world's imports, not a copy that drifted.
+///
+/// `surface::check_import_surface` refuses anything outside `WORLD_IMPORTS`, and
+/// that constant is hand-written because the driver has no WIT parser at
+/// runtime - `wit-parser` is a dev-dependency. So the constant is only as good
+/// as this test: add an import to the world without adding it there and the
+/// driver would refuse every guest that uses it, which is a failure this catches
+/// at the contract rather than in the field.
+#[test]
+fn the_import_allowlist_matches_the_world() {
+    let mut resolve = Resolve::default();
+    let (package_id, _) = resolve
+        .push_dir(WIT_PATH)
+        .expect("canonical WIT package parses");
+    let world_id = resolve
+        .select_world(&[package_id], Some(yah_plugin_wasm::WIT_WORLD))
+        .expect("canonical world resolves");
+
+    let declared = resolve.worlds[world_id]
+        .imports
+        .iter()
+        .map(|(key, item)| interface_identity(&resolve, key, item))
+        .collect::<BTreeSet<_>>();
+    let allowed = yah_plugin_wasm::WORLD_IMPORTS
+        .iter()
+        .map(|name| (*name).to_owned())
+        .collect::<BTreeSet<_>>();
+
+    assert_eq!(
+        declared, allowed,
+        "the world's imports and the driver's allowlist must be the same set"
+    );
+}
