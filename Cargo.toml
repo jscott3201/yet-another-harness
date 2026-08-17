@@ -5,6 +5,7 @@ members = [
     "crates/yah-compose",
     "crates/yah-kernel",
     "crates/yah-plugin-host",
+    "crates/yah-plugin-ipc",
     "crates/yah-plugin-wasm",
 ]
 

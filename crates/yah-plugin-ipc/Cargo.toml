@@ -1,0 +1,18 @@
+[package]
+name = "yah-plugin-ipc"
+version = "0.0.1"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+description = "Bounded framed bidirectional worker protocol for YAH process plugins"
+
+# Deliberately sans-io: the codec is an incremental byte-fed decoder and the
+# session is a pure state machine with an injected clock, so every fixture is
+# deterministic and the process driver (IPC-002) owns the only real IO.
+[dependencies]
+blake3.workspace = true
+schemars.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+ts-rs.workspace = true

@@ -1,0 +1,574 @@
+{
+  "$defs": {
+    "ArtifactOffer": {
+      "additionalProperties": false,
+      "description": "A spilled result: the replier keeps the bytes and the caller pull-reads\nthem in bounded chunks, then must release the handle. The offer names\nsize and digest up front so the reader can refuse before the first pull,\nand verify after the last.",
+      "properties": {
+        "bytes": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "digest_blake3": {
+          "description": "BLAKE3 of the full content, hex. Whoever stores the artifact\ndurably mints its durable reference from bytes it hashed itself —\na wire offer is a claim, not provenance.",
+          "maxLength": 64,
+          "minLength": 64,
+          "type": "string"
+        },
+        "handle": {
+          "$ref": "#/$defs/HandleId"
+        },
+        "media_type": {
+          "maxLength": 128,
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "handle",
+        "bytes",
+        "media_type",
+        "digest_blake3"
+      ],
+      "type": "object"
+    },
+    "CallId": {
+      "description": "One call or one stream, numbered by the side that initiated it.\n\nWire form is a JSON number in `1..=2^53-1` so every SDK reads the same\nvalue; zero is reserved as never-valid. `number` on the TypeScript side,\nnot `bigint`: `JSON.parse` produces a `number`, and the I-JSON bound is\nexactly what makes that safe.",
+      "format": "uint64",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "CancelReason": {
+      "description": "Who ended a cancelled call.",
+      "oneOf": [
+        {
+          "const": "requested",
+          "description": "The caller asked.",
+          "type": "string"
+        },
+        {
+          "const": "enforced",
+          "description": "The receiver's own enforcement ended it (deadline, shutdown).",
+          "type": "string"
+        }
+      ]
+    },
+    "CancelTarget": {
+      "description": "The two things a cancel can mean: stop working, or keep working but stop\nstreaming to me.",
+      "enum": [
+        "call",
+        "stream"
+      ],
+      "type": "string"
+    },
+    "HandleId": {
+      "description": "A live resource named by its owner: a capability handle the host minted,\nor an artifact handle minted by whichever side holds the bytes.",
+      "format": "uint64",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "HandleKind": {
+      "description": "What a handle names.",
+      "oneOf": [
+        {
+          "const": "capability",
+          "description": "A brokered capability the host granted for this activation.",
+          "type": "string"
+        },
+        {
+          "const": "artifact",
+          "description": "Spilled bytes held by one side for the other to pull-read.",
+          "type": "string"
+        }
+      ]
+    },
+    "Outcome": {
+      "description": "How a call ended. Three-valued on purpose: cancelled is an outcome, not\nan error — a call that was asked to stop and stopped did what it was\ntold. A completion racing a cancel is legal and the completion wins.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "description": "The result, inline. Domain failures ride here as data the method's\ncontract defines — a capability refusal is an answer, exactly as in\nthe Wasm lane — so the protocol error family stays closed and small.",
+          "properties": {
+            "outcome": {
+              "const": "ok",
+              "type": "string"
+            },
+            "result": true
+          },
+          "required": [
+            "outcome",
+            "result"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "The result was over the inline ceiling and spilled: the replier\nholds the bytes behind an artifact handle for the caller to\npull-read. Never a truncated inline result.",
+          "properties": {
+            "artifact": {
+              "$ref": "#/$defs/ArtifactOffer"
+            },
+            "outcome": {
+              "const": "spilled",
+              "type": "string"
+            }
+          },
+          "required": [
+            "outcome",
+            "artifact"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "The protocol boundary failed the call.",
+          "properties": {
+            "error": {
+              "$ref": "#/$defs/WireError"
+            },
+            "outcome": {
+              "const": "err",
+              "type": "string"
+            }
+          },
+          "required": [
+            "outcome",
+            "error"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "outcome": {
+              "const": "cancelled",
+              "type": "string"
+            },
+            "reason": {
+              "$ref": "#/$defs/CancelReason"
+            }
+          },
+          "required": [
+            "outcome",
+            "reason"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "StreamClass": {
+      "description": "The two delivery classes, shared vocabulary with the kernel's event\nlane: lossless data consumes credit and the producer must stop at zero;\nlossy data may be dropped oldest-first under pressure, counted.",
+      "enum": [
+        "lossless",
+        "lossy"
+      ],
+      "type": "string"
+    },
+    "WireError": {
+      "additionalProperties": false,
+      "description": "The closed protocol-boundary error family, keyed by the caller's\nrecovery action. Domain failures never appear here — they are data on a\nsuccessful call — and messages carry no host path, registration id, or\ntype name, because an error that leaks internals is a tour a hostile\nworker did not have to ask for.",
+      "properties": {
+        "kind": {
+          "$ref": "#/$defs/WireErrorKind"
+        },
+        "message": {
+          "maxLength": 512,
+          "type": "string"
+        },
+        "reconcile_required": {
+          "description": "Whether the caller must reconcile external state before retrying —\nset on every outcome-unknown settlement.",
+          "type": "boolean"
+        },
+        "retryable": {
+          "description": "Whether the same call may be retried on this session as-is.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "kind",
+        "message",
+        "retryable",
+        "reconcile_required"
+      ],
+      "type": "object"
+    },
+    "WireErrorKind": {
+      "description": "Closed within a negotiated version. An unknown member is `invalid-frame`\nand the connection ends; evolution happens at the handshake version\ngate.",
+      "oneOf": [
+        {
+          "const": "unsupported-version",
+          "description": "No version in the hello is one the host speaks.",
+          "type": "string"
+        },
+        {
+          "const": "unknown-required-feature",
+          "description": "A required feature is unknown to the receiving side.",
+          "type": "string"
+        },
+        {
+          "const": "negotiation-required",
+          "description": "A frame arrived before negotiation completed, or a second hello.",
+          "type": "string"
+        },
+        {
+          "const": "invalid-frame",
+          "description": "The frame failed strict decoding: bad JSON, duplicate member names,\nnumbers outside the I-JSON safe range, an unknown tag or enum\nmember, or a field violating its bound.",
+          "type": "string"
+        },
+        {
+          "const": "frame-too-large",
+          "description": "The length prefix exceeded the frame class's byte bound.",
+          "type": "string"
+        },
+        {
+          "const": "payload-too-large",
+          "description": "A payload exceeded its class bound inside a well-formed frame.",
+          "type": "string"
+        },
+        {
+          "const": "unknown-call",
+          "description": "A reply, cancel, credit, or stream frame named a call id that is not\nin flight in that direction.",
+          "type": "string"
+        },
+        {
+          "const": "duplicate-call",
+          "description": "A call id already in flight in the same direction was reused.",
+          "type": "string"
+        },
+        {
+          "const": "unknown-method",
+          "description": "The receiver does not offer the named method.",
+          "type": "string"
+        },
+        {
+          "const": "resource-exhausted",
+          "description": "A directional in-flight ceiling, credit window, or handle ceiling\nwas exceeded; refused rather than queued.",
+          "type": "string"
+        },
+        {
+          "const": "deadline-exceeded",
+          "description": "The call's millisecond budget expired; the host is the enforcer.",
+          "type": "string"
+        },
+        {
+          "const": "cancelled",
+          "description": "The session ended in an orderly goodbye before this call's terminal\nframe arrived. Distinct from a worker terminal with\n[`Outcome::Cancelled`], which is the call itself answering.",
+          "type": "string"
+        },
+        {
+          "const": "unknown-handle",
+          "description": "A release, read, or use named a handle the owner does not hold.",
+          "type": "string"
+        },
+        {
+          "const": "invalid-read",
+          "description": "An artifact pull-read went outside the offered byte range or over\nthe per-read bound.",
+          "type": "string"
+        },
+        {
+          "const": "outcome-unknown",
+          "description": "The peer is gone and the outcome of in-flight work is unknowable\nfrom this side. Reconciliation is required before unsafe repetition.",
+          "type": "string"
+        },
+        {
+          "const": "internal",
+          "description": "The receiving side failed internally; details stay on its side.",
+          "type": "string"
+        }
+      ]
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "Everything a worker may put on the wire.",
+  "oneOf": [
+    {
+      "additionalProperties": false,
+      "description": "First frame on the wire, exactly once. Anything else first — or a\nsecond hello — is refused and the connection ends.",
+      "properties": {
+        "features": {
+          "description": "Features the worker can use if offered.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "frame": {
+          "const": "hello",
+          "type": "string"
+        },
+        "protocol_versions": {
+          "description": "Protocol versions the worker can speak, best-preferred first.",
+          "items": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "type": "array"
+        },
+        "required_features": {
+          "description": "Features the worker cannot run without. An entry the host does not\nknow is a refusal — fail closed on unknown required features.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "sdk_name": {
+          "maxLength": 64,
+          "minLength": 1,
+          "type": "string"
+        },
+        "sdk_version": {
+          "maxLength": 64,
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "frame",
+        "protocol_versions",
+        "sdk_name",
+        "sdk_version",
+        "features",
+        "required_features"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "description": "One request. The initiator mints the id; the receiver answers with\nexactly one terminal [`Reply`] carrying the same id, whatever else\nhappens — cancellation included.",
+      "properties": {
+        "call_id": {
+          "$ref": "#/$defs/CallId"
+        },
+        "deadline_ms": {
+          "description": "Relative millisecond budget, not an instant: a sandboxed worker that\nhas been denied clock access can still count down, and the host\nenforces the deadline regardless of what the worker does.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "frame": {
+          "const": "call",
+          "type": "string"
+        },
+        "method": {
+          "maxLength": 128,
+          "minLength": 1,
+          "type": "string"
+        },
+        "payload": true,
+        "stream": {
+          "description": "Whether the caller wants incremental results. A receiver that agrees\nanswers with [`StreamOpen`] before any data; the terminal reply still\nends the call either way.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "frame",
+        "call_id",
+        "method",
+        "stream",
+        "payload"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "description": "The single terminal frame of a call.",
+      "properties": {
+        "call_id": {
+          "$ref": "#/$defs/CallId"
+        },
+        "frame": {
+          "const": "reply",
+          "type": "string"
+        },
+        "outcome": {
+          "$ref": "#/$defs/Outcome"
+        }
+      },
+      "required": [
+        "frame",
+        "call_id",
+        "outcome"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "description": "Acknowledges a `stream: true` call and grants initial credit. Mandatory\nbefore any data frame, so \"did this stream ever start\" is decidable.",
+      "properties": {
+        "call_id": {
+          "$ref": "#/$defs/CallId"
+        },
+        "credit": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "frame": {
+          "const": "stream-open",
+          "type": "string"
+        }
+      },
+      "required": [
+        "frame",
+        "call_id",
+        "credit"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "description": "One incremental item on a stream. `seq` is monotonic from zero per\nstream; `more: false` marks the last data frame, after which only the\nterminal reply may follow — end-of-stream is decidable frame by frame,\nwithout a timeout.",
+      "properties": {
+        "call_id": {
+          "$ref": "#/$defs/CallId"
+        },
+        "class": {
+          "$ref": "#/$defs/StreamClass"
+        },
+        "dropped": {
+          "description": "Cumulative count of lossy frames dropped before this one, so a\nconsumer can see the gap it was spared rather than infer it.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "frame": {
+          "const": "stream-data",
+          "type": "string"
+        },
+        "more": {
+          "type": "boolean"
+        },
+        "payload": true,
+        "seq": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "frame",
+        "call_id",
+        "seq",
+        "more",
+        "class",
+        "dropped",
+        "payload"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "description": "Grants the producer more frames of credit on one stream. Credit is the\nwire contract for backpressure: in-process advisories like `drain()` are\nsuggestions a hostile producer ignores, a spent window is a rule the\nreceiver enforces.",
+      "properties": {
+        "additional": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "call_id": {
+          "$ref": "#/$defs/CallId"
+        },
+        "frame": {
+          "const": "credit",
+          "type": "string"
+        }
+      },
+      "required": [
+        "frame",
+        "call_id",
+        "additional"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "description": "Ask the receiver to stop. Advisory by nature — Node and CPython can only\nhonor it at cooperative points — which is why the call still owes its\nterminal frame and the host keeps its own deadline enforcement.",
+      "properties": {
+        "call_id": {
+          "$ref": "#/$defs/CallId"
+        },
+        "frame": {
+          "const": "cancel",
+          "type": "string"
+        },
+        "target": {
+          "$ref": "#/$defs/CancelTarget"
+        }
+      },
+      "required": [
+        "frame",
+        "call_id",
+        "target"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "description": "Release a handle to its owner. Explicit and acknowledged: finalizers do\nnot run reliably in any lane this protocol serves, so release is a\ntwo-party fact, not a hope.",
+      "properties": {
+        "frame": {
+          "const": "release",
+          "type": "string"
+        },
+        "handle": {
+          "$ref": "#/$defs/HandleId"
+        },
+        "kind": {
+          "$ref": "#/$defs/HandleKind"
+        }
+      },
+      "required": [
+        "frame",
+        "handle",
+        "kind"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "description": "The owner confirms the handle is gone and its id may never be reused\nwithin the session — the acknowledgement closes the release/reuse race.",
+      "properties": {
+        "frame": {
+          "const": "release-ack",
+          "type": "string"
+        },
+        "handle": {
+          "$ref": "#/$defs/HandleId"
+        },
+        "kind": {
+          "$ref": "#/$defs/HandleKind"
+        }
+      },
+      "required": [
+        "frame",
+        "handle",
+        "kind"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "description": "Orderly end. Distinguishes a worker that finished from one that was\nlost: after a goodbye, in-flight work settles as cancelled; after a\nbare disconnect it settles as outcome-unknown.",
+      "properties": {
+        "frame": {
+          "const": "goodbye",
+          "type": "string"
+        },
+        "reason": {
+          "maxLength": 256,
+          "type": "string"
+        }
+      },
+      "required": [
+        "frame",
+        "reason"
+      ],
+      "type": "object"
+    }
+  ],
+  "title": "WorkerMessage"
+}

@@ -17,6 +17,7 @@ proved.
 | [Plugin capabilities](plugin-capabilities.md) | Implemented activation-scoped effective grants, exact typed registrations, mediated handles, and revocation limits |
 | [Local plugin authoring](plugin-authoring.md) | Runnable trusted built-in consumer, example-only host capability, exact-grant lifecycle, and explicit limits |
 | [Wasm plugin contract](wasm-plugin-contract.md) | Provisional WIT world, the Wasmtime driver that executes it, version axes, static import semantics, and runtime limits |
+| [Worker process wire protocol](plugin-worker-protocol.md) | Framed strict-JSON protocol v1 for future Node/CPython workers: handshake, calls, streams, cancellation, artifact spill, and resource handles |
 | [Application protocol](protocol.md) | Current Adapter 1 experiment; not the future plugin SDK or a stable public protocol |
 | [Development](development.md) | Workspace setup, local gates, file-size policy, and pull request checklist |
 
@@ -37,5 +38,12 @@ artifacts:
 - `generated/protocol/server.schema.json`
 - `generated/protocol/protocol.ts`
 
-Run `cargo run --locked -p yah-kernel --bin generate-protocol` after changing
-protocol types. The local gate rejects stale generated files.
+The worker protocol types in `crates/yah-plugin-ipc/src/types.rs` generate
+three more:
+
+- `generated/worker-protocol/worker.schema.json`
+- `generated/worker-protocol/host.schema.json`
+- `generated/worker-protocol/protocol.ts`
+
+Run `cargo run --locked --manifest-path tools/protocol-codegen/Cargo.toml`
+after changing either set. The local gate rejects stale generated files.
