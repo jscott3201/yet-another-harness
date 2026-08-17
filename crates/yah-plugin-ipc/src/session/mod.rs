@@ -208,8 +208,15 @@ pub enum AppError {
     /// An outbound payload over its frame class's byte bound. The session
     /// refuses to queue a frame the other side is contracted to kill.
     PayloadTooLarge { bytes: usize },
+    /// An outbound field outside the bound the generated schemas publish —
+    /// the same admission line the session holds inbound frames to, named
+    /// with the same string.
+    InvalidField(&'static str),
     /// A release for that worker-held handle is already on the wire.
     ReleasePending,
+    /// The worker already acknowledged releasing that handle; its id is
+    /// spent.
+    AlreadyReleased,
     /// A stream item with no credit left, a credit grant over the ceiling,
     /// a second stream open, or an item after the last one.
     StreamViolation(&'static str),
@@ -244,8 +251,12 @@ pub struct HostSession {
     /// Live handles of both kinds, the gauge the `live_handles` ceiling
     /// bounds. Artifact handles count too: each pins its bytes host-side.
     live_handle_count: u32,
-    /// Worker-held handles the host has asked to release, awaiting the ack.
-    pending_worker_releases: BTreeSet<HandleId>,
+    /// Worker-held handles the host has asked to release, awaiting the
+    /// ack, with the kind the release named — an ack must echo it back.
+    pending_worker_releases: BTreeMap<HandleId, HandleKind>,
+    /// Worker-held handle ids the worker confirmed released; spent forever,
+    /// so a second release for one is the application's bug to hear about.
+    retired_worker_handles: BTreeSet<HandleId>,
     outbox: Vec<HostMessage>,
     events: Vec<SessionEvent>,
 }
@@ -266,7 +277,8 @@ impl HostSession {
             retired_handles: BTreeSet::new(),
             next_handle: 1,
             live_handle_count: 0,
-            pending_worker_releases: BTreeSet::new(),
+            pending_worker_releases: BTreeMap::new(),
+            retired_worker_handles: BTreeSet::new(),
             outbox: Vec::new(),
             events: Vec::new(),
         }
@@ -375,6 +387,17 @@ impl HostSession {
             self.fatal(WireErrorKind::FrameTooLarge, "control frame over bound");
             return;
         }
+        match self.phase {
+            // Bounds are checked per phase, not here: a bounds-violating
+            // frame before negotiation still deserves the refuse frame
+            // that names the rule, and `fatal` sends nothing pre-accept.
+            Phase::AwaitingHello => self.on_pre_negotiation(message),
+            Phase::Active => self.on_active(message),
+            Phase::Closed => {}
+        }
+    }
+
+    fn on_active(&mut self, message: WorkerMessage) {
         if let Err(reason) = validate_bounds(&message) {
             // Field bounds are part of strict decoding: the generated
             // schemas carry the same numbers, so a schema-conformant SDK
@@ -383,14 +406,6 @@ impl HostSession {
             self.fatal(WireErrorKind::InvalidFrame, reason);
             return;
         }
-        match self.phase {
-            Phase::AwaitingHello => self.on_pre_negotiation(message),
-            Phase::Active => self.on_active(message),
-            Phase::Closed => {}
-        }
-    }
-
-    fn on_active(&mut self, message: WorkerMessage) {
         match message {
             WorkerMessage::Hello(_) => {
                 self.fatal(WireErrorKind::NegotiationRequired, "second hello")
@@ -418,6 +433,9 @@ impl HostSession {
             self.settle_host_call_locally(call_id, WireErrorKind::Cancelled, false);
         }
         self.reclaim_all_handles();
+        // Acks that will never come: worker-held handles die with the
+        // worker, so pending releases are void, not still owed.
+        self.pending_worker_releases.clear();
         self.phase = Phase::Closed;
     }
 
@@ -431,6 +449,7 @@ impl HostSession {
             self.settle_host_call_locally(call_id, WireErrorKind::OutcomeUnknown, true);
         }
         self.reclaim_all_handles();
+        self.pending_worker_releases.clear();
         if self.phase == Phase::Active {
             self.outbox.push(HostMessage::Goodbye(Goodbye {
                 reason: bounded_reason(kind),
@@ -475,7 +494,9 @@ pub(crate) fn kind_name(kind: WireErrorKind) -> &'static str {
 /// `#[schemars]` attributes on the wire types — the generated schemas and
 /// this function must refuse the same frames. Bounds that depend on
 /// negotiated config (credit ceilings, in-flight ceilings) are enforced in
-/// their handlers, not here.
+/// their handlers, not here. Runs on active-phase frames; the first hello's
+/// bounds are checked in negotiation, where a violation still earns the
+/// refuse frame that names the rule.
 fn validate_bounds(message: &WorkerMessage) -> Result<(), &'static str> {
     // The upper arm is defense in depth: strict parsing already refuses any
     // integer past the I-JSON bound, so only zero can reach this check from

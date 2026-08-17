@@ -47,8 +47,10 @@ live_handles: number,
  */
 initial_stream_credit: number, 
 /**
- * Ceiling any stream's credit window may reach, open grant and
- * widenings summed.
+ * Ceiling on one stream's outstanding credit — the unspent frames a
+ * producer may hold at a moment, checked at open and at every
+ * widening. Spent credit leaves the window, so grants over a stream's
+ * lifetime may sum past this.
  */
 max_stream_credit: number, };
 
@@ -57,8 +59,10 @@ export type Call = { call_id: CallId, method: string,
  * Relative millisecond budget, not an instant: a sandboxed worker that
  * has been denied clock access can still count down, and the host
  * enforces the deadline regardless of what the worker does.
+ * `nullable` because serde writes an absent budget as `null` — the
+ * TypeScript type must admit the value actually on the wire.
  */
-deadline_ms?: number, 
+deadline_ms?: number | null, 
 /**
  * Whether the caller wants incremental results. A receiver that agrees
  * answers with [`StreamOpen`] before any data; the terminal reply still
@@ -95,7 +99,11 @@ export type ReleaseAck = { handle: HandleId, kind: HandleKind, };
 
 export type HandleKind = "capability" | "artifact";
 
-export type ArtifactOffer = { handle: HandleId, bytes: number, media_type: string, 
+export type ArtifactOffer = { handle: HandleId, 
+/**
+ * At least one: a spill of zero bytes is not a spill, on either side.
+ */
+bytes: number, media_type: string, 
 /**
  * BLAKE3 of the full content, hex. Whoever stores the artifact
  * durably mints its durable reference from bytes it hashed itself —

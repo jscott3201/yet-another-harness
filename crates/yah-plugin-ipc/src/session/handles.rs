@@ -57,6 +57,17 @@ impl HostSession {
         if !self.worker_calls.contains_key(&minted_for) {
             return Err(AppError::UnknownCall);
         }
+        // The same admission bounds the host holds an inbound offer to: an
+        // offer this side cannot pass is an offer this side must not mint.
+        if bytes.is_empty() {
+            return Err(AppError::InvalidField("spilled artifact of zero bytes"));
+        }
+        let media_chars = media_type.chars().count();
+        if media_chars == 0 || media_chars > 128 {
+            return Err(AppError::InvalidField(
+                "media type outside its length bound",
+            ));
+        }
         let offer_bytes = bytes.len() as u64;
         let digest = hex(blake3::hash(&bytes).as_bytes());
         let handle = self.insert_handle(
@@ -200,24 +211,48 @@ impl HostSession {
         if self.phase != Phase::Active {
             return Err(AppError::NotActive);
         }
-        if !self.pending_worker_releases.insert(handle) {
+        if !(1..=MAX_WIRE_ID).contains(&handle.0) {
+            return Err(AppError::InvalidField("handle id outside wire range"));
+        }
+        if self.retired_worker_handles.contains(&handle) {
+            return Err(AppError::AlreadyReleased);
+        }
+        if self.pending_worker_releases.contains_key(&handle) {
             return Err(AppError::ReleasePending);
         }
+        // Pending acks are handle-shaped state; the ceiling that bounds
+        // live handles bounds them too, so a worker that withholds acks
+        // cannot grow this side of the table without limit.
+        if self.pending_worker_releases.len() as u32 >= self.config.ceilings.live_handles {
+            return Err(AppError::HandleCeiling);
+        }
+        self.pending_worker_releases.insert(handle, kind);
         self.outbox
             .push(HostMessage::Release(Release { handle, kind }));
         Ok(())
     }
 
     /// The worker confirmed a release the host initiated. An ack with no
-    /// release pending is a desync — the host asked for nothing.
+    /// release pending is a desync — the host asked for nothing — and so
+    /// is an ack naming a kind the release did not: the same wrong-kind
+    /// trap the host springs on a worker release, mirrored.
     pub(super) fn on_release_ack(&mut self, ack: ReleaseAck) {
-        if !self.pending_worker_releases.remove(&ack.handle) {
+        let Some(kind) = self.pending_worker_releases.get(&ack.handle).copied() else {
             self.fatal(WireErrorKind::UnknownHandle, "unsolicited release-ack");
             return;
+        };
+        if kind != ack.kind {
+            self.fatal(
+                WireErrorKind::UnknownHandle,
+                "release-ack with the wrong kind",
+            );
+            return;
         }
+        self.pending_worker_releases.remove(&ack.handle);
+        self.retired_worker_handles.insert(ack.handle);
         self.events.push(SessionEvent::WorkerHandleReleased {
             handle: ack.handle,
-            kind: ack.kind,
+            kind,
         });
     }
 
@@ -246,9 +281,10 @@ struct ArtifactRead {
 }
 
 fn hex(bytes: &[u8]) -> String {
+    use std::fmt::Write;
     let mut out = String::with_capacity(bytes.len() * 2);
     for byte in bytes {
-        out.push_str(&format!("{byte:02x}"));
+        write!(out, "{byte:02x}").expect("writing to a String cannot fail");
     }
     out
 }

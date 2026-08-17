@@ -277,3 +277,96 @@ fn an_unsolicited_release_ack_is_fatal() {
     })));
     assert_fatal(&mut session, WireErrorKind::UnknownHandle);
 }
+
+#[test]
+fn a_release_ack_with_the_wrong_kind_is_fatal() {
+    let mut session = peer::negotiated();
+    session
+        .release_worker_handle(HandleId(7), HandleKind::Artifact)
+        .expect("release goes out");
+    session.drain_outbox();
+    // The host said artifact; an ack saying capability is the same handle
+    // desync a wrong-kind release is, mirrored.
+    session.feed(&wire(&WorkerMessage::ReleaseAck(ReleaseAck {
+        handle: HandleId(7),
+        kind: HandleKind::Capability,
+    })));
+    assert_fatal(&mut session, WireErrorKind::UnknownHandle);
+}
+
+#[test]
+fn a_worker_handle_is_spent_once_its_release_is_acked() {
+    let mut session = peer::negotiated();
+    let handle = HandleId(7);
+    session
+        .release_worker_handle(handle, HandleKind::Artifact)
+        .expect("release goes out");
+    session.feed(&wire(&WorkerMessage::ReleaseAck(ReleaseAck {
+        handle,
+        kind: HandleKind::Artifact,
+    })));
+    session.drain_outbox();
+    session.drain_events();
+    // Re-releasing an acked id would queue a release for a handle the
+    // worker already gave back — the double release the host itself treats
+    // as fatal inbound.
+    assert_eq!(
+        session.release_worker_handle(handle, HandleKind::Artifact),
+        Err(AppError::AlreadyReleased)
+    );
+    assert!(session.drain_outbox().is_empty());
+}
+
+#[test]
+fn pending_releases_are_void_after_a_goodbye() {
+    let mut session = peer::negotiated();
+    session
+        .release_worker_handle(HandleId(7), HandleKind::Artifact)
+        .expect("release goes out");
+    session.drain_outbox();
+    session.feed(&wire(&WorkerMessage::Goodbye(Goodbye {
+        reason: "done".to_owned(),
+    })));
+    // No ack is coming; the goodbye settles everything, and the pending
+    // release must not surface as a completed one.
+    let events = session.drain_events();
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, SessionEvent::WorkerHandleReleased { .. })),
+        "a goodbye is not an ack: {events:?}"
+    );
+    assert!(session.is_closed());
+    assert_eq!(
+        session.release_worker_handle(HandleId(7), HandleKind::Artifact),
+        Err(AppError::NotActive)
+    );
+}
+
+#[test]
+fn an_outbound_release_for_handle_id_zero_is_refused() {
+    let mut session = peer::negotiated();
+    // The mirror of the inbound rule: zero is never a handle, and the
+    // session will not queue a frame the worker is contracted to kill.
+    assert_eq!(
+        session.release_worker_handle(HandleId(0), HandleKind::Artifact),
+        Err(AppError::InvalidField("handle id outside wire range"))
+    );
+    assert!(session.drain_outbox().is_empty());
+}
+
+#[test]
+fn pending_releases_are_bounded_by_the_handle_ceiling() {
+    let mut config = SessionConfig::default();
+    config.ceilings.live_handles = 1;
+    let mut session = peer::negotiated_with(config);
+    session
+        .release_worker_handle(HandleId(1), HandleKind::Artifact)
+        .expect("the first pending release fits");
+    // A worker that withholds acks must not grow the pending table without
+    // limit; the live-handle ceiling bounds this handle-shaped state too.
+    assert_eq!(
+        session.release_worker_handle(HandleId(2), HandleKind::Artifact),
+        Err(AppError::HandleCeiling)
+    );
+}

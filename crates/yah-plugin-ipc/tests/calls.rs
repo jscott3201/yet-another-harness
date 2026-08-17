@@ -203,6 +203,60 @@ fn an_oversize_outbound_call_payload_is_refused_before_the_wire() {
 }
 
 #[test]
+fn an_outbound_method_name_outside_its_length_bound_is_refused() {
+    let mut session = peer::negotiated();
+    session
+        .call_worker(&"m".repeat(128), json!(null), None, false)
+        .expect("a method at the bound goes out");
+    // The inbound bound kills the session; the outbound mirror refuses the
+    // application before the frame exists.
+    for method in [String::new(), "m".repeat(129)] {
+        assert_eq!(
+            session.call_worker(&method, json!(null), None, false),
+            Err(AppError::InvalidField(
+                "method name outside its length bound"
+            ))
+        );
+    }
+    let outbox = session.drain_outbox();
+    assert_eq!(outbox.len(), 1, "only the bounded call reached the wire");
+}
+
+#[test]
+fn an_outbound_error_message_is_clipped_to_the_detail_bound() {
+    let mut session = peer::negotiated();
+    session.feed(&wire(&call(1, "tool.run", json!(null))));
+    session.drain_events();
+    // Diagnostic text, not data: clipped rather than refused, so reporting
+    // one error never manufactures a second.
+    session
+        .reply_to_worker(
+            CallId(1),
+            Outcome::Err {
+                error: WireError {
+                    kind: WireErrorKind::Internal,
+                    message: "x".repeat(600),
+                    retryable: false,
+                    reconcile_required: false,
+                },
+            },
+        )
+        .expect("the err reply goes out");
+    let outbox = session.drain_outbox();
+    match outbox.as_slice() {
+        [HostMessage::Reply(reply)] => match &reply.outcome {
+            Outcome::Err { error } => assert_eq!(
+                error.message.chars().count(),
+                512,
+                "the wire carries what the worker's admission admits"
+            ),
+            other => panic!("expected the err outcome, got {other:?}"),
+        },
+        other => panic!("expected one reply, got {other:?}"),
+    }
+}
+
+#[test]
 fn out_of_order_replies_settle_each_call_by_id_not_arrival() {
     let mut session = peer::negotiated();
     let first = session

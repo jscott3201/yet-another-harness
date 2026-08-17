@@ -5,8 +5,10 @@
       "description": "A spilled result: the replier keeps the bytes and the caller pull-reads\nthem in bounded chunks, then must release the handle. The offer names\nsize and digest up front so the reader can refuse before the first pull,\nand verify after the last.",
       "properties": {
         "bytes": {
+          "description": "At least one: a spill of zero bytes is not a spill, on either side.",
           "format": "uint64",
-          "minimum": 0,
+          "maximum": 9007199254740991,
+          "minimum": 1,
           "type": "integer"
         },
         "digest_blake3": {
@@ -213,7 +215,7 @@
         },
         {
           "const": "invalid-frame",
-          "description": "The frame failed strict decoding: bad JSON, duplicate member names,\nnumbers outside the I-JSON safe range, an unknown tag or enum\nmember, or a field violating its bound.",
+          "description": "The frame failed admission — bad JSON, duplicate member names,\nnumbers outside the I-JSON safe range, an unknown tag or enum\nmember, or a field violating its bound — or an admitted frame broke\nstream order or shape: data before open, a sequence gap, a drop\ncount going backwards, a second open, a zero-byte spilled offer.\nFatal everywhere except one place: a malformed payload on a served\n`artifact.read` call is refused on that call alone.",
           "type": "string"
         },
         {
@@ -243,7 +245,7 @@
         },
         {
           "const": "resource-exhausted",
-          "description": "An in-flight ceiling or the handle ceiling was hit — refused rather\nthan queued, and worth retrying once something settles. A lossless\nproducer overdrawing its credit window is also this kind, but as a\nfatal fault: the window was announced, so exceeding it is a broken\nproducer, not congestion.",
+          "description": "An in-flight ceiling was hit — refused rather than queued, and worth\nretrying once something settles. The live-handle ceiling never\nreaches the wire as this kind: the host hands that refusal to its\napplication, which answers in the capability family's own\nvocabulary. A lossless producer overdrawing its credit window is\nalso this kind, but as a fatal fault: the window was announced, so\nexceeding it is a broken producer, not congestion.",
           "type": "string"
         },
         {
@@ -342,7 +344,7 @@
           "$ref": "#/$defs/CallId"
         },
         "deadline_ms": {
-          "description": "Relative millisecond budget, not an instant: a sandboxed worker that\nhas been denied clock access can still count down, and the host\nenforces the deadline regardless of what the worker does.",
+          "description": "Relative millisecond budget, not an instant: a sandboxed worker that\nhas been denied clock access can still count down, and the host\nenforces the deadline regardless of what the worker does.\n`nullable` because serde writes an absent budget as `null` — the\nTypeScript type must admit the value actually on the wire.",
           "format": "uint32",
           "minimum": 0,
           "type": [
@@ -433,6 +435,7 @@
         "dropped": {
           "description": "Cumulative count of lossy frames dropped before this one, so a\nconsumer can see the gap it was spared rather than infer it.",
           "format": "uint64",
+          "maximum": 9007199254740991,
           "minimum": 0,
           "type": "integer"
         },
@@ -446,6 +449,7 @@
         "payload": true,
         "seq": {
           "format": "uint64",
+          "maximum": 9007199254740991,
           "minimum": 0,
           "type": "integer"
         }

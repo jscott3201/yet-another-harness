@@ -33,6 +33,25 @@ impl HostSession {
                 return;
             }
         };
+        // Same numbers as `validate_bounds` and the generated schema; the
+        // refuse frame still goes out, because a worker whose only sin is a
+        // long build string deserves the version diagnostic too.
+        let name_ok = |name: &str| (1..=64).contains(&name.chars().count());
+        if !name_ok(&hello.sdk_name) || !name_ok(&hello.sdk_version) {
+            self.outbox.push(HostMessage::Refuse(Refuse {
+                error: refusal(
+                    WireErrorKind::InvalidFrame,
+                    "sdk identity outside its length bound",
+                ),
+                supported_versions: vec![PROTOCOL_VERSION],
+            }));
+            self.phase = Phase::Closed;
+            self.events.push(SessionEvent::Fatal {
+                kind: WireErrorKind::InvalidFrame,
+                detail: "sdk identity outside its length bound".to_owned(),
+            });
+            return;
+        }
         if !hello.protocol_versions.contains(&PROTOCOL_VERSION) {
             // The refusal lists what the host does speak, so the worker
             // fails with an actionable diagnostic instead of a bare close.

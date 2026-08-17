@@ -151,8 +151,10 @@ pub struct Ceilings {
     pub live_handles: u32,
     /// Frames of credit a stream opens with.
     pub initial_stream_credit: u32,
-    /// Ceiling any stream's credit window may reach, open grant and
-    /// widenings summed.
+    /// Ceiling on one stream's outstanding credit — the unspent frames a
+    /// producer may hold at a moment, checked at open and at every
+    /// widening. Spent credit leaves the window, so grants over a stream's
+    /// lifetime may sum past this.
     pub max_stream_credit: u32,
 }
 
@@ -168,7 +170,9 @@ pub struct Call {
     /// Relative millisecond budget, not an instant: a sandboxed worker that
     /// has been denied clock access can still count down, and the host
     /// enforces the deadline regardless of what the worker does.
-    #[ts(optional)]
+    /// `nullable` because serde writes an absent budget as `null` — the
+    /// TypeScript type must admit the value actually on the wire.
+    #[ts(optional = nullable)]
     pub deadline_ms: Option<u32>,
     /// Whether the caller wants incremental results. A receiver that agrees
     /// answers with [`StreamOpen`] before any data; the terminal reply still
@@ -240,12 +244,14 @@ pub struct StreamOpen {
 pub struct StreamData {
     pub call_id: CallId,
     #[ts(type = "number")]
+    #[schemars(range(max = 9_007_199_254_740_991u64))]
     pub seq: u64,
     pub more: bool,
     pub class: StreamClass,
     /// Cumulative count of lossy frames dropped before this one, so a
     /// consumer can see the gap it was spared rather than infer it.
     #[ts(type = "number")]
+    #[schemars(range(max = 9_007_199_254_740_991u64))]
     pub dropped: u64,
     pub payload: Value,
 }
@@ -327,7 +333,9 @@ pub enum HandleKind {
 #[serde(deny_unknown_fields)]
 pub struct ArtifactOffer {
     pub handle: HandleId,
+    /// At least one: a spill of zero bytes is not a spill, on either side.
     #[ts(type = "number")]
+    #[schemars(range(min = 1, max = 9_007_199_254_740_991u64))]
     pub bytes: u64,
     #[schemars(length(min = 1, max = 128))]
     pub media_type: String,
@@ -376,9 +384,13 @@ pub enum WireErrorKind {
     UnknownRequiredFeature,
     /// A frame arrived before negotiation completed, or a second hello.
     NegotiationRequired,
-    /// The frame failed strict decoding: bad JSON, duplicate member names,
+    /// The frame failed admission — bad JSON, duplicate member names,
     /// numbers outside the I-JSON safe range, an unknown tag or enum
-    /// member, or a field violating its bound.
+    /// member, or a field violating its bound — or an admitted frame broke
+    /// stream order or shape: data before open, a sequence gap, a drop
+    /// count going backwards, a second open, a zero-byte spilled offer.
+    /// Fatal everywhere except one place: a malformed payload on a served
+    /// `artifact.read` call is refused on that call alone.
     InvalidFrame,
     /// The length prefix exceeded the frame class's byte bound.
     FrameTooLarge,
@@ -394,11 +406,13 @@ pub enum WireErrorKind {
     DuplicateCall,
     /// The receiver does not offer the named method.
     UnknownMethod,
-    /// An in-flight ceiling or the handle ceiling was hit — refused rather
-    /// than queued, and worth retrying once something settles. A lossless
-    /// producer overdrawing its credit window is also this kind, but as a
-    /// fatal fault: the window was announced, so exceeding it is a broken
-    /// producer, not congestion.
+    /// An in-flight ceiling was hit — refused rather than queued, and worth
+    /// retrying once something settles. The live-handle ceiling never
+    /// reaches the wire as this kind: the host hands that refusal to its
+    /// application, which answers in the capability family's own
+    /// vocabulary. A lossless producer overdrawing its credit window is
+    /// also this kind, but as a fatal fault: the window was announced, so
+    /// exceeding it is a broken producer, not congestion.
     ResourceExhausted,
     /// The call's millisecond budget expired; the host is the enforcer.
     DeadlineExceeded,

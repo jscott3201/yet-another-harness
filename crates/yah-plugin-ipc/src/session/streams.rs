@@ -174,6 +174,11 @@ impl HostSession {
         if state.stream_credit.is_none() {
             return Err(AppError::StreamViolation("stream not open"));
         }
+        // After the last item there is no frame left to carry the count;
+        // a drop recorded here would be a promise the wire cannot keep.
+        if state.last_item_sent {
+            return Err(AppError::StreamViolation("drops after the last item"));
+        }
         state.lossy_dropped = state.lossy_dropped.saturating_add(dropped);
         Ok(())
     }

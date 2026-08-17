@@ -10,20 +10,19 @@ The crate is sans-io: `frame` turns bytes into frames incrementally, and
 in it can block, sleep, spawn, or open a socket. The process driver that
 supplies the transport, the spawned child, the bootstrap file descriptor, and
 the kill path is not implemented; neither is any worker-side SDK.
-Eighty-eight deterministic fixtures in `crates/yah-plugin-ipc/tests/` drive
-the host side of every rule below with a scripted byte-level peer.
+One hundred one deterministic fixtures in `crates/yah-plugin-ipc/tests/`
+drive the host side of every rule below with a scripted byte-level peer.
 
 ## Framing and strict JSON
 
-A frame is a 4-byte big-endian byte count followed by exactly that many bytes
-of one JSON value. The prefix is checked against `MAX_FRAME_BYTES` (1 MiB +
-4 KiB) as soon as the four prefix bytes arrive, without waiting for the
-payload (bytes the transport already handed over are discarded at the
-poison, so exposure is one transport read, never a frame); a zero-length or
-oversize
-declaration poisons the connection. Framing carries no resync marker on
-purpose — after one violation, later bytes are unattributable, so there is no
-resync path.
+A frame is a 4-byte big-endian byte count followed by exactly that many
+bytes of one JSON value. The prefix is checked against `MAX_FRAME_BYTES`
+(1 MiB + 4 KiB) as soon as the four prefix bytes arrive, without waiting
+for the payload — bytes the transport already handed over are discarded at
+the poison, so exposure is one transport read, never a frame. A zero-length
+or oversize declaration poisons the connection. Framing carries no resync
+marker on purpose: after one violation, later bytes are unattributable, so
+there is no resync path.
 
 Frame JSON is strict, mirroring the kernel protocol's rules:
 
@@ -34,10 +33,10 @@ Frame JSON is strict, mirroring the kernel protocol's rules:
   handshake, never by per-member leniency.
 - Field bounds are enforced at admission and mirrored by the generated
   schemas: ids in `1..=2^53−1`, SDK identity 1–64 characters, method names
-  1–128, goodbye reasons at most 256, error messages at most 512, and a
-  spilled offer's digest exactly 64 lowercase hex characters. A frame a
-  conformant schema validator would refuse, this host refuses at the same
-  line.
+  1–128, media types 1–128, goodbye reasons at most 256, error messages at
+  most 512, a spilled offer's byte count at least one, and its digest
+  exactly 64 lowercase hex characters. A frame a conformant schema
+  validator would refuse, this host refuses at the same line.
 
 All three exist for the same reason: two SDK decoders must read identical
 bytes into identical values, and duplicate keys and 2^53-adjacent integers
@@ -56,9 +55,13 @@ terminals `accept` and `refuse`. Control frames — everything that is not a
 call, reply, or stream-data frame: handshake, stream-open, credit, cancel,
 release, release-ack, goodbye — are bounded at 16 KiB; a call payload at
 256 KiB; an inline result at 64 KiB; a stream data frame at 64 KiB. The
-bounds bind the host's own application API too: an outbound payload over its
-class bound is refused before it reaches the wire, because the session will
-not queue a frame the other side is contracted to kill.
+bounds bind the host's own application API too, field bounds included: an
+outbound payload over its class bound, a method name or media type outside
+its length bound, or a hand-built offer the admission rules would refuse is
+refused before it reaches the wire, because the session will not queue a
+frame the other side is contracted to kill. The one asymmetry is
+deliberate: an outbound error message over the detail bound is clipped
+rather than refused, so reporting one error never manufactures a second.
 
 ## Handshake
 
@@ -72,7 +75,11 @@ in force, and every byte bound and count ceiling the session will enforce —
 announced, not negotiable; a worker that cannot live with a ceiling says
 goodbye. A version mismatch is refused with the host's supported list, so the
 worker fails with a diagnostic instead of a bare close. A required feature
-the host does not know fails closed.
+the host does not know fails closed. A hello whose own fields fail
+admission — an SDK identity outside its length bound — is refused with the
+same diagnostic shape. Before negotiation, only a frame the host cannot
+decode at all — a framing violation, a strict-JSON refusal, an over-bound
+control frame — closes without a diagnostic frame.
 
 Negotiation is startup-only and stateful. This lane is one activation-scoped
 process with a lifetime, not a horizontally scaled stateless service, so no
@@ -95,8 +102,11 @@ indistinguishable from a late reply racing a local settlement, so it is
 ignored, while a terminal for an id never minted is fatal.
 
 In-flight ceilings are enforced by refusal (`resource-exhausted`,
-retryable), never by queueing: refusal is the only bound that does not
-become host memory. A deadline the worker outlives is enforced by the host —
+retryable), never by queueing — a queue here is unbounded memory a hostile
+worker controls. A refusal does retain one thing: the spent id. Ids are
+never reused, so every id the session has seen stays in a retired set for
+the session's lifetime; that is a few bytes per call, and bounding it is
+the supervising driver's job, by bounding how long a session lives. A deadline the worker outlives is enforced by the host —
 a `cancel` goes out and the call settles as `deadline-exceeded` with
 reconciliation required, because the worker may have acted before the budget
 ran out. A late reply after that settlement is a tolerated race, not a
@@ -114,11 +124,13 @@ byte-bounded, so frame count is the dimension a hostile producer could still
 flood. `lossless` items spend credit and exceeding the window is fatal;
 `lossy` items (progress, logs) spend none but must carry a monotonic count
 of what was dropped. `credit` frames widen the window up to the
-`max_stream_credit` ceiling the accept announced (1024 by default), in both
-directions: the worker widens the host's window with credit frames, and the
-host widens the worker's through the same frame the other way. A consumer can `cancel` with the stream target to unsubscribe:
-items are still validated and still spend credit, but stop being delivered;
-the terminal still lands.
+`max_stream_credit` ceiling the accept announced (1024 by default) — a
+bound on the outstanding, unspent window at any moment, not on the sum of
+grants over the stream's life — and they widen it in both directions: the
+worker widens the host's window with credit frames, and the host widens the
+worker's through the same frame the other way. A consumer can `cancel` with
+the stream target to unsubscribe: items are still validated and still spend
+credit, but stop being delivered; the terminal still lands.
 
 ## Errors and faults
 
@@ -127,14 +139,22 @@ protocol boundary itself. Capability refusals are not wire errors: they are
 answers inside a successful call, exactly as in the Wasm lane.
 
 Faults split two ways. A refusable fault answers one call and the session
-continues: an oversize call payload, a ceiling, a bad artifact read. A fatal
-fault poisons the session: framing violations, strict-JSON and field-bound
-violations, id reuse, credit overdraw, handle desyncs. On a
-fatal fault the host says goodbye naming the kind and nothing else, settles
-in-flight work, and ignores every later input.
+continues: an oversize call payload, a ceiling, and everything a served
+`artifact.read` can get wrong — a malformed read payload, a handle that is
+unknown, released, or the wrong kind, a read outside the offer — because
+those arrive inside a call the session can answer. A fatal fault poisons
+the session: framing violations, strict-JSON and field-bound violations, id
+reuse, credit overdraw, handle desyncs, and the stream-order family — data
+before open, a sequence gap, a second open, a drop count going backwards, a
+zero-byte spilled offer. The same kind can sit on both sides of the split:
+`invalid-frame` and `unknown-handle` are fatal at frame admission and
+refusable inside a served read. On a fatal fault the host says goodbye
+naming the kind and nothing else, settles in-flight work, and ignores every
+later input.
 
-Nothing the worker sent is echoed back in any refusal, and error details are
-bounded at 512 characters — an echo is a reflection surface.
+Nothing the worker sent is echoed back in any refusal, and error details
+are bounded at 512 characters in both directions — over the bound is fatal
+inbound and clipped outbound — because an echo is a reflection surface.
 
 ## Artifact spill
 
@@ -150,7 +170,10 @@ wire hex-encoded inside a normal call result, bounded at 24 KiB of raw bytes
 per read so a maximal chunk stays under the inline ceiling — more round
 trips for a large artifact, and no third framing rule for two SDKs to get
 subtly wrong. Reads outside the offer, over the chunk bound, or of zero
-length are refused per-call (`invalid-read`).
+length are refused per-call (`invalid-read`). A read clears the same
+admission bar as any other call — payload bound, then the in-flight
+ceiling — and is then answered in the same turn, so it never occupies the
+slot it was admitted under.
 
 An artifact handle must be explicitly released when the reader is done.
 
@@ -166,11 +189,14 @@ Releasing a handle not held, releasing twice, and releasing with the wrong
 kind are all fatal — the same desync the Wasm lane traps as a double
 dispose. A released id is never minted again, which closes the release/reuse
 race. The mechanism is symmetric: the host releases a worker-held handle
-with the same `release` frame and reads the worker's `release-ack`; an ack
-for a release the host never sent is fatal. The paths a release frame never
+with the same `release` frame and reads the worker's `release-ack`. An ack
+for a release the host never sent is fatal, and so is an ack naming a kind
+the release did not; an acked id is spent, so the host refuses its own
+application a second release of it. The paths a release frame never
 travels are reclaimed host-side: a call that minted handles and then settled
 `err` or `cancelled` reclaims them, and goodbye, disconnect, and fatal
-faults reclaim everything.
+faults reclaim everything — including pending releases, whose acks will
+never come.
 
 ## Cancellation and loss
 
@@ -208,6 +234,10 @@ local gate runs, and it rejects stale generated files.
   generated; no Node or CPython worker exists to load them.
 - Reconnect or resume. A session that faults or loses its transport is
   over; there is deliberately no resync path.
+- Retired-id forgetting. Ids are never reused, so the session remembers
+  every call and handle id it has seen, and that memory grows with call
+  count for the session's lifetime. The process driver bounds it by
+  bounding the session, not through any protocol mechanism.
 - Any binding from the capability broker to these handles. The wire encoding
   for a brokered resource exists; nothing yet mints one from a real grant.
 - Worker-side enforcement evidence. The fixtures drive the host session

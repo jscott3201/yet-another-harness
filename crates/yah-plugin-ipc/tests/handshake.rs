@@ -117,7 +117,7 @@ fn the_accept_announces_limits_ceilings_and_the_feature_intersection() {
 }
 
 #[test]
-fn an_sdk_identity_outside_its_length_bound_is_fatal() {
+fn an_sdk_identity_outside_its_length_bound_is_refused_with_a_diagnostic() {
     for sdk_name in ["", &"n".repeat(65)] {
         let mut session = HostSession::new(SessionConfig::default());
         session.feed(&wire(&WorkerMessage::Hello(Hello {
@@ -127,10 +127,16 @@ fn an_sdk_identity_outside_its_length_bound_is_fatal() {
             features: Vec::new(),
             required_features: Vec::new(),
         })));
-        assert!(
-            session.drain_outbox().is_empty(),
-            "no accept for a hello the schema forbids"
-        );
+        // A worker whose only sin is a long build string still gets the
+        // refuse naming the rule and the versions, not a bare close.
+        let outbox = session.drain_outbox();
+        match outbox.as_slice() {
+            [HostMessage::Refuse(refuse)] => {
+                assert_eq!(refuse.error.kind, WireErrorKind::InvalidFrame);
+                assert_eq!(refuse.supported_versions, vec![PROTOCOL_VERSION]);
+            }
+            other => panic!("expected a refuse, got {other:?}"),
+        }
         assert_fatal(&mut session, WireErrorKind::InvalidFrame);
     }
 }
@@ -208,5 +214,22 @@ fn goodbye_before_hello_is_still_a_negotiation_fault() {
     session.feed(&wire(&WorkerMessage::Goodbye(Goodbye {
         reason: "changed my mind".to_owned(),
     })));
+    assert_fatal(&mut session, WireErrorKind::NegotiationRequired);
+}
+
+#[test]
+fn a_bounds_violating_frame_before_hello_still_earns_the_refuse() {
+    let mut session = HostSession::new(SessionConfig::default());
+    // The reason is over its 256-character bound, but before negotiation
+    // the order fault is the fault: the refuse frame still goes out, where
+    // an active-phase bounds check would close bare.
+    session.feed(&wire(&WorkerMessage::Goodbye(Goodbye {
+        reason: "r".repeat(300),
+    })));
+    let outbox = session.drain_outbox();
+    assert!(
+        matches!(outbox.as_slice(), [HostMessage::Refuse(_)]),
+        "the one diagnostic a misordered worker gets: {outbox:?}"
+    );
     assert_fatal(&mut session, WireErrorKind::NegotiationRequired);
 }

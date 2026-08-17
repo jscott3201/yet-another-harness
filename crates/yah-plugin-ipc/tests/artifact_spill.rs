@@ -6,7 +6,7 @@ mod peer;
 
 use peer::{call, wire};
 use serde_json::json;
-use yah_plugin_ipc::session::{AppError, HostSession, SessionEvent};
+use yah_plugin_ipc::session::{AppError, HostSession, SessionConfig, SessionEvent};
 use yah_plugin_ipc::types::*;
 use yah_plugin_ipc::{MAX_ARTIFACT_READ_BYTES, MAX_INLINE_RESULT_BYTES};
 
@@ -255,6 +255,124 @@ fn a_read_against_a_released_handle_is_refused() {
             }]
         ),
         "released means gone: {events:?}"
+    );
+}
+
+#[test]
+fn an_offer_media_type_outside_its_length_bound_is_refused() {
+    let mut session = peer::negotiated();
+    session.feed(&wire(&call(1, "tool.big", json!(null))));
+    session.drain_events();
+    session
+        .offer_artifact(CallId(1), vec![7; 4], &"m".repeat(128))
+        .expect("a media type at the bound is minted");
+    // Unbounded, this string rides the spilled reply past the frame bound
+    // and into the encoder's assert — the send side must refuse it first.
+    for media_type in [String::new(), "m".repeat(129)] {
+        assert_eq!(
+            session
+                .offer_artifact(CallId(1), vec![7; 4], &media_type)
+                .err(),
+            Some(AppError::InvalidField(
+                "media type outside its length bound"
+            ))
+        );
+    }
+}
+
+#[test]
+fn an_empty_artifact_offer_is_refused() {
+    let mut session = peer::negotiated();
+    session.feed(&wire(&call(1, "tool.big", json!(null))));
+    session.drain_events();
+    // Both directions agree a spill of zero bytes is not a spill: inbound
+    // it is fatal, outbound it is the application's refusal to hear.
+    assert_eq!(
+        session
+            .offer_artifact(CallId(1), Vec::new(), "text/plain")
+            .err(),
+        Some(AppError::InvalidField("spilled artifact of zero bytes"))
+    );
+}
+
+#[test]
+fn a_hand_built_spilled_reply_passes_the_same_admission() {
+    let mut session = peer::negotiated();
+    session.feed(&wire(&call(1, "tool.big", json!(null))));
+    session.drain_events();
+    // `offer_artifact` mints conforming offers, but the reply API accepts
+    // any outcome — so a hand-built offer is held to the inbound bounds.
+    let zero_handle = ArtifactOffer {
+        handle: HandleId(0),
+        bytes: 4,
+        media_type: "text/plain".to_owned(),
+        digest_blake3: "ab".repeat(32),
+    };
+    assert_eq!(
+        session.reply_to_worker(
+            CallId(1),
+            Outcome::Spilled {
+                artifact: zero_handle
+            }
+        ),
+        Err(AppError::InvalidField("handle id outside wire range"))
+    );
+    let uppercase_digest = ArtifactOffer {
+        handle: HandleId(3),
+        bytes: 4,
+        media_type: "text/plain".to_owned(),
+        digest_blake3: "AB".repeat(32),
+    };
+    assert_eq!(
+        session.reply_to_worker(
+            CallId(1),
+            Outcome::Spilled {
+                artifact: uppercase_digest
+            }
+        ),
+        Err(AppError::InvalidField(
+            "digest is not 64 lowercase hex characters"
+        ))
+    );
+}
+
+#[test]
+fn a_read_is_admitted_through_the_same_ceiling_as_any_call() {
+    let mut config = SessionConfig::default();
+    config.ceilings.worker_calls_in_flight = 1;
+    let mut session = peer::negotiated_with(config);
+    let offer = spilled(&mut session, &[9; 8]);
+    // One slot, and a plain call holds it: the served read clears the same
+    // admission bar as every other call, then never occupies the slot.
+    session.feed(&wire(&call(20, "tool.run", json!(null))));
+    session.drain_events();
+    session.feed(&read_frame(21, offer.handle, 0, 8));
+    let events = session.drain_events();
+    assert!(
+        matches!(
+            events.as_slice(),
+            [SessionEvent::CallRefused {
+                kind: WireErrorKind::ResourceExhausted,
+                ..
+            }]
+        ),
+        "a full table refuses reads too, retryably: {events:?}"
+    );
+    session.drain_outbox();
+    session
+        .reply_to_worker(
+            CallId(20),
+            Outcome::Ok {
+                result: json!(null),
+            },
+        )
+        .expect("settling makes room");
+    session.drain_outbox();
+    session.feed(&read_frame(22, offer.handle, 0, 8));
+    assert_eq!(
+        chunk(&mut session).len(),
+        8,
+        "below the ceiling the read serves"
     );
 }
 

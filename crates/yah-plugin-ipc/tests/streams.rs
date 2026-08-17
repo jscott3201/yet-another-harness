@@ -417,6 +417,22 @@ fn the_host_declares_its_lossy_drops() {
 }
 
 #[test]
+fn drops_declared_after_the_last_item_are_refused() {
+    let mut session = peer::negotiated();
+    feed_streaming_call(&mut session, 5);
+    session.open_stream(CallId(5), 4).expect("ack goes out");
+    session
+        .stream_item(CallId(5), StreamClass::Lossy, false, json!(null))
+        .expect("the last item goes out");
+    // No frame is left to carry the count; recording one would be a
+    // promise the wire cannot keep.
+    assert_eq!(
+        session.note_lossy_drops(CallId(5), 1),
+        Err(AppError::StreamViolation("drops after the last item"))
+    );
+}
+
+#[test]
 fn an_outbound_stream_item_over_the_byte_bound_is_refused() {
     let mut session = peer::negotiated();
     feed_streaming_call(&mut session, 5);

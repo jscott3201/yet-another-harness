@@ -7,7 +7,7 @@
 
 use super::{AppError, HostCall, HostSession, Phase, SessionEvent, WorkerCall};
 use crate::types::*;
-use crate::{MAX_CALL_PAYLOAD_BYTES, MAX_INLINE_RESULT_BYTES};
+use crate::{MAX_CALL_PAYLOAD_BYTES, MAX_INLINE_RESULT_BYTES, MAX_METHOD_CHARS, MAX_WIRE_ID};
 
 impl HostSession {
     /// A worker-initiated call. Refusable faults answer this call and only
@@ -23,13 +23,6 @@ impl HostSession {
             self.fatal(WireErrorKind::DuplicateCall, "worker call id reused");
             return;
         }
-        // The one method protocol law answers itself: a pull-read against a
-        // host-held artifact. Served in the same turn, so it never occupies
-        // an in-flight slot the application has to manage.
-        if call.method == super::handles::ARTIFACT_READ_METHOD {
-            self.serve_artifact_read(call);
-            return;
-        }
         let payload_bytes = serde_json::to_vec(&call.payload)
             .map(|bytes| bytes.len())
             .unwrap_or(usize::MAX);
@@ -41,6 +34,15 @@ impl HostSession {
             // Refused, never queued: a queue here is unbounded host memory
             // a hostile worker controls.
             self.refuse_worker_call(call_id, WireErrorKind::ResourceExhausted);
+            return;
+        }
+        // The one method protocol law answers itself: a pull-read against a
+        // host-held artifact. It clears the same admission bar as every
+        // other call — payload bound, then ceiling — and is then served in
+        // the same turn, so it never occupies the slot it was admitted
+        // under.
+        if call.method == super::handles::ARTIFACT_READ_METHOD {
+            self.serve_artifact_read(call);
             return;
         }
         self.worker_calls.insert(
@@ -82,10 +84,16 @@ impl HostSession {
             .push(SessionEvent::CallRefused { call_id, kind });
     }
 
-    /// The embedding host answers a worker call. The one inline bound the
-    /// app can violate is checked here and refused with the spill
-    /// alternative — the protocol never truncates a result to fit.
-    pub fn reply_to_worker(&mut self, call_id: CallId, outcome: Outcome) -> Result<(), AppError> {
+    /// The embedding host answers a worker call. An inline result over its
+    /// bound is refused with the spill alternative — the protocol never
+    /// truncates a result to fit — a hand-built spilled offer passes the
+    /// same admission line an inbound one does, and an error message over
+    /// the detail bound is clipped: diagnostic text, not data.
+    pub fn reply_to_worker(
+        &mut self,
+        call_id: CallId,
+        mut outcome: Outcome,
+    ) -> Result<(), AppError> {
         if self.phase != Phase::Active {
             return Err(AppError::NotActive);
         }
@@ -98,11 +106,18 @@ impl HostSession {
                 AppError::UnknownCall
             });
         };
-        if let Outcome::Ok { result } = &outcome {
-            let bytes = serde_json::to_vec(result).map(|b| b.len()).unwrap_or(0);
-            if bytes > MAX_INLINE_RESULT_BYTES {
-                return Err(AppError::SpillRequired { bytes });
+        match &mut outcome {
+            Outcome::Ok { result } => {
+                let bytes = serde_json::to_vec(result).map(|b| b.len()).unwrap_or(0);
+                if bytes > MAX_INLINE_RESULT_BYTES {
+                    return Err(AppError::SpillRequired { bytes });
+                }
             }
+            Outcome::Spilled { artifact } => validate_outbound_offer(artifact)?,
+            Outcome::Err { error } => {
+                error.message = super::clip_detail(&error.message);
+            }
+            Outcome::Cancelled { .. } => {}
         }
         // A refused or cancelled acquire must not leak what it briefly
         // held: reclaim handles this call minted unless it ended ok.
@@ -133,7 +148,14 @@ impl HostSession {
             return Err(AppError::CallCeiling);
         }
         // The session refuses to queue a frame the worker is contracted to
-        // kill: the payload bound binds this side's application too.
+        // kill: the method and payload bounds bind this side's application
+        // too.
+        let method_chars = method.chars().count();
+        if method_chars == 0 || method_chars > MAX_METHOD_CHARS {
+            return Err(AppError::InvalidField(
+                "method name outside its length bound",
+            ));
+        }
         let payload_bytes = serde_json::to_vec(&payload)
             .map(|bytes| bytes.len())
             .unwrap_or(usize::MAX);
@@ -273,4 +295,33 @@ impl HostSession {
             self.settle_host_call_locally(call_id, WireErrorKind::DeadlineExceeded, true);
         }
     }
+}
+
+/// [`HostSession::offer_artifact`] only mints conforming offers, but the
+/// reply API accepts any [`Outcome`] — so a hand-built spilled offer is
+/// held to the inbound admission bounds, named with the same strings.
+fn validate_outbound_offer(artifact: &ArtifactOffer) -> Result<(), AppError> {
+    if !(1..=MAX_WIRE_ID).contains(&artifact.handle.0) {
+        return Err(AppError::InvalidField("handle id outside wire range"));
+    }
+    if artifact.bytes == 0 {
+        return Err(AppError::InvalidField("spilled artifact of zero bytes"));
+    }
+    let media_chars = artifact.media_type.chars().count();
+    if media_chars == 0 || media_chars > 128 {
+        return Err(AppError::InvalidField(
+            "media type outside its length bound",
+        ));
+    }
+    if artifact.digest_blake3.len() != 64
+        || !artifact
+            .digest_blake3
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+    {
+        return Err(AppError::InvalidField(
+            "digest is not 64 lowercase hex characters",
+        ));
+    }
+    Ok(())
 }
