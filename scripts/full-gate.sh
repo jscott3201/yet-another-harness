@@ -29,6 +29,10 @@ cd "$(git rev-parse --show-toplevel)"
 echo "==> cargo clean"
 cargo clean
 cargo clean --manifest-path tools/protocol-codegen/Cargo.toml
+# The example guest is outside the workspace and keeps its own target
+# directory, so a workspace clean would leave its artifacts behind - exactly
+# the stale state this gate exists to rule out.
+cargo clean --manifest-path examples/guests/rust-example/Cargo.toml
 
 echo "==> file-size cap"
 bash .github/scripts/check-file-size.sh

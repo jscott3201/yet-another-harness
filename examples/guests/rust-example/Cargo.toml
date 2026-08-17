@@ -1,0 +1,32 @@
+# Example guest plugin, built for wasm32-unknown-unknown.
+#
+# Deliberately outside the host workspace: a member is built for the host
+# target by every plain `cargo build`, and this crate only makes sense as a
+# guest. Its own lockfile pins what the gate compiles.
+# An empty table here, rather than an `exclude` entry upstream, so the crate
+# carries its own independence instead of depending on the host workspace to
+# remember it.
+[workspace]
+
+[package]
+name = "yah-guest-rust-example"
+version = "0.0.1"
+edition = "2024"
+rust-version = "1.97"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+# The same generator the host's contract tests run against the same WIT.
+wit-bindgen = { version = "=0.57.1", default-features = false, features = ["macros", "realloc", "std"] }
+
+[profile.release]
+# A guest is shipped, not debugged: size is the interesting axis here, and
+# panics cannot unwind across the component boundary anyway.
+opt-level = "s"
+lto = true
+panic = "abort"
+strip = true

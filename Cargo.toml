@@ -13,6 +13,15 @@ members = [
 # lifecycle and reversible-cleanup semantics are proved beside the retained
 # reliability kernel.
 
+# Dependencies are optimised even in dev and test builds; workspace crates are
+# not. Guest components are compiled by Cranelift at test time, and an
+# unoptimised Cranelift takes tens of seconds over the 12 MB component the
+# TypeScript example produces - close enough to the harness's per-test timeout
+# to be a gate failure rather than a slow test. This changes how fast the
+# dependency runs, not what it does.
+[profile.dev.package."*"]
+opt-level = 2
+
 [workspace.package]
 edition = "2024"
 rust-version = "1.97"
@@ -48,3 +57,6 @@ toml = "1.1.4"
 wasmtime = { version = "=47.0.3", default-features = false, features = ["async", "component-model", "cranelift", "runtime", "std", "wat"] }
 wit-bindgen = { version = "=0.57.1", default-features = false, features = ["macros", "realloc", "std"] }
 wit-parser = { version = "=0.252.0", default-features = false, features = ["std"] }
+# Encodes a guest's core module as a component - the step between what a Rust
+# guest toolchain emits and what a host can instantiate.
+wit-component = { version = "=0.247.0", default-features = false }

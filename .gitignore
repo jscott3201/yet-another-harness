@@ -3,6 +3,12 @@
 /target
 **/target
 
+# Guest build outputs. DEC-038: every guest artifact is built from source at
+# gate time, so a committed `.wasm` is never the evidence — and the TypeScript
+# one is 12 MB of compiled SpiderMonkey that no reviewer could read.
+node_modules/
+examples/guests/**/*.wasm
+
 # Owner's local planning corpus — never committed to the public repo (R17).
 # Private-repo custody is the fallback if needed; see _research/decisions/00.
 _*/

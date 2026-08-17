@@ -1,0 +1,14 @@
+{
+  "name": "yah-guest-ts-example",
+  "version": "0.0.1",
+  "private": true,
+  "description": "Example guest plugin for the yah:plugin@0.1.0 conformance world",
+  "license": "MIT OR Apache-2.0",
+  "type": "module",
+  "scripts": {
+    "build": "jco componentize guest.ts --wit ../../../crates/yah-plugin-wasm/wit --world-name conformance --disable all --out guest.component.wasm"
+  },
+  "devDependencies": {
+    "@bytecodealliance/jco": "1.29.0"
+  }
+}

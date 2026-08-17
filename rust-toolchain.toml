@@ -2,3 +2,6 @@
 [toolchain]
 channel = "1.97.1"
 components = ["clippy", "rustfmt"]
+# The example guest plugins compile to wasm. Declared here so the gate installs
+# the target rather than failing on a machine that happens not to have it.
+targets = ["wasm32-unknown-unknown"]
