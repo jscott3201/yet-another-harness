@@ -79,7 +79,13 @@ fn world_has_one_versioned_package_and_exact_directional_interfaces() {
             .keys()
             .map(String::as_str)
             .collect::<BTreeSet<_>>(),
-        BTreeSet::from(["cancellation", "fixture-tool", "lifecycle", "logging"])
+        BTreeSet::from([
+            "cancellation",
+            "capabilities",
+            "fixture-tool",
+            "lifecycle",
+            "logging",
+        ])
     );
     assert_eq!(package.worlds.len(), 1);
     assert_eq!(world.name, yah_plugin_wasm::WIT_WORLD);
@@ -99,6 +105,7 @@ fn world_has_one_versioned_package_and_exact_directional_interfaces() {
         imports,
         BTreeSet::from([
             "yah:plugin/cancellation@0.1.0".into(),
+            "yah:plugin/capabilities@0.1.0".into(),
             "yah:plugin/logging@0.1.0".into(),
         ])
     );
@@ -146,6 +153,12 @@ fn interface_functions_remain_small_and_explicit() {
     let expected = [
         ("logging", BTreeSet::from(["log"])),
         ("cancellation", BTreeSet::from(["is-cancelled"])),
+        // wit-parser keys a resource method by its bracketed method name, so
+        // the resource itself appears here only through its one method.
+        (
+            "capabilities",
+            BTreeSet::from(["acquire", "[method]capability.invoke"]),
+        ),
         ("lifecycle", BTreeSet::from(["activate"])),
         ("fixture-tool", BTreeSet::from(["invoke"])),
     ];
@@ -187,4 +200,49 @@ fn the_import_allowlist_matches_the_world() {
         declared, allowed,
         "the world's imports and the driver's allowlist must be the same set"
     );
+}
+
+/// The capability error enums' case order is the fixture's digit convention.
+///
+/// The capability-consumer fixture reports refusal codes as the ASCII digits
+/// of these discriminants, so order is contract, not style: a reorder would
+/// renumber every digit assertion in the capability corpus while each case
+/// name still existed. Frozen in order, not as a set.
+#[test]
+fn capability_error_case_order_is_frozen() {
+    let mut resolve = Resolve::default();
+    let (package_id, _) = resolve
+        .push_dir(WIT_PATH)
+        .expect("canonical WIT package parses");
+    let package = &resolve.packages[package_id];
+    let interface = &resolve.interfaces[package.interfaces["capabilities"]];
+    let expected = [
+        (
+            "acquire-error-code",
+            vec![
+                "invalid-id",
+                "not-granted",
+                "revoked",
+                "unavailable",
+                "mismatched",
+                "handle-limit",
+            ],
+        ),
+        (
+            "call-error-code",
+            vec!["revoked", "exhausted", "invalid-input", "failed"],
+        ),
+    ];
+    for (name, cases) in expected {
+        let type_id = interface.types[name];
+        let wit_parser::TypeDefKind::Enum(declared) = &resolve.types[type_id].kind else {
+            panic!("{name} must be an enum");
+        };
+        let declared: Vec<&str> = declared
+            .cases
+            .iter()
+            .map(|case| case.name.as_str())
+            .collect();
+        assert_eq!(declared, cases, "{name} case order is load-bearing");
+    }
 }

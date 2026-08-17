@@ -30,9 +30,14 @@
 //! the fiber as it drops; a consumer that parked a start future and then
 //! awaited deactivation would wait on a guest nobody is resuming.
 //!
-//! This driver does not load packages, meter fuel, transport granted
-//! capabilities across the ABI, or contain hostile guest code. Bounding what a
-//! guest costs is not isolating what it can reach.
+//! Granted capabilities cross the ABI as opaque resources: each start permit's
+//! capability context rides in its activation's store, `acquire` resolves a
+//! grant into a resource whose entry wraps an activation-scoped handle, and
+//! every guest call re-enters the broker's revocation and fencing gates
+//! ([`crate::capability`]).
+//!
+//! This driver does not load packages, meter fuel, or contain hostile guest
+//! code. Bounding what a guest costs is not isolating what it can reach.
 
 use std::{
     collections::{HashMap, VecDeque},
@@ -49,7 +54,7 @@ use wasmtime::{
 use yah_plugin_host::{
     DriverActivationError, DriverDeactivationError, DriverFuture, DriverHealthError, DriverKind,
     DriverPrepareError, DriverStartPermit, DriverStopPermit, PluginActivationId,
-    PluginActivationRequest, PluginDriver, PluginHealth, PluginRevisionId,
+    PluginActivationRequest, PluginDriver, PluginHealth, PluginRevisionId, PluginStartContext,
     PreparedDriverActivation,
 };
 
@@ -160,6 +165,15 @@ impl WasmActivationPlan {
         }
     }
 
+    /// Instantiate a guest that consumes a brokered capability via its tool.
+    pub const fn capability_consumer() -> Self {
+        Self {
+            guest: GuestProgram::CapabilityConsumer,
+            start: StartBehavior::CallActivate,
+            deactivate: DeactivateBehavior::Release,
+        }
+    }
+
     /// Instantiate a guest with more tables than the host allows.
     pub const fn many_tables() -> Self {
         Self {
@@ -257,10 +271,37 @@ impl WasmObserver {
 
     /// Host-side view of this activation's imports.
     ///
-    /// The checked-in fixtures import nothing, so for them this only ever
-    /// reports the cancellation signal the driver installed.
+    /// Most checked-in fixtures import nothing, so for them this only ever
+    /// reports the cancellation signal the driver installed; the flood and
+    /// capability fixtures are the exceptions that put evidence here.
     pub fn host_observer(&self, id: &PluginActivationId) -> Option<HostObserver> {
         self.observation(id).map(|state| state.host.clone())
+    }
+
+    /// Call the world's `fixture-tool` on a live activation.
+    ///
+    /// Deliberately not part of `PluginDriver`: the host has no tool-invocation
+    /// contract yet, and inventing one here would be inventing it in the wrong
+    /// crate. What this exists for is evidence - a guest's answer observed
+    /// through the same store, limiter, and call deadline its activation runs
+    /// under, rather than through a linker a test built for itself. It lives on
+    /// the evidence view so scripted and authored drivers share one entry.
+    pub async fn call_fixture_tool(
+        &self,
+        id: &PluginActivationId,
+        input_json: &str,
+    ) -> Result<String, DriverActivationError> {
+        let core = self
+            .observation(id)
+            .and_then(|state| {
+                state
+                    .core
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .upgrade()
+            })
+            .ok_or_else(|| DriverActivationError::failed("no live activation for that identity"))?;
+        core.call_fixture_tool(input_json).await
     }
 
     fn observation(&self, id: &PluginActivationId) -> Option<Arc<ActivationObservation>> {
@@ -378,10 +419,10 @@ impl WasmComponentDriver {
     /// than selecting one from a corpus it owns. Every activation runs that
     /// component and calls its `activate`, so there is no plan queue to exhaust.
     ///
-    /// Returns the concrete driver rather than `Arc<dyn PluginDriver>`, because
-    /// the caller needs both halves: the trait object to hand to the host, and
-    /// the driver itself to call [`Self::call_fixture_tool`], which is not part
-    /// of the host contract.
+    /// Returns `Arc<Self>` unshrunk; it coerces to `Arc<dyn PluginDriver>` at
+    /// the call that hands it to the host, so nothing is lost by not unsizing
+    /// here. Tool calls go through [`WasmObserver::call_fixture_tool`], which
+    /// is not part of the host contract.
     pub fn for_component(
         revision: PluginRevisionId,
         component: &[u8],
@@ -421,39 +462,6 @@ impl WasmComponentDriver {
             _ticker: ticker,
         });
         Ok((driver, observer))
-    }
-
-    /// Call the world's `fixture-tool` on a live activation.
-    ///
-    /// Deliberately not part of `PluginDriver`: the host has no tool-invocation
-    /// contract yet, and inventing one here would be inventing it in the wrong
-    /// crate. What this exists for is evidence - a guest's answer observed
-    /// through the same store, limiter, and call deadline its activation runs
-    /// under, rather than through a linker a test built for itself.
-    pub async fn call_fixture_tool(
-        &self,
-        id: &PluginActivationId,
-        input_json: &str,
-    ) -> Result<String, DriverActivationError> {
-        let core = self
-            .observation(id)
-            .and_then(|state| {
-                state
-                    .core
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .upgrade()
-            })
-            .ok_or_else(|| DriverActivationError::failed("no live activation for that identity"))?;
-        core.call_fixture_tool(input_json).await
-    }
-
-    fn observation(&self, id: &PluginActivationId) -> Option<Arc<ActivationObservation>> {
-        self.observations
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .get(id)
-            .cloned()
     }
 }
 
@@ -601,17 +609,29 @@ impl ActivationCore {
         Ok(())
     }
 
-    async fn instantiate(&self) -> Result<(), DriverActivationError> {
+    async fn instantiate(
+        &self,
+        context: Option<PluginStartContext>,
+    ) -> Result<(), DriverActivationError> {
         self.enter_guest("instantiation")?;
         let mut linker: Linker<HostState> = Linker::new(&self.engine);
         Conformance::add_to_linker::<HostState, HasSelf<HostState>>(&mut linker, |state| state)
             .map_err(|error| {
                 DriverActivationError::failed(format!("host imports did not link: {error}"))
             })?;
-        let mut store = Store::new(
-            &self.engine,
-            HostState::with_limits(self.observation.host.clone(), self.limits),
-        );
+        // The permit's capability context rides in the store's own state, so
+        // the `capabilities` import can only ever resolve the grants admitted
+        // for this exact activation - there is no driver-wide registry a guest
+        // could reach past its own store. `None` occurs only on entry paths
+        // that never saw a start permit (in-crate interrupt tests); it reads
+        // as an activation holding no grants at all.
+        let state = match context {
+            Some(context) => {
+                HostState::with_grants(self.observation.host.clone(), self.limits, context)
+            }
+            None => HostState::with_limits(self.observation.host.clone(), self.limits),
+        };
+        let mut store = Store::new(&self.engine, state);
         store.limiter(|state: &mut HostState| state.limiter() as &mut dyn ResourceLimiter);
         // A guest can alias every element of a list at one buffer, so the
         // memory ceiling does not bound what a single call costs the host.
@@ -643,7 +663,17 @@ impl ActivationCore {
                     self.describe_stop("instantiation", &error)
                 ))
             })?;
-        *self.live.lock().await = Some(LiveInstance { store, bindings });
+        let mut live = self.live.lock().await;
+        // One store per core, asserted rather than assumed - before anything
+        // is published and while the lock is held: the live capability counter
+        // is shared through the observer, so a second store would read a
+        // ceiling the first store's entries still occupy.
+        debug_assert!(
+            live.is_none(),
+            "an activation core must instantiate at most once"
+        );
+        *live = Some(LiveInstance { store, bindings });
+        drop(live);
         self.observation
             .resource
             .store(ResourceState::Live as u8, Ordering::Release);
@@ -811,7 +841,7 @@ impl PreparedDriverActivation for PreparedWasmActivation {
                     "host start permit did not match the prepared activation",
                 ));
             }
-            core.instantiate().await?;
+            core.instantiate(Some(permit.context().clone())).await?;
             match plan.start {
                 StartBehavior::CallActivate => core.call_activate().await,
                 StartBehavior::PendAfterInstantiate => {

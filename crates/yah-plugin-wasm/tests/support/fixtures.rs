@@ -9,18 +9,39 @@
 #![allow(dead_code)]
 
 use yah_plugin_host::{
-    DriverConformanceCase, DriverConformanceSetupError, PackageDigest, PackageRelativePath,
-    PluginEntrypoint, PluginManifest, PluginPackageId, PluginRevision, PluginVersion,
-    SdkVersionRequirement,
+    CapabilityId, CapabilityRequest, DriverConformanceCase, DriverConformanceSetupError,
+    PackageDigest, PackageRelativePath, PluginEntrypoint, PluginManifest, PluginPackageId,
+    PluginRevision, PluginVersion, SdkVersionRequirement,
 };
 
 pub(super) fn revision(
     case: DriverConformanceCase,
     digest: char,
 ) -> Result<PluginRevision, DriverConformanceSetupError> {
+    revision_requesting(case, digest, &[])
+}
+
+/// The same fixture identity, with capability requests in its manifest.
+///
+/// Effective grants admit only requested capability IDs, so a fixture that is
+/// to be granted anything must say so here first - request-only, as a real
+/// manifest would.
+pub(super) fn revision_requesting(
+    case: DriverConformanceCase,
+    digest: char,
+    capabilities: &[&str],
+) -> Result<PluginRevision, DriverConformanceSetupError> {
     let setup = |error: String| DriverConformanceSetupError::new(error);
     let package = PluginPackageId::new(format!("test.wasm.{}", package_suffix(case)))
         .map_err(|error| setup(format!("fixture package ID is invalid: {error}")))?;
+    let requested = capabilities
+        .iter()
+        .map(|capability| {
+            CapabilityId::new(*capability)
+                .map(CapabilityRequest::new)
+                .map_err(|error| setup(format!("fixture capability request is invalid: {error}")))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
     let manifest = PluginManifest::new(
         package,
         PluginVersion::new("1.0.0")
@@ -33,7 +54,7 @@ pub(super) fn revision(
         },
         vec![],
         vec![],
-        vec![],
+        requested,
     )
     .map_err(|error| setup(format!("fixture manifest is invalid: {error}")))?;
     let digest = PackageDigest::new(format!("blake3:{}", digest.to_string().repeat(64)))

@@ -260,12 +260,13 @@ backend. See the
 
 The `yah-plugin-wasm` crate separately owns a
 [versioned WIT conformance world](wasm-plugin-contract.md) and the first driver
-to execute against it. Parser tests fix the exact baseline
-logging/cancellation imports and lifecycle/tool fixture exports, while a
-Wasmtime-backed driver compiles fixture components, instantiates one store per
-activation, and passes the portable lifecycle corpus. Deactivation drops the
-store without consulting guest code. This is an executable ABI draft, not a
-package loader, capability resource bridge, or sandbox.
+to execute against it. Parser tests fix the exact
+logging/cancellation/capabilities imports and lifecycle/tool fixture exports,
+while a Wasmtime-backed driver compiles fixture components, instantiates one
+store per activation, and passes the portable lifecycle corpus. Brokered
+capabilities cross this ABI as opaque resources scoped to their activation's
+admitted grants. Deactivation drops the store without consulting guest code.
+This is an executable ABI draft, not a package loader or sandbox.
 
 Each plugin revision has a content identity, manifest, requested capabilities,
 configuration, and execution driver. Admission separates:
@@ -280,9 +281,11 @@ be repaired by optimistic labeling.
 
 ## Sandbox and Credentials
 
-The WIT draft contains only explicitly named baseline interfaces and no WASI
-imports, and the Wasm driver links exactly those, though its checked-in
-fixtures import nothing and so never call back. It enforces host-owned memory
+The WIT draft contains only explicitly named interfaces - baseline logging
+and cancellation, plus the brokered `capabilities` import - and no WASI
+imports, and the Wasm driver links exactly those; the flood fixture calls
+back through logging and the capability-consumer fixture through
+capabilities. It enforces host-owned memory
 and table ceilings and a call deadline that terminates a guest which will not
 stop, and it bounds what one host call may retain. Those are resource bounds,
 not isolation: guest code still runs in the authority process, so the driver may

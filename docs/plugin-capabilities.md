@@ -77,8 +77,14 @@ provider lifecycle.
 
 `try_with` is a trusted in-process contract seam, not a hostile-code sandbox.
 Capability contract authors must not return or clone raw authority that bypasses
-the handle. Future Wasm and process adapters will map these semantics onto
-authenticated opaque resource tables rather than serialize process-local IDs.
+the handle. Runtime adapters map these semantics onto authenticated opaque
+resource tables rather than serialize process-local IDs: the Wasm driver now
+does exactly this for providers registered under the portable [`TextCapability`]
+contract, keeping behind each guest-held resource an entry that wraps an
+activation-scoped handle, so every guest call re-enters `try_with` and its
+gates. Process adapters will follow the same shape.
+
+[`TextCapability`]: ../crates/yah-plugin-host/src/capability/text.rs
 
 The runnable [local authoring example](plugin-authoring.md) demonstrates this
 flow with an example-only synchronous greeting contract. It proves denial,
@@ -96,8 +102,9 @@ This slice does not implement:
 - async calls, streams, task supervision, deadlines, rate limits, or forced
   cancellation;
 - durable work-attempt identity or child invocation scopes;
-- WIT/IPC capability-resource encodings, production execution drivers, or
-  sandbox enforcement;
+- IPC capability-resource encodings, production execution drivers, or sandbox
+  enforcement. The WIT encoding exists for the portable text contract; richer
+  or typed-per-capability encodings do not;
 - provider cleanup ownership, durable external effects, or Selene persistence;
   or
 - automatic lifecycle changes after a host policy decision.
@@ -107,6 +114,9 @@ will bind into capability calls when a real invocation owner exists. Grant
 changes likewise require a fresh activation until later security policy defines
 audited revocation and dependent scheduling.
 
-The separate [WIT conformance world](wasm-plugin-contract.md) imports only
-baseline logging and cancellation for one fixed profile. It does not yet
-transport these capability handles or turn static imports into grants.
+The separate [WIT conformance world](wasm-plugin-contract.md) now carries
+these handles to a Wasm guest as opaque resources, for providers registered
+under the portable text contract. The static import never becomes a grant:
+the authority is the resource `acquire` returns against the activation's
+admitted snapshot, and a denied capability is an observable refusal rather
+than a missing or stubbed import.

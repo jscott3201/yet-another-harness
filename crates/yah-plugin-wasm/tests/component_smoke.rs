@@ -4,9 +4,10 @@
 //! semantics. This file proves the other half: that the world's exports are
 //! callable across the canonical ABI and that shutdown is entirely host-owned.
 //!
-//! These fixtures import nothing. The world's logging and cancellation imports
-//! are linked here and proved linkable, but no guest calls back through them;
-//! a guest that exercises its imports arrives with the example plugins.
+//! The fixtures smoked here import nothing. The world's imports are linked and
+//! proved linkable, but no guest in this file calls back through them; guests
+//! that exercise the import path live in `example_guests.rs` (logging,
+//! cancellation) and `capability_transport.rs` (capabilities).
 
 use wasmtime::{
     Engine, Store,

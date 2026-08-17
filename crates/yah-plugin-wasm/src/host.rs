@@ -1,14 +1,20 @@
-//! Host state backing the two imports the conformance world requires.
+//! Host state backing the three imports the conformance world requires.
 //!
-//! Both imports are baseline context rather than granted capabilities. Logging
-//! accepts inert strings and cancellation is read-only, so neither carries
-//! authority a guest could spend. Granted capabilities stay out of this world
-//! until a capability-resource profile exists to carry them.
+//! Logging and cancellation are baseline context rather than granted
+//! capabilities: inert strings one way, a read-only bit the other, so neither
+//! carries authority a guest could spend. The `capabilities` import is the
+//! exception this module exists to keep honest - its implementation lives in
+//! [`crate::capability`], and the authority it mediates enters here only as
+//! the activation's admitted [`PluginStartContext`], never as a provider
+//! reference the state could hold past revocation.
 
 use std::sync::{
     Arc, Mutex,
     atomic::{AtomicBool, AtomicUsize, Ordering},
 };
+
+use wasmtime::component::ResourceTable;
+use yah_plugin_host::PluginStartContext;
 
 use crate::{
     bindings::yah::plugin::{cancellation, logging},
@@ -49,6 +55,11 @@ pub struct HostObserver {
     dropped: Arc<AtomicUsize>,
     truncated: Arc<AtomicUsize>,
     cancellation_polls: Arc<AtomicUsize>,
+    capability_acquires: Arc<AtomicUsize>,
+    capability_acquire_refusals: Arc<AtomicUsize>,
+    capability_calls: Arc<AtomicUsize>,
+    capability_call_refusals: Arc<AtomicUsize>,
+    live_capability_handles: Arc<AtomicUsize>,
 }
 
 impl HostObserver {
@@ -142,6 +153,61 @@ impl HostObserver {
     pub fn cancellation_polls(&self) -> usize {
         self.cancellation_polls.load(Ordering::Acquire)
     }
+
+    /// Capability acquires the guest attempted, admitted or not.
+    pub fn capability_acquires(&self) -> usize {
+        self.capability_acquires.load(Ordering::Acquire)
+    }
+
+    /// Acquires refused, for any reason the `acquire-error-code` enum names.
+    ///
+    /// Counted as an admitted/refused pair rather than per code: the code
+    /// itself is evidence the guest's own answer already carries, and a
+    /// counter nothing asserts is not evidence.
+    pub fn capability_acquire_refusals(&self) -> usize {
+        self.capability_acquire_refusals.load(Ordering::Acquire)
+    }
+
+    /// Capability calls the guest attempted through a held resource.
+    pub fn capability_calls(&self) -> usize {
+        self.capability_calls.load(Ordering::Acquire)
+    }
+
+    /// Calls refused before or by the provider.
+    pub fn capability_call_refusals(&self) -> usize {
+        self.capability_call_refusals.load(Ordering::Acquire)
+    }
+
+    /// Capability resources the guest holds live - a gauge, not a total.
+    ///
+    /// Decremented when the guest calls `resource.drop` and equally when the
+    /// store drops with resources still held, because both paths drop the table
+    /// entry - so the decrement is a release, not a `drop` call, and a guest
+    /// that never drops anything still reads zero here after teardown.
+    pub fn live_capability_handles(&self) -> usize {
+        self.live_capability_handles.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn count_capability_acquire_attempt(&self) {
+        self.capability_acquires.fetch_add(1, Ordering::AcqRel);
+    }
+
+    pub(crate) fn count_capability_acquire_refusal(&self) {
+        self.capability_acquire_refusals
+            .fetch_add(1, Ordering::AcqRel);
+    }
+
+    pub(crate) fn count_capability_call_attempt(&self) {
+        self.capability_calls.fetch_add(1, Ordering::AcqRel);
+    }
+
+    pub(crate) fn count_capability_call_refusal(&self) {
+        self.capability_call_refusals.fetch_add(1, Ordering::AcqRel);
+    }
+
+    pub(crate) fn live_capability_handles_counter(&self) -> Arc<AtomicUsize> {
+        Arc::clone(&self.live_capability_handles)
+    }
 }
 
 /// Per-store host state handed to the generated import implementations.
@@ -153,6 +219,16 @@ pub struct HostState {
     observer: HostObserver,
     limits: WasmLimits,
     limiter: ActivationLimiter,
+    /// The activation's admitted capability context, when one exists.
+    ///
+    /// `None` means the store was built outside the host lifecycle - direct
+    /// linker tests, mostly - and reads as the absence of every grant rather
+    /// than as a distinct state a guest could observe.
+    context: Option<PluginStartContext>,
+    /// Live guest-held capability entries, keyed by the handles Wasmtime
+    /// manages. Capacity is left at its default because the real ceiling is
+    /// [`WasmLimits::max_capability_handles`], enforced before any push.
+    table: ResourceTable,
 }
 
 impl HostState {
@@ -165,6 +241,20 @@ impl HostState {
             observer,
             limits,
             limiter: limits.limiter(),
+            context: None,
+            table: ResourceTable::new(),
+        }
+    }
+
+    /// State for an activation the host admitted, grants and all.
+    pub fn with_grants(
+        observer: HostObserver,
+        limits: WasmLimits,
+        context: PluginStartContext,
+    ) -> Self {
+        Self {
+            context: Some(context),
+            ..Self::with_limits(observer, limits)
         }
     }
 
@@ -175,6 +265,22 @@ impl HostState {
     /// The ceilings Wasmtime consults when the guest asks to grow.
     pub const fn limiter(&mut self) -> &mut ActivationLimiter {
         &mut self.limiter
+    }
+
+    pub(crate) const fn limits(&self) -> &WasmLimits {
+        &self.limits
+    }
+
+    pub(crate) const fn capability_context(&self) -> Option<&PluginStartContext> {
+        self.context.as_ref()
+    }
+
+    pub(crate) const fn capability_table(&mut self) -> &mut ResourceTable {
+        &mut self.table
+    }
+
+    pub(crate) const fn capability_table_ref(&self) -> &ResourceTable {
+        &self.table
     }
 }
 

@@ -7,8 +7,10 @@
 //! from. Its TypeScript counterpart answers identically, which is what makes
 //! the world a contract rather than a Rust convention.
 //!
-//! It calls both imports on purpose. A guest that never calls back leaves the
-//! host's guest-to-host path unexercised, and that path carries its own bounds.
+//! It calls the logging and cancellation imports on purpose - a guest that
+//! never calls back leaves the host's guest-to-host path unexercised, and that
+//! path carries its own bounds. It does not call `capabilities`, so no
+//! toolchain-portability claim exists for capability transport yet.
 
 wit_bindgen::generate!({
     path: "../../../crates/yah-plugin-wasm/wit",

@@ -7,10 +7,10 @@
 //! world is a contract two unrelated toolchains can satisfy, and that the host
 //! cannot tell which one it is talking to.
 //!
-//! They also close a gap the fixtures leave. No checked-in fixture imports
-//! anything, so the host's guest-to-host path - its byte budget, its retained
-//! log records, and the panic guard around each poll - had no case that entered
-//! it. Both guests call `logging` and `cancellation`, so it is entered here.
+//! They also prove the guest-to-host path from a real toolchain. Both guests
+//! call `logging` and `cancellation`, so the byte budget, retained log
+//! records, and per-poll panic guard are entered by authored code here, not
+//! only by the flood and capability fixtures the corpus hand-writes.
 //!
 //! Artifacts come from `scripts/build-guests.sh` rather than from this test,
 //! because building them needs two toolchains and one of them needs Node. A
@@ -163,7 +163,7 @@ async fn run_guest(label: &str, digest: char, component: &[u8]) -> GuestRun {
     let mut answers = Vec::with_capacity(EQUIVALENCE_INPUTS.len());
     for input in EQUIVALENCE_INPUTS {
         answers.push(
-            driver
+            observer
                 .call_fixture_tool(&id, input)
                 .await
                 .unwrap_or_else(|error| panic!("guest refused {input}: {error:?}")),
@@ -238,9 +238,10 @@ const EQUIVALENCE_INPUTS: &[&str] = &[
 ///
 /// Same world, same input, same answer apart from the value of the one field
 /// each guest uses to name itself; and both guests reaching the host through
-/// both of the world's imports. If the host could tell them apart in any other
-/// way, the world would not be the contract - so this asks across inputs that
-/// give the two toolchains every opportunity to disagree, not just the one that
+/// the logging and cancellation imports. If the host could tell them apart
+/// in any other way, the world would not be the contract - so this asks
+/// across inputs that give the two toolchains every opportunity to disagree,
+/// not just the one that
 /// suits them.
 ///
 /// One test rather than two, because Nextest runs each test in its own process
@@ -339,7 +340,7 @@ async fn a_guest_that_declines_is_reported_as_declining_and_then_as_gone() {
         .await
         .expect("the example guest activates");
 
-    let declined = driver
+    let declined = observer
         .call_fixture_tool(&id, "")
         .await
         .expect_err("an empty request is refused by the guest");
@@ -350,7 +351,7 @@ async fn a_guest_that_declines_is_reported_as_declining_and_then_as_gone() {
     );
     // Refusing is not failing: the activation is still live and still answers.
     assert_eq!(observer.resource_state(&id), Ok(ResourceState::Live));
-    driver
+    observer
         .call_fixture_tool(&id, EQUIVALENCE_INPUTS[0])
         .await
         .expect("a declined call must not poison the activation");
@@ -363,7 +364,7 @@ async fn a_guest_that_declines_is_reported_as_declining_and_then_as_gone() {
         .await
         .expect("cleanup completes");
 
-    let gone = driver
+    let gone = observer
         .call_fixture_tool(&id, EQUIVALENCE_INPUTS[0])
         .await
         .expect_err("a torn-down activation has nothing to call");
@@ -375,10 +376,10 @@ async fn a_guest_that_declines_is_reported_as_declining_and_then_as_gone() {
     );
 }
 
-/// The gap the fixture corpus leaves: a guest that calls back into the host.
+/// Toolchain-built guests calling back into the host, observed host-side.
 ///
-/// Both imports, observed on the host side. The fixtures import nothing, so
-/// before this the host's guest-to-host path was enforced and never entered.
+/// Logging and cancellation both, from authored code rather than from the
+/// hand-written flood and capability fixtures that also enter this path.
 fn assert_reached_the_host(name: &str, run: &GuestRun) {
     assert_eq!(
         run.records.len(),

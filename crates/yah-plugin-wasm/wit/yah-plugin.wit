@@ -21,6 +21,44 @@ interface cancellation {
   is-cancelled: func() -> bool;
 }
 
+interface capabilities {
+  // Case order is load-bearing for both error enums: the capability-consumer
+  // fixture reports discriminants as ASCII digits, and world_contract.rs
+  // freezes the ordered case lists, so a reorder is a deliberate contract
+  // change rather than a silent renumbering of test evidence.
+  enum acquire-error-code {
+    invalid-id,
+    not-granted,
+    revoked,
+    unavailable,
+    mismatched,
+    handle-limit,
+  }
+
+  record acquire-error {
+    code: acquire-error-code,
+    message: string,
+  }
+
+  enum call-error-code {
+    revoked,
+    exhausted,
+    invalid-input,
+    failed,
+  }
+
+  record call-error {
+    code: call-error-code,
+    message: string,
+  }
+
+  resource capability {
+    invoke: func(input: string) -> result<string, call-error>;
+  }
+
+  acquire: func(capability-id: string) -> result<capability, acquire-error>;
+}
+
 interface lifecycle {
   enum error-code {
     cancelled,
@@ -54,6 +92,7 @@ interface fixture-tool {
 world conformance {
   import logging;
   import cancellation;
+  import capabilities;
 
   export lifecycle;
   export fixture-tool;

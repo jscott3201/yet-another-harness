@@ -1,9 +1,10 @@
-//! Evidence for the two host imports and the fixture allocator's bounds.
+//! Evidence for the logging and cancellation imports and the fixture
+//! allocator's bounds.
 //!
-//! The checked-in fixture components import nothing, so a guest call cannot
-//! reach `logging` or `cancellation`. These tests drive the host side directly
-//! instead, so the retention bound and the cancellation signal are held by
-//! something other than a comment.
+//! These tests drive the host side of both imports directly, so the retention
+//! bound and the cancellation signal are held by something other than a
+//! comment; guests that enter the same path live in `example_guests.rs`. The
+//! third import's host side is `capability_transport.rs`'s subject.
 
 use std::sync::{
     Arc,

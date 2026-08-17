@@ -15,18 +15,24 @@
 //! Guest calls run on their own stack and yield the thread at each epoch tick,
 //! so one guest cannot starve another by computing.
 //!
-//! This crate does not load plugin packages, meter fuel, transport capability
-//! grants across the ABI, or contain hostile guest code. Bounding what a guest
-//! costs is not isolating what it can reach, and its fixture components are
-//! corpus, not a guest SDK.
+//! Granted capabilities reach a guest as opaque WIT resources: the authority
+//! is the resource `acquire` returns - activation-scoped through the broker
+//! handle behind it - never the import itself, and every use re-enters the
+//! broker's revocation and fencing gates ([`capability`]).
+//!
+//! This crate does not load plugin packages, meter fuel, or contain hostile
+//! guest code. Bounding what a guest costs is not isolating what it can reach,
+//! and its fixture components are corpus, not a guest SDK.
 
 pub mod bindings;
+pub mod capability;
 pub mod driver;
 pub mod guest;
 pub mod host;
 pub mod limits;
 pub mod surface;
 
+pub use capability::GrantedCapability;
 pub use driver::{
     ResourceState, WasmActivationPlan, WasmComponentDriver, WasmDriverBuildError, WasmObserver,
 };

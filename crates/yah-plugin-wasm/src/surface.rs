@@ -46,7 +46,11 @@ use wasmtime::{Engine, component::Component};
 /// Frozen here and cross-checked against the WIT source by
 /// `world_contract::the_import_allowlist_matches_the_world`, so a world that
 /// grows an import fails that test rather than silently widening this one.
-pub const WORLD_IMPORTS: &[&str] = &["yah:plugin/logging@0.1.0", "yah:plugin/cancellation@0.1.0"];
+pub const WORLD_IMPORTS: &[&str] = &[
+    "yah:plugin/logging@0.1.0",
+    "yah:plugin/cancellation@0.1.0",
+    "yah:plugin/capabilities@0.1.0",
+];
 
 /// Refuse a component that declares an import the world does not.
 ///
@@ -73,10 +77,14 @@ mod tests {
 
     /// The allowlist is the world's imports, not a superset that happens to work.
     #[test]
-    fn the_allowlist_names_both_world_imports_and_nothing_else() {
+    fn the_allowlist_names_every_world_import_and_nothing_else() {
         assert_eq!(
             WORLD_IMPORTS,
-            &["yah:plugin/logging@0.1.0", "yah:plugin/cancellation@0.1.0"]
+            &[
+                "yah:plugin/logging@0.1.0",
+                "yah:plugin/cancellation@0.1.0",
+                "yah:plugin/capabilities@0.1.0",
+            ]
         );
     }
 

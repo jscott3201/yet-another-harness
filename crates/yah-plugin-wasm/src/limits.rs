@@ -141,6 +141,13 @@ pub struct WasmLimits {
     pub max_log_message_bytes: usize,
     /// Structured fields the host will retain from one log call.
     pub max_log_fields: usize,
+    /// Live capability handles one activation may hold at once.
+    ///
+    /// Each acquired handle is a host-heap table entry that neither the memory
+    /// ceiling nor the store limiter sees, and the guest chooses how many to
+    /// acquire and whether to ever drop one. Refusal is an ordinary
+    /// `handle-limit` error, and a dropped handle frees its slot.
+    pub max_capability_handles: usize,
 }
 
 impl WasmLimits {
@@ -330,6 +337,7 @@ impl Default for WasmLimits {
             call_budget_ticks: 100,
             max_log_message_bytes: 4 * 1024,
             max_log_fields: 32,
+            max_capability_handles: 16,
         }
     }
 }
