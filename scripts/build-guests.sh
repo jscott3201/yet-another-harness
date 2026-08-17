@@ -28,8 +28,10 @@
 # Usage: bash scripts/build-guests.sh
 
 set -euo pipefail
-# Derived from this script's own location, like every other script in here, and
-# deliberately not from `git rev-parse --show-toplevel`. Hosted CI checks out as
+# Derived from this script's own location, as `ci-rust.sh`, `container-test.sh`
+# and `test.sh` do, and deliberately not from `git rev-parse --show-toplevel`.
+# (`full-gate.sh` and `install-hooks.sh` still use git, and may: neither runs
+# inside the CI container.) Hosted CI checks out as
 # one uid and runs the job container as root, so git refuses the repository as
 # dubiously owned and exits 128. That was already happening before this script
 # needed the value: the old `cd "$(git rev-parse ...)"` swallowed it, because

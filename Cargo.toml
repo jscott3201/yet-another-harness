@@ -33,9 +33,12 @@ members = [
 #   every dependency   111.8s build, tests  8.7s
 #
 # The middle row buys the whole of the fix for a ninth of the bottom row's extra
-# build time. Hosted CI is slower than the machine above, so what earns the
-# middle row is that it lands far inside the terminate rather than just inside
-# it; the bottom row's remaining 7.3s is not worth 69s of build on every run.
+# build time, and the bottom row's remaining 7.3s is not worth 69s of build on
+# every run. Hosted CI is slower than the machine above and is the number that
+# decides it: there the one guest case takes 47.2s against the 120s terminate,
+# so the margin is 2.5x rather than the 7x the middle row suggests locally.
+# That case is the suite's closest approach to the bound, and a third guest, or
+# a slower runner, is what would put it back in reach.
 [profile.dev.package.cranelift-codegen]
 opt-level = 2
 

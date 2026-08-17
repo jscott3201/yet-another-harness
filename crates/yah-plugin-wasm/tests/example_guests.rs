@@ -244,12 +244,22 @@ const EQUIVALENCE_INPUTS: &[&str] = &[
 /// suits them.
 ///
 /// One test rather than two, because Nextest runs each test in its own process
-/// and the two properties are views of the same run. Split, each 12 MB
-/// component is compiled by Cranelift twice instead of once, and the two
-/// processes saturate every core concurrently at the start of the run - which
-/// measurably pushed a co-scheduled trivial test past the suite's 1s
-/// leak-timeout and failed the pre-push gate. The assertions stay separated,
-/// and each still names which property and which guest broke.
+/// and the two properties are views of the same run. Split, the pair compiled
+/// both components twice instead of once - the TypeScript one is the 12 MB half
+/// of that - and ran two multi-second compiles concurrently, mid-run, beside the
+/// two long subscription cases. The assertions stay separated, and each still
+/// names which property and which guest broke.
+///
+/// What prompted it: the split failed the pre-push gate twice, both times on a
+/// three-`assert_eq!` test in another crate overrunning the suite's 1s
+/// leak-timeout; merged, the gate has been clean four times running. The
+/// mechanism is *not* established, and the obvious guess is wrong: this build
+/// resolves Wasmtime without `parallel-compilation`, so the compile runs on one
+/// thread, and this case measures 15.04s user against 15.28s real on a ten-core
+/// machine - 0.98 cores, not ten. `scripts/test.sh ci` also passed on its own
+/// either way, which no explanation resting on suite composition alone
+/// accounts for. Halving the work is what correlates with the gate passing;
+/// why that is enough is open.
 #[tokio::test]
 async fn both_example_guests_behave_identically_through_the_host() {
     let rust = run_guest("wasm.example.rust", '1', &rust_component()).await;
