@@ -238,9 +238,10 @@ const EQUIVALENCE_INPUTS: &[&str] = &[
 ///
 /// Same world, same input, same answer apart from the value of the one field
 /// each guest uses to name itself; and both guests reaching the host through
-/// the logging and cancellation imports. If the host could tell them apart in
-/// any other way, the world would not be the contract - so this asks across inputs that
-/// give the two toolchains every opportunity to disagree, not just the one that
+/// the logging and cancellation imports. If the host could tell them apart
+/// in any other way, the world would not be the contract - so this asks
+/// across inputs that give the two toolchains every opportunity to disagree,
+/// not just the one that
 /// suits them.
 ///
 /// One test rather than two, because Nextest runs each test in its own process

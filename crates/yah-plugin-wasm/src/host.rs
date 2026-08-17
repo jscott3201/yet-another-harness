@@ -181,7 +181,7 @@ impl HostObserver {
     /// Capability resources the guest holds live - a gauge, not a total.
     ///
     /// Decremented when the guest calls `resource.drop` and equally when the
-    /// store drops with handles still held, because both paths drop the table
+    /// store drops with resources still held, because both paths drop the table
     /// entry - so the decrement is a release, not a `drop` call, and a guest
     /// that never drops anything still reads zero here after teardown.
     pub fn live_capability_handles(&self) -> usize {

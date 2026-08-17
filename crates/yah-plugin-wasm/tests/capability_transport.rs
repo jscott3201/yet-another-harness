@@ -295,7 +295,7 @@ async fn provider_withdrawal_revokes_held_handles_and_replacement_never_retarget
 
     let _withdrawn = registration.withdraw();
 
-    // The held handle is revoked (call enum: revoked = 0)...
+    // The held resource is revoked (call enum: revoked = 0)...
     assert_eq!(
         observer
             .call_fixture_tool(&id, "ping")
@@ -374,7 +374,7 @@ async fn a_stale_activation_is_fenced_in_the_stop_window() {
     slot.reconcile(&rig.registry, removed)
         .expect("component begins stopping");
 
-    // The held handle refuses (call enum: revoked = 0)...
+    // The held resource refuses (call enum: revoked = 0)...
     assert_eq!(
         observer
             .call_fixture_tool(&id, "ping")

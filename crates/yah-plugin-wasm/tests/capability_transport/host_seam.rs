@@ -187,7 +187,7 @@ async fn the_acquire_mapping_is_whole_set_against_an_admitted_context() {
         "echo:ping"
     );
 
-    // Withdrawal splits into two codes: the held handle is revoked, while a
+    // Withdrawal splits into two codes: the held resource is revoked, while a
     // fresh acquire reports the registration as unavailable.
     let held = state
         .acquire(CAPABILITY_ID.to_owned())
@@ -423,7 +423,7 @@ async fn the_handle_ceiling_holds_at_the_host_seam_too() {
     );
     assert_eq!(state.observer().live_capability_handles(), 1);
 
-    // Dropping the held handle frees its slot for the next acquire.
+    // Dropping the held resource frees its slot for the next acquire.
     HostCapability::drop(&mut state, held).expect("drop never errors");
     assert_eq!(state.observer().live_capability_handles(), 0);
     let _reacquired = state

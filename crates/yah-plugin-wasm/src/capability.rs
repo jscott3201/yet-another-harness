@@ -24,6 +24,7 @@
 //! store limiter can see it.
 //!
 //! [`WasmLimits`]: crate::limits::WasmLimits
+//! [`PluginStartContext`]: yah_plugin_host::PluginStartContext
 
 use wasmtime::component::Resource;
 use yah_plugin_host::{
