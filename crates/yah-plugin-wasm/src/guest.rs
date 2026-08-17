@@ -26,10 +26,17 @@ pub enum GuestProgram {
     MultiMemory,
     /// Declares many empty memories, which cost bytes nothing and space plenty.
     ManyMemories,
+    /// Declares many empty tables, for the same reason and the other ceiling.
+    ManyTables,
     /// Descends a fixed number of frames, deep enough to reach a tight bound.
     DeepRecursion,
     /// Runs guest code during instantiation, long enough to yield the thread.
     SlowStart,
+    /// Lifts far more bytes into the host than its own memory holds.
+    ///
+    /// Every element of the list it logs aliases one buffer, so the memory
+    /// ceiling does not bound what the call costs; `host_call_bytes` does.
+    HostCallFlood,
 }
 
 impl GuestProgram {
@@ -42,8 +49,10 @@ impl GuestProgram {
             Self::MemoryHog => MEMORY_HOG,
             Self::MultiMemory => MULTI_MEMORY,
             Self::ManyMemories => MANY_MEMORIES,
+            Self::ManyTables => MANY_TABLES,
             Self::DeepRecursion => DEEP_RECURSION,
             Self::SlowStart => SLOW_START,
+            Self::HostCallFlood => HOST_CALL_FLOOD,
         }
     }
 }
@@ -54,5 +63,7 @@ const RUNAWAY: &str = include_str!("../guests/runaway.wat");
 const MEMORY_HOG: &str = include_str!("../guests/memory-hog.wat");
 const MULTI_MEMORY: &str = include_str!("../guests/multi-memory.wat");
 const MANY_MEMORIES: &str = include_str!("../guests/many-memories.wat");
+const MANY_TABLES: &str = include_str!("../guests/many-tables.wat");
 const DEEP_RECURSION: &str = include_str!("../guests/deep-recursion.wat");
 const SLOW_START: &str = include_str!("../guests/slow-start.wat");
+const HOST_CALL_FLOOD: &str = include_str!("../guests/host-call-flood.wat");

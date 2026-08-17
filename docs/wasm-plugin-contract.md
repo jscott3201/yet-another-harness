@@ -249,12 +249,12 @@ guest code runs in the authority process with no sandbox.
 
 The corpus carries its guests as component text under
 `crates/yah-plugin-wasm/guests/`. Text keeps the canonical-ABI shape reviewable
-in a diff, and building guests from a real language toolchain would need a
-second Rust target in the gate container. Those belong with the guest SDK work,
-so these files are corpus rather than an authoring example.
+in a diff. These files are corpus rather than an authoring example: the guests
+built from a real toolchain are the WSM-005 examples under `examples/guests/`,
+and they answer a different question.
 
-The fixtures import nothing. Host logging and cancellation are linked and
-proved linkable, but no guest here calls back through them.
+All but one of the fixtures import nothing; `host-call-flood.wat` imports and
+calls `yah:plugin/logging@0.1.0`, which is what drives the guest-to-host path.
 
 ## Deliberate limits
 
@@ -262,14 +262,29 @@ This slice does not provide:
 
 - a package loader, admission path, or any execution of code that did not come
   from the checked-in fixture corpus;
-- guest SDK artifacts or a Rust/TypeScript component build;
+- guest SDK artifacts. The Rust and TypeScript example guests WSM-005 added are
+  an authoring example and a contract check, not an SDK;
 - capability-resource tables or graph, memory, artifact, tool-registry, or
   durable-effect host APIs, and no route for a guest to reach a granted
   capability;
 - WIT async/streams, fuel metering, or per-call output bounds on the ABI
   itself;
-- WASI ambient authority, sandbox enforcement, malformed-component coverage,
-  or cross-runtime equivalence.
+- WASI ambient authority, sandbox enforcement, or cross-runtime equivalence;
+- any bound on what a component costs to *compile*. `for_component` validates
+  and compiles before a store, a limiter, or a deadline exists, and nothing
+  caps input size, section count, or compile time. The size at which that
+  becomes a denial of service has not been measured here, which is part of the
+  gap rather than a reason to discount it;
+- any check of a component's *exports* beyond requiring the world's own, and no
+  case for the per-poll panic guard. Its premise - that a store stays callable
+  after a caught host panic, where a trapped store would not - is reasoned from
+  Wasmtime's unwind behaviour and is not measured anywhere in this tree.
+- a complete import check. What is enforced is exact-name, root-level: a guest
+  that declares an undeclared import inside a *nested* component still runs,
+  the match is by exact string where Wasmtime's linker matches semver-
+  compatibly, and an allowlisted name imported as the wrong item kind is not
+  caught. A guest that also exports an undeclared interface is admitted too,
+  because the host binds the exports it wants and never enumerates the rest.
 
 WIT strings and lists are not byte-bounded by the ABI, and the memory ceiling
 does not bound them either: a guest can point every element of a list at one
@@ -288,9 +303,11 @@ would retain far more than the ceiling names. This holds on the path where
 nothing is clipped as well: a value under the ceiling by length can still have
 arrived in a much larger allocation.
 
-The host-call budget is enforced but unexercised: no checked-in fixture imports
-anything, so no guest-to-host call happens anywhere in the corpus. The
-retention limits are exercised directly.
+The host-call budget is driven by a guest. `host-call-flood.wat` points every
+element of a 200-field list at one buffer, so it spends well under its single
+page and asks the host to lift roughly six megabytes: refused under a 64 KiB
+budget and admitted under 64 MiB, with only that bound differing between the
+two. The retention limits are exercised directly as well.
 
 Bounds are not containment: a guest still runs in the host process with no
 sandbox, so this world remains unsuitable for executing untrusted input.
