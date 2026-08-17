@@ -97,7 +97,7 @@ deactivation drops it without asking the guest; and host-owned ceilings on
 memory, tables, instances, live capability handles, guest stack and recursion
 depth, call deadlines, and per-call transfer. Most ceilings are proved in
 pairs — the same guest refused under a tight ceiling and admitted under a
-generous one — and the two that are not yet are named in
+generous one — and the ones that are not yet are named in
 [project status](docs/project-status.md). Guest calls yield the thread at
 every epoch tick, so a computing guest cannot starve its siblings.
 
@@ -122,9 +122,8 @@ state, events, and receipts; authority and attempt epochs, leases, and
 fencing; durable cancellation; external-effect preparation, dispatch
 evidence, settlement, and parking for the uncertain case; provider stream
 normalization fixtures for OpenAI Responses and Anthropic Messages shapes;
-and a versioned JSON
-[protocol slice](docs/protocol.md) whose Rust types generate checked-in JSON
-Schemas and TypeScript. A storage fan-in and crash-recovery gate
+and a versioned JSON [protocol slice](docs/protocol.md) whose Rust types
+generate checked-in JSON Schemas and TypeScript. A storage fan-in and crash-recovery gate
 [passed 1,440 scored trials](docs/gates/G02-storage-fanin-recovery.md). These
 mechanics predate the pivot and are integration candidates for the new
 harness, not architectural authority.
