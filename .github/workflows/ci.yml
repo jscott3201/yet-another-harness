@@ -77,6 +77,7 @@ jobs:
         run: |
           cargo fetch --locked
           cargo fetch --locked --manifest-path tools/protocol-codegen/Cargo.toml
+          cargo fetch --locked --manifest-path examples/guests/rust-example/Cargo.toml
       - name: Run canonical Rust lane
         run: bash scripts/ci-rust.sh
       - name: Upload Nextest JUnit report

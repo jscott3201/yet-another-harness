@@ -5,8 +5,17 @@
 - Rust 1.97.1, pinned by `rust-toolchain.toml`.
 - cargo-nextest 0.9.143, installed from a checksum-verified upstream release by
   `scripts/install-nextest.sh`.
+- The `wasm32-unknown-unknown` target, for the Rust example guest. Also pinned
+  by `rust-toolchain.toml`, so rustup installs it and no lane adds a step for
+  it; it is listed here as something the build depends on, not as a chore.
+- Node 26, installed yourself. Any 26.x works; the floor is `jco`'s own
+  `engines` constraint, which rejects Node 18 and 20 outright. This is the
+  repository's one non-Rust toolchain and the one requirement here that nothing
+  in the repository installs for you on a development machine — it is needed
+  only to build the example guests, see [Example Guests](#example-guests).
 - Network access on the first build so Cargo can fetch the exact public Selene
-  Git revision pinned in `Cargo.toml` and `Cargo.lock`.
+  Git revision pinned in `Cargo.toml` and `Cargo.lock`, and so `npm ci` can
+  fetch the TypeScript guest's locked dependency tree from the npm registry.
 
 ## Fast Checks
 
@@ -62,14 +71,60 @@ disposable build volumes; pass `--reuse-target` for a faster iterative Linux
 loop. Set
 `YAH_CONTAINER_PLATFORM=linux/amd64` only for an explicit emulation check; it
 is not a meaningful performance baseline on Apple Silicon. Named Docker
-volumes retain downloaded Cargo sources and the Nextest binary without creating
-root-owned files in the checkout.
+volumes retain downloaded Cargo sources, the Nextest binary, and the Node
+toolchain without creating root-owned files in the checkout.
+
+The image carries Rust and nothing else, so the container installs the lane's
+two non-image tools itself — `scripts/install-nextest.sh` and, because Debian
+Bookworm's packaged Node is below `jco`'s floor, `scripts/install-node.sh`.
+Both are pinned and checksum-verified, and both land in the reused
+`yah-tools-*` volume, so only the first run per architecture pays for them.
+Hosted CI installs the same two through its own steps. `install-node.sh` covers
+Linux only: it exists for this container, not as a way to install Node on a
+machine you work on.
 
 CI writes JUnit to `target/nextest/ci/junit.xml` and uploads it even when tests
 fail. The current suite is about twenty seconds, so build archives and test
 partitions would add overhead. Revisit Nextest archive plus `slice:m/n`
 partitioning when test execution, rather than compilation, takes several
 minutes.
+
+## Example Guests
+
+Two example plugins implement the same `yah:plugin@0.1.0` world, one in Rust
+and one in TypeScript, and the `yah-plugin-wasm` example tests assert they
+answer identically. Build both:
+
+```bash
+bash scripts/build-guests.sh
+```
+
+`scripts/ci-rust.sh` runs this before the test lane, so the full gate and
+container run cover it; run it by hand only when iterating on a guest.
+
+Nothing it produces is committed (DEC-038): the artifacts are built from source
+at gate time, which is also the only way the TypeScript component could be
+reviewed at all, since it is 12 MB of compiled SpiderMonkey. Every byte it
+writes lands under `target/`, and nothing under `examples/` is touched — the
+container lane mounts the repository readonly, so a build that wrote next to
+its sources would pass hosted CI and fail the local parity command.
+
+### The TypeScript component is not byte-reproducible
+
+`jco componentize` does not produce a stable artifact. Measured on 2026-08-16,
+three builds of identical input with one pinned `jco` on one machine gave three
+different components — 12,493,085, 12,493,116 and 12,493,178 bytes. Two of
+those differ in 2,564,053 bytes: 14 in the first megabyte, which are length
+prefixes shifting, and the rest concentrated in the trailing four megabytes
+that hold the embedded JavaScript engine snapshot.
+
+So the artifact cannot be pinned by checksum the way `scripts/install-node.sh`
+and `scripts/install-nextest.sh` pin their downloads. What *is* pinned is the
+input: `package-lock.json` fixes the `jco` version and its whole dependency
+tree, and `npm ci` installs exactly that. The component is then verified by
+behaviour rather than by hash — the example tests drive both guests through the
+same nine inputs and require the same answers — which is the guarantee that
+actually matters for a conformance example, and the only one available here.
 
 ## Full Gate
 

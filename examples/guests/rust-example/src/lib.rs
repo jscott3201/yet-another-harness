@@ -51,6 +51,9 @@ impl fixture_tool::Guest for Example {
                 message: "input-json was empty".to_owned(),
             });
         }
+        // UTF-8 bytes. `String::len` is already that here; the TypeScript guest
+        // has to ask for it, because a JavaScript string's length is UTF-16
+        // code units. Both report the same quantity under the same name.
         log(
             LogLevel::Debug,
             "rust example invoked",
@@ -59,9 +62,7 @@ impl fixture_tool::Guest for Example {
                 value: input_json.len().to_string(),
             }],
         );
-        Ok(format!(
-            "{{\"echo\":{input_json},\"from\":\"rust\"}}"
-        ))
+        Ok(format!("{{\"echo\":{input_json},\"from\":\"rust\"}}"))
     }
 }
 

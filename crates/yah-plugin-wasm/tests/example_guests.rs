@@ -228,11 +228,11 @@ const EQUIVALENCE_INPUTS: &[&str] = &[
 
 /// The claim the pair exists to support.
 ///
-/// Same world, same input, same answer apart from the one field each guest
-/// uses to name itself. If the host could tell them apart in any other way,
-/// the world would not be the contract - so this asks across inputs that give
-/// the two toolchains every opportunity to disagree, not just the one that
-/// suits them.
+/// Same world, same input, same answer apart from the value of the one field
+/// each guest uses to name itself. If the host could tell them apart in any
+/// other way, the world would not be the contract - so this asks across inputs
+/// that give the two toolchains every opportunity to disagree, not just the one
+/// that suits them.
 #[tokio::test]
 async fn both_example_guests_answer_the_same_tool_call_the_same_way() {
     let rust = run_guest("wasm.example.rust", '1', &rust_component()).await;
@@ -244,13 +244,99 @@ async fn both_example_guests_answer_the_same_tool_call_the_same_way() {
         "{\"echo\":{\"n\":1},\"from\":\"typescript\"}"
     );
     for (index, input) in EQUIVALENCE_INPUTS.iter().enumerate() {
+        // Anchored on the whole envelope tail rather than replacing "rust"
+        // wherever it appears. The loose form passes today only because no
+        // input happens to contain that word: the answer echoes the input, so
+        // one added case carrying it would rewrite the echo too and compare two
+        // strings this test had quietly mangled. Stripping a required suffix
+        // also asserts the envelope shape, which the replace form never did.
+        let rust_body = rust.answers[index]
+            .strip_suffix(r#","from":"rust"}"#)
+            .unwrap_or_else(|| {
+                panic!(
+                    "the rust guest must answer {input} in the world's envelope, but it \
+                     answered {}",
+                    rust.answers[index]
+                )
+            });
         assert_eq!(
-            rust.answers[index].replace("rust", "typescript"),
+            format!(r#"{rust_body},"from":"typescript"}}"#),
             typescript.answers[index],
             "the two guests must differ only in how they name themselves, but they \
              answered {input} differently"
         );
     }
+}
+
+/// A guest that refuses is reported as refusing, not as failing.
+///
+/// Both examples return `invalid-input` for an empty request, which is the
+/// world's own error rather than a trap. The driver has to carry that back as a
+/// returned error: a guest that declined is not a guest that broke, and the
+/// distinction is the difference between retrying the call and tearing the
+/// plugin down.
+///
+/// The same case pins the weak handle the observation holds. After teardown the
+/// core is gone, so the driver cannot reach a store at all - and reports that,
+/// rather than reaching a live-looking one.
+#[tokio::test]
+async fn a_guest_that_declines_is_reported_as_declining_and_then_as_gone() {
+    let mut rig = Rig::new("wasm.example.declines", '5');
+    let (driver, observer): (Arc<WasmComponentDriver>, WasmObserver) =
+        WasmComponentDriver::for_component(
+            rig.revision.id().clone(),
+            &rust_component(),
+            WasmLimits::default(),
+        )
+        .expect("the example component compiles");
+    let mut activation = HostPluginActivation::prepare(
+        &mut rig.slot,
+        rig.epoch,
+        &rig.broker,
+        &rig.grants,
+        driver.clone(),
+    )
+    .expect("preparation succeeds");
+    let id = activation.id().clone();
+    activation
+        .activate(&rig.registry)
+        .await
+        .expect("the example guest activates");
+
+    let declined = driver
+        .call_fixture_tool(&id, "")
+        .await
+        .expect_err("an empty request is refused by the guest");
+    assert!(
+        declined.summary().contains("InvalidInput"),
+        "the guest's own error code must survive to the host: {}",
+        declined.summary()
+    );
+    // Refusing is not failing: the activation is still live and still answers.
+    assert_eq!(observer.resource_state(&id), Ok(ResourceState::Live));
+    driver
+        .call_fixture_tool(&id, EQUIVALENCE_INPUTS[0])
+        .await
+        .expect("a declined call must not poison the activation");
+
+    let (slot, _handle) = activation.release_active().expect("active releases");
+    let removed = DesiredComponentState::removed(slot.generation(2));
+    slot.reconcile(&rig.registry, removed)
+        .expect("component begins stopping");
+    slot.finish_stop(rig.epoch)
+        .await
+        .expect("cleanup completes");
+
+    let gone = driver
+        .call_fixture_tool(&id, EQUIVALENCE_INPUTS[0])
+        .await
+        .expect_err("a torn-down activation has nothing to call");
+    assert!(
+        gone.summary().contains("no live activation"),
+        "the driver must report the activation as gone rather than as storeless, \
+         which is what the observation's weak handle is for: {}",
+        gone.summary()
+    );
 }
 
 /// The gap the fixture corpus leaves: a guest that calls back into the host.
@@ -278,11 +364,23 @@ async fn both_example_guests_reach_the_host_through_its_imports() {
         );
         assert_eq!(run.records[1].level, LogLevel::Debug);
         // The field carries the request size, which is the one thing in these
-        // records the guest computed rather than spelled out.
+        // records the guest computed rather than spelled out - so it is the one
+        // that can disagree between toolchains without the answer changing.
+        // Read on a non-ASCII input on purpose: a JavaScript string's length is
+        // in UTF-16 code units, so an ASCII-only assertion cannot tell the two
+        // quantities apart, and this one reported 15 where Rust reported 18
+        // until the TypeScript guest was made to count bytes.
+        let non_ascii = EQUIVALENCE_INPUTS
+            .iter()
+            .position(|input| !input.is_ascii())
+            .expect("the corpus must hold a non-ASCII input for this to mean anything");
         assert_eq!(
-            run.records[1].fields,
-            vec![("bytes".to_owned(), EQUIVALENCE_INPUTS[0].len().to_string())],
-            "{name} guest should report the request size it saw"
+            run.records[non_ascii + 1].fields,
+            vec![(
+                "bytes".to_owned(),
+                EQUIVALENCE_INPUTS[non_ascii].len().to_string()
+            )],
+            "{name} guest should report the request size in UTF-8 bytes"
         );
         assert!(
             run.cancellation_polls >= 1,

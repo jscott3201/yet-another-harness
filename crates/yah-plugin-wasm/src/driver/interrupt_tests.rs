@@ -203,6 +203,69 @@ fn a_compute_bound_guest_does_not_starve_a_sibling_on_the_same_thread() {
     });
 }
 
+/// The tool path reads the same entry check the lifecycle path does.
+///
+/// `call_fixture_tool` is the first entry point a host can drive repeatedly, so
+/// it is the first one where "this activation was stopped" has to be re-read
+/// rather than assumed from the last call.
+#[test]
+fn a_killed_activation_is_refused_before_it_enters_the_guest_tool() {
+    let limits = kill_only_limits();
+    let engine = engine(limits);
+    let core = core(&engine, GuestProgram::Conformant, limits);
+    let _ticker = EpochTicker::start(&engine, limits.epoch_tick);
+    block_on(core.instantiate()).expect("the conformant guest instantiates");
+    block_on(core.call_activate()).expect("it activates");
+    // It answers while live, or the refusal below would prove nothing.
+    block_on(core.call_fixture_tool("{}")).expect("a live guest answers its tool");
+
+    core.interrupt.kill();
+    let failure =
+        block_on(core.call_fixture_tool("{}")).expect_err("a killed activation must not run");
+    assert!(
+        failure.summary().contains("stopped before invoke"),
+        "the refusal must name why it was refused: {}",
+        failure.summary()
+    );
+}
+
+/// A faulted activation refuses the next call, which is what health promises.
+///
+/// Wasmtime poisons a store whose guest trapped, so this particular fault would
+/// also be refused one layer out - but a host panic caught mid-call leaves a
+/// store Wasmtime still considers callable, and the host's own check is what
+/// covers both. The runaway fixture traps on `invoke` because lowering the
+/// argument runs its trapping allocator, which is a fault the corpus already
+/// has.
+#[test]
+fn a_faulted_activation_refuses_the_next_tool_call() {
+    let limits = kill_only_limits();
+    let engine = engine(limits);
+    let core = core(&engine, GuestProgram::Runaway, limits);
+    let _ticker = EpochTicker::start(&engine, limits.epoch_tick);
+    block_on(core.instantiate()).expect("the runaway guest instantiates");
+
+    let trapped = block_on(core.call_fixture_tool("{}"))
+        .expect_err("the runaway fixture traps when its allocator runs");
+    assert!(
+        trapped.summary().contains("trapped"),
+        "the first failure must be the trap itself: {}",
+        trapped.summary()
+    );
+    assert!(
+        core.observation.faulted.load(Ordering::Acquire),
+        "a trap must mark the activation unable to be entered"
+    );
+
+    let refused = block_on(core.call_fixture_tool("{}"))
+        .expect_err("a faulted activation must not be entered again");
+    assert!(
+        refused.summary().contains("earlier failure"),
+        "the refusal must name the earlier failure rather than repeat the trap: {}",
+        refused.summary()
+    );
+}
+
 #[test]
 fn a_live_activation_still_runs_after_a_sibling_core_is_killed() {
     let limits = kill_only_limits();

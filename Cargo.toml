@@ -13,13 +13,31 @@ members = [
 # lifecycle and reversible-cleanup semantics are proved beside the retained
 # reliability kernel.
 
-# Dependencies are optimised even in dev and test builds; workspace crates are
-# not. Guest components are compiled by Cranelift at test time, and an
-# unoptimised Cranelift takes tens of seconds over the 12 MB component the
-# TypeScript example produces - close enough to the harness's per-test timeout
-# to be a gate failure rather than a slow test. This changes how fast the
-# dependency runs, not what it does.
-[profile.dev.package."*"]
+# The two crates that do Cranelift's compiling are optimised even in dev and
+# test builds. Nothing else is, including every workspace crate.
+#
+# Guest components are compiled at test time, and unoptimised that takes about
+# 115 seconds over the 12 MB component the TypeScript example produces - past
+# the harness's 120s per-test terminate, so the case fails the run rather than
+# merely running slowly. This changes how fast a dependency runs, not what it
+# does; every other test's duration is unmoved.
+#
+# Scoped rather than `"*"` because the cost is recurring: the gate cleans before
+# every run and CI never caches `target/`. Measured on one machine, clean
+# `cargo build --workspace --all-targets` against the example-guest tests:
+#
+#   nothing             33.6s build, tests TIME OUT
+#   these two           42.4s build, tests 16.0s
+#   every dependency   111.8s build, tests  8.7s
+#
+# The middle row buys the whole of the fix for a ninth of the bottom row's extra
+# build time. Hosted CI is slower than the machine above, so what earns the
+# middle row is that it lands far inside the terminate rather than just inside
+# it; the bottom row's remaining 7.3s is not worth 69s of build on every run.
+[profile.dev.package.cranelift-codegen]
+opt-level = 2
+
+[profile.dev.package.regalloc2]
 opt-level = 2
 
 [workspace.package]

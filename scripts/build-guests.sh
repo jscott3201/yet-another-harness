@@ -17,36 +17,92 @@
 #   Node. `npm ci` installs from the committed lockfile: an exact tree, not
 #   whatever the registry resolves today.
 #
+# Every byte this script writes lands under `target/`, and nothing under
+# `examples/` is touched. That is not tidiness: `scripts/container-test.sh`
+# bind-mounts the repository *readonly* so a container can never mutate the
+# host tree, and supplies writable volumes only under `target/`. A build that
+# wrote its outputs next to its sources would pass in CI — where the checkout
+# is writable — and fail the documented local parity command, which is the
+# failure mode the container lane exists to catch.
+#
 # Usage: bash scripts/build-guests.sh
 
 set -euo pipefail
-cd "$(git rev-parse --show-toplevel)"
+repo_root="$(git rev-parse --show-toplevel)"
+cd "$repo_root"
+
+# Preflight rather than a confusing failure three commands in. The Rust half
+# needs only what the workspace already needs; the TypeScript half needs Node,
+# which is this lane's one non-Rust dependency.
+for tool in node npm; do
+  if ! command -v "$tool" >/dev/null 2>&1; then
+    echo "FAIL: $tool is required to build the TypeScript example guest." >&2
+    echo "      See docs/development.md for the pinned major; any recent Node works." >&2
+    exit 2
+  fi
+done
 
 out="target/guests"
+rust_build="target/guests/rust-example.build"
+ts_build="target/guests/ts-example.build"
 mkdir -p "$out"
 
 echo "==> rust example guest (clippy)"
 # The guest is outside the workspace, so the workspace lane never sees it. An
 # example that does not pass the repository's own lint bar is not an example.
-cargo clippy --release \
+#
+# `--target-dir` on every cargo invocation, including this one: clippy writes
+# artifacts too, and the default would be `examples/guests/rust-example/target`.
+cargo clippy --locked --release \
   --target wasm32-unknown-unknown \
+  --target-dir "$rust_build" \
   --manifest-path examples/guests/rust-example/Cargo.toml \
   --all-targets -- -D warnings
 
+echo "==> rust example guest (format)"
+# The guest is outside the workspace, so `cargo fmt --all` never reaches it.
+# `--check` reports rather than rewrites, so this one writes nothing anywhere.
+cargo fmt --check --manifest-path examples/guests/rust-example/Cargo.toml
+
 echo "==> rust example guest (core module)"
-cargo build --release \
+# `--locked`, like every other cargo invocation in scripts/. Without it the
+# guest's committed lockfile is a starting point rather than a pin: cargo
+# re-resolves against the registry and silently writes a new lock mid-gate.
+cargo build --locked --release \
   --target wasm32-unknown-unknown \
+  --target-dir "$rust_build" \
   --manifest-path examples/guests/rust-example/Cargo.toml
-cp examples/guests/rust-example/target/wasm32-unknown-unknown/release/yah_guest_rust_example.wasm \
+cp "$rust_build/wasm32-unknown-unknown/release/yah_guest_rust_example.wasm" \
   "$out/rust-example.core.wasm"
 
 echo "==> typescript example guest (component)"
+# Staged rather than built in place, because `npm ci` materialises a ~250 MB
+# `node_modules` and `jco` emits a 12 MB component — three writes into a tree
+# the container lane mounts readonly. Copying three small text files is the
+# cheaper half of that trade, and `npm ci` deletes and reinstalls
+# `node_modules` on every run regardless, so staging costs no install time.
+#
+# Wiped first so a renamed or deleted source cannot linger here and be built
+# instead of what the repository actually has. The file list is explicit and
+# short; a source file added without being added here fails loudly at the
+# import, which is the failure mode to want from a stale-input guard.
+rm -rf "$ts_build"
+mkdir -p "$ts_build"
+cp examples/guests/ts-example/package.json \
+  examples/guests/ts-example/package-lock.json \
+  examples/guests/ts-example/guest.ts \
+  "$ts_build/"
 (
-  cd examples/guests/ts-example
+  cd "$ts_build"
   npm ci --no-audit --no-fund
-  npm run build
+  # The two paths the build script parameterises. Absolute, because the
+  # staging directory does not sit at the depth the in-place default assumes —
+  # and a developer running `npm run build` in `examples/guests/ts-example`
+  # still gets the defaults, which is why they remain defaults.
+  YAH_GUEST_WIT_DIR="$repo_root/crates/yah-plugin-wasm/wit" \
+    YAH_GUEST_OUT="$repo_root/$out/ts-example.component.wasm" \
+    npm run build
 )
-cp examples/guests/ts-example/guest.component.wasm "$out/ts-example.component.wasm"
 
 echo
 ls -l "$out"

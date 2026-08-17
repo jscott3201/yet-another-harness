@@ -534,17 +534,32 @@ struct ActivationCore {
 }
 
 impl ActivationCore {
-    /// Refuse to enter the guest if this activation has been stopped.
+    /// Refuse to enter the guest if this activation has been stopped or faulted.
     ///
     /// The epoch deadline only stops a call already in flight, and only one
     /// that runs long enough to reach a deadline. A call that returns before
     /// the epoch advances would never consult the flag, so entry is read
     /// separately - on every path that runs guest code, which includes
     /// instantiation and the component initialisation it performs.
+    ///
+    /// The fault check is the same refusal for a different reason, and it is
+    /// what makes [`PreparedWasmActivation::health`]'s claim true. Wasmtime
+    /// poisons a store whose guest trapped, so a trap enforces itself - but a
+    /// *host* panic caught by [`Self::guarded`] leaves a store that still looks
+    /// callable behind guest frames that were abandoned mid-execution, and
+    /// nothing in Wasmtime refuses the next call into it. Health has always
+    /// reported that activation as unable to run again; until there was a
+    /// repeatable entry point it was never possible to disagree with health by
+    /// calling anyway.
     fn enter_guest(&self, what: &str) -> Result<(), DriverActivationError> {
         if self.interrupt.is_killed() {
             return Err(DriverActivationError::failed(format!(
                 "activation was stopped before {what} could run"
+            )));
+        }
+        if self.observation.faulted.load(Ordering::Acquire) {
+            return Err(DriverActivationError::failed(format!(
+                "activation cannot run {what}: an earlier failure left it unable to be entered"
             )));
         }
         Ok(())
@@ -634,14 +649,19 @@ impl ActivationCore {
     ///
     /// Everything `activate` is subject to applies here unchanged: the entry
     /// check, a re-armed deadline, the per-poll panic guard, and the store's
-    /// host-call fuel. That last one only ever charges anything on this path,
-    /// because a guest that lifts a large value into the host has to be running
-    /// a call that takes one.
+    /// host-call fuel. The fuel is charged on every guest-to-host lift whichever
+    /// export is running - `activate` takes no argument and still spends it on
+    /// the strings it logs - so this path is not where the budget applies, only
+    /// the easiest place to push a guest past it, since the caller chooses how
+    /// large the argument is.
     async fn call_fixture_tool(&self, input_json: &str) -> Result<String, DriverActivationError> {
         self.enter_guest("invoke")?;
         let mut guard = self.live.lock().await;
         let live = guard.as_mut().ok_or_else(|| {
-            DriverActivationError::failed("activation store was released before invoke")
+            // Not "released": an activation that was prepared and never started
+            // has no store to release, and that is the reachable case here -
+            // after teardown the weak handle refuses before this point.
+            DriverActivationError::failed("activation has no live store to run invoke on")
         })?;
         live.store.set_epoch_deadline(1);
         self.interrupt.begin_call();

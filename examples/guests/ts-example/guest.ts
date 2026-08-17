@@ -41,8 +41,13 @@ export const fixtureTool = {
     if (inputJson.length === 0) {
       throw { code: 'invalid-input', message: 'input-json was empty' };
     }
+    // UTF-8 bytes, not `inputJson.length`. A JavaScript string's length is in
+    // UTF-16 code units, so `.length` disagrees with the Rust guest's
+    // `input_json.len()` on anything outside ASCII - 15 against 18 for
+    // `{"s":"café 😀"}` - and the host would be reading two different
+    // quantities under one field name. The world moves UTF-8; so does this.
     log('debug', 'typescript example invoked', [
-      { key: 'bytes', value: String(inputJson.length) },
+      { key: 'bytes', value: String(new TextEncoder().encode(inputJson).length) },
     ]);
     return '{"echo":' + inputJson + ',"from":"typescript"}';
   },
