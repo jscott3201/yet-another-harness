@@ -10,6 +10,8 @@
   <text x="440.0" y="138" text-anchor="middle" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif" font-size="12.5" fill="#59636e">agent/session loop · contextual composition · policy &amp; approval</text>
   <text x="440.0" y="157" text-anchor="middle" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif" font-size="12.5" fill="#59636e">tools &amp; providers ⇄ services &amp; effect scopes ⇄ capability broker</text>
   <text x="440.0" y="176" text-anchor="middle" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif" font-size="12.5" fill="#59636e">workflows &amp; subagents · lifecycle · observability</text>
+  <rect x="651" y="194" width="131" height="18" rx="9" fill="#eef2ff" stroke="#c7d2fe"/>
+  <text x="716.5" y="207" text-anchor="middle" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif" font-size="11" fill="#4f46e5">partial today</text>
   <line x1="260" y1="220" x2="260" y2="268" stroke="#59636e" stroke-width="1.5"/>
   <path d="M 256 261 L 260 268 L 264 261" fill="none" stroke="#59636e" stroke-width="1.5"/>
   <text x="270.0" y="262.0" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif" font-size="12" fill="#59636e">durable commands · facts · evidence</text>
@@ -22,6 +24,8 @@
   <text x="250.0" y="333" text-anchor="middle" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif" font-size="12.5" fill="#59636e">artifacts · plugin lineage</text>
   <text x="250.0" y="352" text-anchor="middle" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif" font-size="12.5" fill="#59636e">receipts · leases · fencing</text>
   <text x="250.0" y="371" text-anchor="middle" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif" font-size="12.5" fill="#59636e">external-effect ledger</text>
+  <rect x="265" y="402" width="167" height="18" rx="9" fill="#eef2ff" stroke="#c7d2fe"/>
+  <text x="348.5" y="415" text-anchor="middle" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif" font-size="11" fill="#4f46e5">kernel only today</text>
   <rect x="470" y="268" width="352" height="160" rx="8" fill="none" stroke="#d0d7de" stroke-width="1.5"/>
   <text x="646" y="290" text-anchor="middle" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif" font-size="14.5" font-weight="600" fill="#1f2328">Execution lanes</text>
   <rect x="482" y="300" width="328" height="36" rx="6" fill="#eef2ff" stroke="#c7d2fe"/>

@@ -1,15 +1,21 @@
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/yah-banner-dark.svg">
-  <img src="docs/assets/yah-banner-light.svg" alt="Yet Another Harness — a Rust-native, graph-backed, plugin-extensible agent harness" width="760">
-</picture>
+<h1>
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/assets/yah-banner-dark.svg">
+    <img src="docs/assets/yah-banner-light.svg" alt="Yet Another Harness — a Rust-native, graph-backed, plugin-extensible agent harness" width="760">
+  </picture>
+</h1>
 
 [![CI](https://github.com/jscott3201/yet-another-harness/actions/workflows/ci.yml/badge.svg)](https://github.com/jscott3201/yet-another-harness/actions/workflows/ci.yml)
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](LICENSE-MIT)
 
 YAH is an agent harness being built in Rust. The Rust host owns runtime truth,
-composition, policy, and every extension boundary; everything durable — work,
-sessions, memory, evidence, artifacts, external effects — lands in one
-queryable Selene graph rather than a collection of unrelated logs.
+composition, policy, and every extension boundary, and the design routes
+everything durable — work, sessions, memory, evidence, artifacts, external
+effects — into one queryable graph (Selene, the storage engine the workspace
+pins to an exact public revision) rather than a collection of unrelated logs.
+The project is mid-pivot: it began as a narrow reliability kernel, and that
+kernel now underpins this larger architecture as a foundation, not a frozen
+specification.
 
 > **Status: pre-0.1 and not ready for use.** There is no installable daemon,
 > live agent loop, plugin package loading, sandbox, or end-user client yet.
@@ -46,16 +52,22 @@ capabilities. Four properties define the target:
   <img src="docs/assets/architecture-light.svg" alt="Layered architecture: planned surfaces over the Rust harness, which owns the Selene graph and the execution lanes" width="880">
 </picture>
 
-Solid boxes exist in some tested form today; dashed ones are planned. The
-design detail — composition semantics, graph domains, effect scopes, the
-plugin boundary, sandbox tiers, recovery — lives in
+This is the target shape, not the implemented boundary. Dashed elements are
+unstarted, and the tagged boxes are partial: the harness's composition,
+effect-scope, and capability machinery is tested today while the agent loop,
+policy, and tools are not, and Selene holds the kernel's receipts, leases,
+fencing, and effect ledger today while the work, session, and memory domains
+are design-stage. [Project status](docs/project-status.md) draws the exact
+line; the design detail — composition semantics, graph domains, effect
+scopes, the plugin boundary, sandbox tiers, recovery — lives in
 [architecture](docs/architecture.md).
 
 ## What works today
 
-Everything below runs in the workspace test suite and the from-scratch local
-gate (465 tests at last count). Example guests are built from source at gate
-time; no binary is committed.
+Everything below is enforced by the workspace test suite and the from-scratch
+local gate (465 tests at last count), except the storage gate, which is a
+recorded one-off run with its own report. Example guests are built from
+source at gate time; no binary is committed.
 
 **A live composition kernel** (`crates/yah-compose`). Component definition,
 instance, and scope identities; epoch-fenced lifecycle so stale completions
@@ -78,14 +90,16 @@ replacement; a reusable [driver conformance testkit](docs/plugin-driver-conforma
 and a runnable [authoring example](docs/plugin-authoring.md).
 
 **A working Wasm lane** (`crates/yah-plugin-wasm`). A versioned
-[WIT world](docs/wasm-plugin-contract.md) compiled into host and guest
-bindings from one source; a Wasmtime driver where each activation owns its
-store and deactivation drops it without asking the guest; and host-owned
-ceilings on memory, tables, instances, live capability handles, guest stack
-and recursion depth, call deadlines, and per-call transfer — proved in pairs,
-the same guest refused under a tight ceiling and admitted under a generous
-one. Guest calls yield the thread at every epoch tick, so a computing guest
-cannot starve its siblings.
+[WIT world](docs/wasm-plugin-contract.md) — WIT is the WebAssembly Component
+Model's interface language — compiled into host and guest bindings from one
+source; a Wasmtime driver where each activation owns its store and
+deactivation drops it without asking the guest; and host-owned ceilings on
+memory, tables, instances, live capability handles, guest stack and recursion
+depth, call deadlines, and per-call transfer. Most ceilings are proved in
+pairs — the same guest refused under a tight ceiling and admitted under a
+generous one — and the two that are not yet are named in
+[project status](docs/project-status.md). Guest calls yield the thread at
+every epoch tick, so a computing guest cannot starve its siblings.
 
 **Capability transport across the ABI.** Brokered grants reach Wasm guests as
 opaque resources: the authority is the handle `acquire` returns against the
@@ -93,8 +107,9 @@ activation's admitted grants, never the import, and refusal, revocation, and
 fencing arrive as named codes a guest can observe and answer. Two example
 plugins — one Rust built with `wit-bindgen`, one TypeScript built with `jco`,
 from the same WIT — implement the same world and answer thirteen corpus
-inputs byte-identically through the same host, including the error renderings
-where the two toolchains disagree most easily.
+inputs identically, apart from the one field where each guest names itself,
+through the same host — including the error renderings where the two
+toolchains disagree most easily.
 
 **Refusal before execution.** Malformed component bytes are refused with the
 cause named. A component may not declare a root-level import the world does
@@ -106,7 +121,8 @@ are documented gaps, not silent ones.
 state, events, and receipts; authority and attempt epochs, leases, and
 fencing; durable cancellation; external-effect preparation, dispatch
 evidence, settlement, and parking for the uncertain case; provider stream
-normalization fixtures for OpenAI Responses and Anthropic Messages shapes; and a versioned JSON
+normalization fixtures for OpenAI Responses and Anthropic Messages shapes;
+and a versioned JSON
 [protocol slice](docs/protocol.md) whose Rust types generate checked-in JSON
 Schemas and TypeScript. A storage fan-in and crash-recovery gate
 [passed 1,440 scored trials](docs/gates/G02-storage-fanin-recovery.md). These
@@ -134,14 +150,14 @@ A denied capability is an ordinary refusal the guest observes as data — never
 a trap, and never a missing import that breaks instantiation. One semantic
 plugin model spans the execution lanes; the isolation mechanism differs:
 
-| Lane | Intended use | Boundary |
-|---|---|---|
-| Built-in Rust | First-party components and trusted integrations | Statically linked Rust traits |
-| Wasm Component | Portable third-party plugins | Wasmtime, WIT imports/exports, explicit limits |
-| Node.js / TypeScript | Modern ESM plugins and npm packages allowed by sandbox policy | ESM-first SDK over a sandboxed process protocol |
-| CPython | Modern Python plugins and packages supported by the selected worker and sandbox | Latest stable CPython in a sandboxed process, with PyO3-backed SDK support |
-| Native embedding | Foreign-language applications embedding the Rust library | Optional UniFFI bindings; not a plugin sandbox or universal plugin ABI |
-| Browser / JS host | Rust-backed web and JavaScript utilities | Optional `wasm-bindgen` surface |
+| Lane | Status | Intended use | Boundary |
+|---|---|---|---|
+| Built-in Rust | landed | First-party components and trusted integrations | Statically linked Rust traits |
+| Wasm Component | landed | Portable third-party plugins | Wasmtime, WIT imports/exports, explicit limits |
+| Node.js / TypeScript | next milestone | Modern ESM plugins and npm packages allowed by sandbox policy | ESM-first SDK over a sandboxed process protocol |
+| CPython | next milestone | Modern Python plugins and packages supported by the selected worker and sandbox | Latest stable CPython in a sandboxed process, with PyO3-backed SDK support |
+| Native embedding | later, optional | Foreign-language applications embedding the Rust library | Optional UniFFI bindings; not a plugin sandbox or universal plugin ABI |
+| Browser / JS host | later, optional | Rust-backed web and JavaScript utilities | Optional `wasm-bindgen` surface |
 
 The compatibility policy favors current runtimes — the latest stable CPython
 line, current Node LTS and release lines, modern ESM and TypeScript — rather
