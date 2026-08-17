@@ -102,10 +102,14 @@ with `wit-bindgen` and `cargo build --target wasm32-unknown-unknown`, and
 committed as a binary — `scripts/build-guests.sh` builds both from source and
 the gate runs it before the tests (DEC-038). They answer one tool call
 identically and differ only in the field each uses to name itself, which is
-what makes the world a contract rather than a Rust convention. Both call the
-`logging` and `cancellation` imports; neither calls `capabilities`, whose
-guest evidence is the hand-written `capability-consumer` fixture, so no
-toolchain-portability claim is made for capability transport yet.
+what makes the world a contract rather than a Rust convention. Both call every
+import the world offers: `logging` and `cancellation` on each request, and
+`capabilities` for `cap:`-prefixed ones, where each guest acquires the brokered
+capability, invokes it, and releases the handle itself — by scope drop in Rust,
+by an explicit `Symbol.dispose` in TypeScript, where garbage collection never
+releases handles in practice. The hand-written `capability-consumer` fixture
+remains the fine-grained transport evidence; the pair is what carries the
+toolchain-portability claim for it.
 
 `fixture-tool` is only the first portable call shape for the driver and guest
 examples. Its input and output strings are intended to contain one UTF-8 JSON

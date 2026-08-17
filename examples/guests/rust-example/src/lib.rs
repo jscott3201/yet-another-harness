@@ -9,8 +9,10 @@
 //!
 //! It calls the logging and cancellation imports on purpose - a guest that
 //! never calls back leaves the host's guest-to-host path unexercised, and that
-//! path carries its own bounds. It does not call `capabilities`, so no
-//! toolchain-portability claim exists for capability transport yet.
+//! path carries its own bounds. It calls `capabilities` for the same reason:
+//! `cap:`-prefixed requests acquire the brokered capability, invoke it, and
+//! release it by scope drop, so the resource half of the world is entered by
+//! authored code under a real toolchain, not only by the hand-written fixture.
 
 wit_bindgen::generate!({
     path: "../../../crates/yah-plugin-wasm/wit",
@@ -19,7 +21,11 @@ wit_bindgen::generate!({
 
 use exports::yah::plugin::{fixture_tool, lifecycle};
 use yah::plugin::cancellation::is_cancelled;
+use yah::plugin::capabilities::{AcquireErrorCode, CallErrorCode, acquire};
 use yah::plugin::logging::{LogField, LogLevel, log};
+
+/// The capability both example guests consume, granted or not by the test rig.
+const CAPABILITY_ID: &str = "example.text-echo/v1";
 
 struct Example;
 
@@ -64,7 +70,64 @@ impl fixture_tool::Guest for Example {
                 value: input_json.len().to_string(),
             }],
         );
+        if let Some(request) = input_json.strip_prefix("cap:") {
+            return Ok(answer_through_capability(request));
+        }
         Ok(format!("{{\"echo\":{input_json},\"from\":\"rust\"}}"))
+    }
+}
+
+/// Acquire the capability, invoke it once, and answer - never trap.
+///
+/// A refusal is an answer, not a guest error: the world already carries the
+/// broker's decision in the error record, and a guest that turned it into a
+/// trap would erase the difference between "the host said no" and "the guest
+/// broke". The handle is released by scope drop at the end of this function,
+/// which is the whole release story in Rust - the generated `Capability` owns
+/// its handle and its `Drop` emits the resource drop the host counts.
+fn answer_through_capability(request: &str) -> String {
+    let capability = match acquire(CAPABILITY_ID) {
+        Ok(capability) => capability,
+        Err(refusal) => {
+            return format!(
+                "{{\"capability-refused\":\"{}\",\"from\":\"rust\"}}",
+                acquire_code(refusal.code)
+            );
+        }
+    };
+    match capability.invoke(request) {
+        Ok(output) => format!("{{\"capability\":\"{output}\",\"from\":\"rust\"}}"),
+        Err(failure) => format!(
+            "{{\"capability-failed\":\"{}\",\"from\":\"rust\"}}",
+            call_code(failure.code)
+        ),
+    }
+}
+
+/// The WIT names, spelled by hand.
+///
+/// wit-bindgen renders enum cases as UpperCamelCase Rust variants, and the
+/// TypeScript guest receives the same cases as kebab-case strings with nothing
+/// to map. A `Debug`-format shortcut here would answer `NotGranted` where the
+/// other guest answers `not-granted` - precisely the divergence the
+/// equivalence corpus exists to catch.
+fn acquire_code(code: AcquireErrorCode) -> &'static str {
+    match code {
+        AcquireErrorCode::InvalidId => "invalid-id",
+        AcquireErrorCode::NotGranted => "not-granted",
+        AcquireErrorCode::Revoked => "revoked",
+        AcquireErrorCode::Unavailable => "unavailable",
+        AcquireErrorCode::Mismatched => "mismatched",
+        AcquireErrorCode::HandleLimit => "handle-limit",
+    }
+}
+
+fn call_code(code: CallErrorCode) -> &'static str {
+    match code {
+        CallErrorCode::Revoked => "revoked",
+        CallErrorCode::Exhausted => "exhausted",
+        CallErrorCode::InvalidInput => "invalid-input",
+        CallErrorCode::Failed => "failed",
     }
 }
 
