@@ -484,15 +484,17 @@ async fn a_guest_may_not_hold_more_memories_than_the_host_allows() {
 
 #[tokio::test]
 async fn the_same_empty_memories_are_admitted_when_the_count_allows_them() {
-    // The control: the byte total never changes between this case and the one
-    // above, so only the count ceiling can explain the difference.
+    // The control. Built on `test_limits` so `max_memories` is the only field
+    // differing from the refusing half: `generous_limits` would also raise
+    // `memory_bytes` 32-fold, which is how a pair comes to vary two things and
+    // credit one. The fixture holds a single page either way.
     let mut rig = Rig::new("wasm.limits.memory.count.ok", '8');
     let (driver, observer) = driver_with(
         &rig.revision,
         vec![WasmActivationPlan::many_memories()],
         WasmLimits {
             max_memories: 16,
-            ..generous_limits()
+            ..test_limits()
         },
     );
 
@@ -552,9 +554,12 @@ async fn a_guest_that_recurses_too_deep_is_stopped_by_the_depth_bound() {
 #[tokio::test]
 async fn the_same_recursion_completes_under_a_bound_that_can_afford_it() {
     // The control, and the only thing that makes the case above attributable.
-    // Same guest, same depth, only the host's number differs. It also pins
-    // that the driver sets the bound at all: left unset, Wasmtime's 512 KiB
-    // default applies and this guest cannot finish.
+    // Same guest, same depth; two host numbers differ and they have to, because
+    // `WasmLimits::engine` refuses a fiber that leaves no headroom above the
+    // guest bound - raising `guest_stack_bytes` alone would not build an engine.
+    // Everything else is `test_limits`, so nothing varies that is not forced.
+    // It also pins that the driver sets the bound at all: left unset, Wasmtime's
+    // 512 KiB default applies and this guest cannot finish.
     let mut rig = Rig::new("wasm.limits.recursion.ok", 'a');
     let (driver, observer) = driver_with(
         &rig.revision,
@@ -562,7 +567,7 @@ async fn the_same_recursion_completes_under_a_bound_that_can_afford_it() {
         WasmLimits {
             guest_stack_bytes: 8 * 1024 * 1024,
             call_stack_bytes: 16 * 1024 * 1024,
-            ..generous_limits()
+            ..test_limits()
         },
     );
 
