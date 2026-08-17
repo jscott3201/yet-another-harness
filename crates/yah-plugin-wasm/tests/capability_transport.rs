@@ -24,12 +24,9 @@
 #[path = "support/fixtures.rs"]
 mod fixtures;
 
-use std::sync::{
-    Arc,
-    atomic::{AtomicUsize, Ordering},
-};
+use std::sync::{Arc, atomic::Ordering};
 
-use fixtures::revision_requesting;
+use fixtures::{CAPABILITY_ID, EchoText, revision_requesting, text_echo_definition as definition};
 use yah_compose::{
     ComponentDefinition, ComponentRevision, ComponentSlot, ComponentSlotOutcome,
     DesiredComponentState, ProviderAssignments, ProviderSelectionEpoch, ReconcileOutcome, Scope,
@@ -38,37 +35,10 @@ use yah_compose::{
 use yah_plugin_host::{
     CapabilityBroker, CapabilityDefinition, CapabilityId, DriverConformanceCase,
     EffectiveCapabilityGrants, HostPluginActivation, PluginDriver, PluginRevision, TextCapability,
-    TextCapabilityFailure,
 };
 use yah_plugin_wasm::{
     ResourceState, WasmActivationPlan, WasmComponentDriver, WasmLimits, WasmObserver,
 };
-
-/// The capability the fixture guest asks for, baked into its component text.
-const CAPABILITY_ID: &str = "example.text-echo/v1";
-
-fn definition() -> CapabilityDefinition<dyn TextCapability> {
-    CapabilityDefinition::new(
-        CapabilityId::new(CAPABILITY_ID).expect("the fixture capability ID is canonical"),
-    )
-}
-
-/// Example-only provider: echoes, and refuses two magic inputs on purpose.
-#[derive(Default)]
-struct EchoText {
-    calls: AtomicUsize,
-}
-
-impl TextCapability for EchoText {
-    fn invoke(&self, input: &str) -> Result<String, TextCapabilityFailure> {
-        self.calls.fetch_add(1, Ordering::AcqRel);
-        match input {
-            "bad" => Err(TextCapabilityFailure::invalid_input("the input is refused")),
-            "boom" => Err(TextCapabilityFailure::failed("the provider broke")),
-            _ => Ok(format!("echo:{input}")),
-        }
-    }
-}
 
 /// A contract that is not the portable text contract, for the mismatch pair.
 trait NotText: Send + Sync {}

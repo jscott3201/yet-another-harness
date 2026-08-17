@@ -10,7 +10,11 @@
 //! They also prove the guest-to-host path from a real toolchain. Both guests
 //! call `logging` and `cancellation`, so the byte budget, retained log
 //! records, and per-poll panic guard are entered by authored code here, not
-//! only by the flood and capability fixtures the corpus hand-writes.
+//! only by the flood fixtures the corpus hand-writes. The `cap:`-prefixed
+//! corpus entries do the same for `capabilities`: acquire, invoke, and the
+//! guest's own release all cross the ABI from wit-bindgen and componentize-js
+//! output, so the toolchain-portability claim for capability transport rests
+//! here rather than on the hand-written consumer fixture alone.
 //!
 //! Artifacts come from `scripts/build-guests.sh` rather than from this test,
 //! because building them needs two toolchains and one of them needs Node. A
@@ -21,15 +25,15 @@ mod fixtures;
 
 use std::{path::PathBuf, sync::Arc};
 
-use fixtures::revision;
+use fixtures::{CAPABILITY_ID, EchoText, revision_requesting, text_echo_definition};
 use yah_compose::{
     ComponentDefinition, ComponentRevision, ComponentSlot, ComponentSlotOutcome,
     DesiredComponentState, ProviderAssignments, ProviderSelectionEpoch, ReconcileOutcome, Scope,
     ServiceRegistry,
 };
 use yah_plugin_host::{
-    CapabilityBroker, DriverConformanceCase, EffectiveCapabilityGrants, HostPluginActivation,
-    PluginRevision,
+    CapabilityBroker, CapabilityProviderRegistration, DriverConformanceCase,
+    EffectiveCapabilityGrants, HostPluginActivation, PluginRevision, TextCapability,
 };
 use yah_plugin_wasm::{
     LogRecord, ResourceState, WasmComponentDriver, WasmLimits, WasmObserver,
@@ -78,12 +82,32 @@ struct Rig {
     grants: EffectiveCapabilityGrants,
     epoch: ProviderSelectionEpoch,
     revision: PluginRevision,
+    /// Retains the provider. The broker holds only a `Weak`, so a rig that
+    /// dropped this would answer every acquire `unavailable` instead of
+    /// echoing.
+    _registration: Option<CapabilityProviderRegistration<dyn TextCapability>>,
 }
 
 impl Rig {
+    /// A rig whose broker holds a live [`EchoText`] registration and whose
+    /// grants cover the guests' one capability request.
     fn new(label: &str, digest: char) -> Self {
-        let revision = revision(DriverConformanceCase::ReadyLifecycle, digest)
-            .expect("fixture revision is valid");
+        Self::build(label, digest, true)
+    }
+
+    /// The same revision - still requesting the capability - with nothing
+    /// granted, so `acquire` must come back `not-granted`.
+    fn ungranted(label: &str, digest: char) -> Self {
+        Self::build(label, digest, false)
+    }
+
+    fn build(label: &str, digest: char, granted: bool) -> Self {
+        let revision = revision_requesting(
+            DriverConformanceCase::ReadyLifecycle,
+            digest,
+            &[CAPABILITY_ID],
+        )
+        .expect("fixture revision is valid");
         let registry = ServiceRegistry::new();
         let mut slot = ComponentSlot::new(label).expect("slot label is canonical");
         let desired = DesiredComponentState::enabled(
@@ -105,51 +129,94 @@ impl Rig {
             } => selection.epoch(),
             other => panic!("fresh component did not begin start: {other:?}"),
         };
-        let grants = EffectiveCapabilityGrants::empty(&revision);
+        let mut broker = CapabilityBroker::new().expect("broker is constructible");
+        let (grants, registration) = if granted {
+            let registration = broker
+                .register(
+                    &text_echo_definition(),
+                    Arc::new(EchoText::default()) as Arc<dyn TextCapability>,
+                )
+                .expect("registration succeeds");
+            let grants = EffectiveCapabilityGrants::new(&revision, [registration.grant()])
+                .expect("the fixture manifest requests the capability");
+            (grants, Some(registration))
+        } else {
+            (EffectiveCapabilityGrants::empty(&revision), None)
+        };
         Self {
             slot,
             registry,
-            broker: CapabilityBroker::new().expect("broker is constructible"),
+            broker,
             grants,
             epoch,
             revision,
+            _registration: registration,
         }
     }
 }
 
 /// What one guest did when the host activated it and called its tool.
 struct GuestRun {
-    /// One answer per [`EQUIVALENCE_INPUTS`] entry, in order.
+    /// One answer per input, in order.
     answers: Vec<String>,
     records: Vec<LogRecord>,
     cancellation_polls: usize,
+    capability_acquires: usize,
+    capability_acquire_refusals: usize,
+    capability_calls: usize,
+    capability_call_refusals: usize,
+    /// The host's live-handle count, read while the activation was still
+    /// live. Store teardown also releases table entries, so only a
+    /// pre-teardown zero says the guest itself dropped what it held - Rust by
+    /// scope drop, TypeScript by `Symbol.dispose`.
+    live_capability_handles: usize,
 }
 
-/// Drive one authored component through the host's whole activation lifecycle.
+/// One component through the host twice: granted the capability, then not.
+struct GuestPair {
+    granted: GuestRun,
+    refused: GuestRun,
+}
+
+/// Compile once, activate twice.
+///
+/// One driver serves both rigs because compiling the TypeScript component is
+/// the multi-second half of this test, and the doc comment on
+/// [`both_example_guests_behave_identically_through_the_host`] records what
+/// duplicated compiles did to the gate. The driver is built for exactly this:
+/// each activation owns its own store, keyed by activation identity.
+async fn run_guest(label: &str, digest: char, component: &[u8]) -> GuestPair {
+    let granted_rig = Rig::new(&format!("{label}.granted"), digest);
+    let refused_rig = Rig::ungranted(&format!("{label}.refused"), digest);
+    let (driver, observer): (Arc<WasmComponentDriver>, WasmObserver) =
+        WasmComponentDriver::for_component(
+            granted_rig.revision.id().clone(),
+            component,
+            WasmLimits::default(),
+        )
+        .expect("the example component compiles under the driver's own bounds");
+
+    let granted = drive(granted_rig, driver.clone(), &observer, EQUIVALENCE_INPUTS).await;
+    let refused = drive(refused_rig, driver, &observer, REFUSAL_INPUTS).await;
+    GuestPair { granted, refused }
+}
+
+/// Drive one activation through the host's whole lifecycle.
 ///
 /// Deliberately the host's path, not a linker this test built: preparation,
 /// activation under the driver's limits and call deadline, a tool call on the
 /// live store, then teardown that must leave the resource released. A guest
 /// that only worked outside those bounds would pass a weaker test and fail a
 /// real activation.
-async fn run_guest(label: &str, digest: char, component: &[u8]) -> GuestRun {
-    let mut rig = Rig::new(label, digest);
-    let (driver, observer): (Arc<WasmComponentDriver>, WasmObserver) =
-        WasmComponentDriver::for_component(
-            rig.revision.id().clone(),
-            component,
-            WasmLimits::default(),
-        )
-        .expect("the example component compiles under the driver's own bounds");
-
-    let mut activation = HostPluginActivation::prepare(
-        &mut rig.slot,
-        rig.epoch,
-        &rig.broker,
-        &rig.grants,
-        driver.clone(),
-    )
-    .expect("preparation succeeds");
+async fn drive(
+    mut rig: Rig,
+    driver: Arc<WasmComponentDriver>,
+    observer: &WasmObserver,
+    inputs: &[&str],
+) -> GuestRun {
+    let mut activation =
+        HostPluginActivation::prepare(&mut rig.slot, rig.epoch, &rig.broker, &rig.grants, driver)
+            .expect("preparation succeeds");
     let id = activation.id().clone();
 
     activation
@@ -160,8 +227,8 @@ async fn run_guest(label: &str, digest: char, component: &[u8]) -> GuestRun {
 
     // Every input on one activation, because that is also how a plugin is used:
     // a tool is called repeatedly on a store that stays live between calls.
-    let mut answers = Vec::with_capacity(EQUIVALENCE_INPUTS.len());
-    for input in EQUIVALENCE_INPUTS {
+    let mut answers = Vec::with_capacity(inputs.len());
+    for input in inputs {
         answers.push(
             observer
                 .call_fixture_tool(&id, input)
@@ -177,6 +244,11 @@ async fn run_guest(label: &str, digest: char, component: &[u8]) -> GuestRun {
         answers,
         records: host.records(),
         cancellation_polls: host.cancellation_polls(),
+        capability_acquires: host.capability_acquires(),
+        capability_acquire_refusals: host.capability_acquire_refusals(),
+        capability_calls: host.capability_calls(),
+        capability_call_refusals: host.capability_call_refusals(),
+        live_capability_handles: host.live_capability_handles(),
     };
 
     assert!(
@@ -207,14 +279,15 @@ async fn run_guest(label: &str, digest: char, component: &[u8]) -> GuestRun {
 /// Inputs chosen because a JavaScript guest could plausibly answer them
 /// differently from a Rust one.
 ///
-/// Five of the nine diverged while the TypeScript guest round-tripped its input
-/// through `JSON.parse` and `JSON.stringify`: both whitespace cases come back
-/// normalised, `1.0` comes back as `1`, an integer past 2^53 comes back
-/// rounded, and input that is not JSON throws, which reaches the host as a trap
-/// rather than as the `invalid-input` the world declares.
+/// Five of the nine echo entries diverged while the TypeScript guest
+/// round-tripped its input through `JSON.parse` and `JSON.stringify`: both
+/// whitespace cases come back normalised, `1.0` comes back as `1`, an integer
+/// past 2^53 comes back rounded, and input that is not JSON throws, which
+/// reaches the host as a trap rather than as the `invalid-input` the world
+/// declares.
 ///
-/// The other four - canonical JSON, non-ASCII, escapes, and a bare array -
-/// survive a round trip unchanged, and are here as controls: they must stay
+/// The other four echo entries - canonical JSON, non-ASCII, escapes, and a bare
+/// array - survive a round trip unchanged, and are here as controls: they must stay
 /// identical, and a change that broke them would be caught by the same
 /// assertion. Non-ASCII earns its place twice over, because it diverged in the
 /// `bytes` field the guests log rather than in the answer, which is a
@@ -222,6 +295,15 @@ async fn run_guest(label: &str, digest: char, component: &[u8]) -> GuestRun {
 ///
 /// Testing only the canonical case is what made the equivalence claim look
 /// true.
+///
+/// The four `cap:` entries take the guests' capability path instead of the
+/// echo envelope. A success, the provider's two refusals, and a non-ASCII
+/// request that crosses two more ABI hops than any echo case does. The
+/// refusals are where the toolchains genuinely diverge: wit-bindgen hands the
+/// Rust guest an `InvalidInput` variant it must map to the WIT name by hand,
+/// while componentize-js hands the TypeScript guest `invalid-input` as a
+/// string - so a `Debug`-format shortcut on the Rust side is exactly the
+/// divergence these entries exist to catch.
 const EQUIVALENCE_INPUTS: &[&str] = &[
     r#"{"n":1}"#,
     r#"{"n": 1}"#,
@@ -232,24 +314,37 @@ const EQUIVALENCE_INPUTS: &[&str] = &[
     r#"not json"#,
     r#"{"b":1.0}"#,
     r#"{"big":12345678901234567890}"#,
+    "cap:hello",
+    "cap:bad",
+    "cap:boom",
+    "cap:héllo ☃",
 ];
 
-/// The two claims the pair exists to support, over one pair of runs.
+/// What the ungranted activation is asked. One input is the point: the
+/// refusal must be an answer in the world's envelope, not a trap, and it must
+/// be the same answer from both toolchains.
+const REFUSAL_INPUTS: &[&str] = &["cap:hello"];
+
+/// The three claims the pair exists to support, over two runs of each guest.
 ///
 /// Same world, same input, same answer apart from the value of the one field
-/// each guest uses to name itself; and both guests reaching the host through
-/// the logging and cancellation imports. If the host could tell them apart
-/// in any other way, the world would not be the contract - so this asks
-/// across inputs that give the two toolchains every opportunity to disagree,
-/// not just the one that
-/// suits them.
+/// each guest uses to name itself; both guests reaching the host through the
+/// logging, cancellation, and capabilities imports; and both releasing every
+/// handle they acquire while their activation is still live. If the host could
+/// tell them apart in any other way, the world would not be the contract - so
+/// this asks across inputs that give the two toolchains every opportunity to
+/// disagree, not just the one that suits them.
 ///
-/// One test rather than two, because Nextest runs each test in its own process
-/// and the two properties are views of the same run. Split, the pair compiled
-/// both components twice instead of once - the TypeScript one is the 12 MB half
-/// of that - and ran two multi-second compiles concurrently, mid-run, beside the
-/// two long subscription cases. The assertions stay separated, and each still
-/// names which property and which guest broke.
+/// One test rather than three, because Nextest runs each test in its own
+/// process and the three properties are views of the same runs. When the
+/// first two properties were split as two tests, the pair compiled both
+/// components twice instead of once - the TypeScript one is the 12 MB half of
+/// that - and ran two multi-second compiles concurrently, mid-run, beside the
+/// two long subscription cases; a three-way split would compile them three
+/// times. The assertions stay separated, and each still names which property
+/// and which guest broke. The ungranted refusal pair lives here too, and for
+/// the same reason: it is a second activation of the same driver, not a
+/// second compile.
 ///
 /// What prompted it: the split failed the pre-push gate twice, both times on a
 /// three-`assert_eq!` test in another crate overrunning the suite's 1s
@@ -266,9 +361,11 @@ async fn both_example_guests_behave_identically_through_the_host() {
     let rust = run_guest("wasm.example.rust", '1', &rust_component()).await;
     let typescript = run_guest("wasm.example.ts", '2', &ts_component()).await;
 
-    assert_answers_are_indistinguishable(&rust, &typescript);
-    assert_reached_the_host("rust", &rust);
-    assert_reached_the_host("typescript", &typescript);
+    assert_answers_are_indistinguishable(&rust.granted, &typescript.granted);
+    assert_reached_the_host("rust", &rust.granted);
+    assert_reached_the_host("typescript", &typescript.granted);
+    assert_capability_transport("rust", &rust);
+    assert_capability_transport("typescript", &typescript);
 }
 
 /// Same input, same answer, apart from the value of the self-naming field.
@@ -376,10 +473,87 @@ async fn a_guest_that_declines_is_reported_as_declining_and_then_as_gone() {
     );
 }
 
+/// Capability transport from authored guests, observed host-side.
+///
+/// The counter identities do the arguing. On the granted run, one acquire and
+/// one call per `cap:` input, refusals only where the provider's magic inputs
+/// put them, and zero live handles while the activation is still up - which is
+/// the deterministic-release claim, since teardown would zero the count for
+/// any guest. On the refused run, the acquire attempt crossed the ABI into
+/// the host's seam and was refused there, from the activation's own grant
+/// snapshot - the broker is never consulted on this path - and the guest
+/// rendered that refusal as an answer.
+fn assert_capability_transport(name: &str, pair: &GuestPair) {
+    let capability_inputs = EQUIVALENCE_INPUTS
+        .iter()
+        .filter(|input| input.starts_with("cap:"))
+        .count();
+    let provider_refusals = EQUIVALENCE_INPUTS
+        .iter()
+        .filter(|input| matches!(**input, "cap:bad" | "cap:boom"))
+        .count();
+    assert!(
+        capability_inputs > provider_refusals,
+        "the corpus must hold succeeding capability inputs for this to mean anything"
+    );
+
+    // One absolute anchor, like the echo path's first answer: cross-guest
+    // agreement alone would hold if both toolchains mangled the provider's
+    // output the same way, so this pins that `echo:hello` itself came back
+    // through the generated lift.
+    let hello = EQUIVALENCE_INPUTS
+        .iter()
+        .position(|input| *input == "cap:hello")
+        .expect("the corpus must hold the succeeding capability input");
+    let granted = &pair.granted;
+    assert_eq!(
+        granted.answers[hello],
+        format!("{{\"capability\":\"echo:hello\",\"from\":\"{name}\"}}"),
+        "{name} guest must carry the provider's own output back"
+    );
+    assert_eq!(
+        granted.capability_acquires, capability_inputs,
+        "{name} guest should acquire once per cap: input"
+    );
+    assert_eq!(granted.capability_acquire_refusals, 0, "{name}: granted");
+    assert_eq!(
+        granted.capability_calls, capability_inputs,
+        "{name} guest should invoke every handle it acquired"
+    );
+    assert_eq!(
+        granted.capability_call_refusals, provider_refusals,
+        "{name} guest should meet both of the provider's refusals"
+    );
+    assert_eq!(
+        granted.live_capability_handles, 0,
+        "{name} guest must release every handle itself while the activation is live"
+    );
+
+    let refused = &pair.refused;
+    assert_eq!(
+        refused.answers,
+        vec![format!(
+            "{{\"capability-refused\":\"not-granted\",\"from\":\"{name}\"}}"
+        )],
+        "{name} guest must render an absent grant as an answer, not a trap"
+    );
+    assert_eq!(
+        refused.capability_acquires, 1,
+        "{name} guest's refused acquire should still have crossed into the host"
+    );
+    assert_eq!(refused.capability_acquire_refusals, 1, "{name}: refused");
+    assert_eq!(
+        refused.capability_calls, 0,
+        "{name} guest has nothing to invoke without a grant"
+    );
+    assert_eq!(refused.live_capability_handles, 0, "{name}: refused");
+}
+
 /// Toolchain-built guests calling back into the host, observed host-side.
 ///
 /// Logging and cancellation both, from authored code rather than from the
-/// hand-written flood and capability fixtures that also enter this path.
+/// hand-written flood fixtures that also enter this path; the capability
+/// import's authored-code evidence is [`assert_capability_transport`]'s.
 fn assert_reached_the_host(name: &str, run: &GuestRun) {
     assert_eq!(
         run.records.len(),

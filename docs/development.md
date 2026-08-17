@@ -133,8 +133,9 @@ and `scripts/install-nextest.sh` pin their downloads. What *is* pinned is the
 input: `package-lock.json` fixes the `jco` version and its whole dependency
 tree, and `npm ci` installs exactly that. The component is then verified by
 behaviour rather than by hash — the example tests drive both guests through the
-same nine inputs and require the same answers — which is the guarantee that
-actually matters for a conformance example, and the only one available here.
+same corpus of inputs and require the same answers — which is the guarantee
+that actually matters for a conformance example, and the only one available
+here.
 
 ## Full Gate
 
