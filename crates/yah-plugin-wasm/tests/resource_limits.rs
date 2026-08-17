@@ -635,14 +635,17 @@ async fn a_guest_may_not_lift_more_bytes_than_its_host_call_budget() {
 /// The control: the same aliasing guest under a budget that can afford it.
 ///
 /// Without this, the case above cannot tell a budget that refused from a
-/// fixture that would have failed anyway. The same guest, the same driver, and
-/// only `host_call_bytes` differs.
+/// fixture that would have failed anyway. Built on `test_limits` rather than
+/// `generous_limits` so that `host_call_bytes` really is the only difference:
+/// the generous set also raises `memory_bytes` 32-fold, which would leave the
+/// pair varying two things and attributing the result to one. The fixture needs
+/// a single page either way.
 #[tokio::test]
 async fn the_same_flooding_guest_activates_under_a_budget_that_can_afford_it() {
     let mut rig = Rig::new("wasm.limits.hostcall.ok", 'c');
     let limits = WasmLimits {
         host_call_bytes: 64 * 1024 * 1024,
-        ..generous_limits()
+        ..test_limits()
     };
     let (driver, observer) = driver_with(
         &rig.revision,
@@ -690,9 +693,10 @@ async fn the_same_flooding_guest_activates_under_a_budget_that_can_afford_it() {
 
 /// A guest may not hold more tables than the host allows.
 ///
-/// The table twin of the memory-count pair. Until this case the two table
-/// ceilings had unit evidence only: nothing drove a real component past either,
-/// so `max_tables` was a field the driver set and nothing proved it honoured.
+/// The table twin of the memory-count pair. `max_tables` had no component
+/// evidence at all before this - it was a field the driver set and nothing
+/// proved it honoured. The summed element ceiling is a different bound and
+/// still has unit evidence only: every table this fixture declares is empty.
 #[tokio::test]
 async fn a_guest_may_not_hold_more_tables_than_the_host_allows() {
     let mut rig = Rig::new("wasm.limits.tables", 'd');
@@ -709,6 +713,14 @@ async fn a_guest_may_not_hold_more_tables_than_the_host_allows() {
         other => panic!("a guest with too many tables must fail activation, got {other:?}"),
     };
     assert_eq!(failure.kind(), DriverActivationErrorKind::Failed);
+    // Names the ceiling, not merely "not the deadline". Without this the case
+    // passes for any instantiation failure at all - setting `max_instances` to
+    // zero, which has nothing to do with tables, satisfies the weaker form.
+    assert!(
+        failure.summary().contains("table count"),
+        "the count ceiling must say it was the table count that refused: {}",
+        failure.summary()
+    );
     assert!(
         !failure.summary().contains("call deadline"),
         "a count ceiling refuses; it does not interrupt: {}",

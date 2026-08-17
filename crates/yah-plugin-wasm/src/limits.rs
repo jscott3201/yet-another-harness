@@ -489,8 +489,10 @@ mod tests {
         .limiter()
     }
 
-    /// The fixture corpus drives the memory ceiling through a real component;
-    /// the table ceiling has no such fixture, so its evidence is here.
+    /// The fixture corpus drives the memory ceiling and the table *count*
+    /// through real components; the summed table-element ceiling has no such
+    /// fixture - `many-tables.wat` holds empty tables, so it charges the count
+    /// and never the total - so its evidence is here.
     #[test]
     fn a_table_is_refused_past_the_ceiling_and_granted_below_it() {
         let mut limits = limiter(usize::MAX, 100);

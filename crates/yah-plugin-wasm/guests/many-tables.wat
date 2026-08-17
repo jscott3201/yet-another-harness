@@ -5,8 +5,9 @@
 ;; below is declared with zero elements, so it costs the element ceiling
 ;; nothing, while each one still costs the host a table to track.
 ;;
-;; Until this fixture the table ceilings had unit evidence only - nothing drove
-;; a real component past either of them.
+;; This charges the table *count* and nothing else. Every table below is empty,
+;; so the summed element ceiling never sees a byte of it - that one still has
+;; unit evidence only, and this fixture is not evidence for it.
 ;;
 ;; See `conformant.wat` for the ABI and named-type rules.
 

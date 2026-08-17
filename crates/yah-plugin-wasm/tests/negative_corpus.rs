@@ -146,24 +146,29 @@ fn malformed_component_bytes_are_refused_and_named() {
 /// compiled, activated, and answered a tool call with the host none the wiser.
 #[test]
 fn a_component_may_not_import_outside_the_world() {
-    let cases: &[(&str, &str)] = &[
+    // One expected name per row, not a disjunction shared across the table: a
+    // shared `contains(a) || contains(b)` is satisfied for every row by whichever
+    // name happens to appear, so a check that reported a constant would pass it.
+    let cases: &[(&str, &str, &str)] = &[
         (
             "an empty instance, which Wasmtime alone does not refuse",
             r#"(component
                  (type $empty (instance))
                  (import "wasi:cli/environment@0.2.0" (instance (type $empty))))"#,
+            "wasi:cli/environment@0.2.0",
         ),
         (
             "a bare function import",
             r#"(component (import "escape" (func)))"#,
+            "escape",
         ),
     ];
 
-    for (case, text) in cases {
+    for (case, text, expected) in cases {
         let summary = refusal('9', text);
         assert!(
-            summary.contains("wasi:cli/environment@0.2.0") || summary.contains("escape"),
-            "{case}: the refusal must name what the guest asked for, but was {summary:?}"
+            summary.contains(expected),
+            "{case}: the refusal must name {expected:?}, but was {summary:?}"
         );
         assert!(
             summary.contains("does not declare"),

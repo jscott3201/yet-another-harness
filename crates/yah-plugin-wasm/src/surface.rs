@@ -21,6 +21,23 @@
 //! So the driver reads the surface itself, at build time, before any store
 //! exists. This is the loader-shaped check: it costs one pass over a type table
 //! and it fails inert.
+//!
+//! What it is, exactly, because the difference matters to anyone relying on it:
+//! an **exact-name, root-level** check. Three things it does not do, each
+//! disclosed in `docs/wasm-plugin-contract.md` rather than fixed here:
+//!
+//! - It reads the root component's imports only. An undeclared import inside a
+//!   *nested* component is invisible to `component_type().imports()`, and such
+//!   an artifact still builds and runs.
+//! - It matches names by exact string, where Wasmtime's linker matches
+//!   semver-compatibly. Today every guest targets `@0.1.0` and the two agree;
+//!   when the world versions they will not, and this will refuse a guest the
+//!   linker would have accepted. That is the safer direction to be wrong in,
+//!   but it is still wrong, and it is the reason a world-evolution rule is owed.
+//! - It checks names, not item kinds. An allowlisted name imported as something
+//!   other than the world's instance is not caught here; the linker still
+//!   refuses it at instantiation if it carries a function, which is why this
+//!   narrows the gap rather than closing it.
 
 use wasmtime::{Engine, component::Component};
 
