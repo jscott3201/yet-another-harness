@@ -13,6 +13,38 @@ members = [
 # lifecycle and reversible-cleanup semantics are proved beside the retained
 # reliability kernel.
 
+# The two crates that do Cranelift's compiling are optimised even in dev and
+# test builds. Nothing else is, including every workspace crate.
+#
+# Guest components are compiled at test time, and unoptimised Cranelift spends
+# about 115 seconds of that on the 12 MB component the TypeScript example
+# produces. The case around it then sits either side of the harness's 120s
+# per-test terminate - measured at 117.7s in one run and terminated at 120.0s in
+# another - so without this it does not merely run slowly, it fails the run, and
+# which way it lands is a matter of machine load. This changes how fast a
+# dependency runs, not what it does; every other test's duration is unmoved.
+#
+# Scoped rather than `"*"` because the cost is recurring: the gate cleans before
+# every run and CI never caches `target/`. Measured on one machine, clean
+# `cargo build --workspace --all-targets` against the example-guest tests:
+#
+#   nothing             33.6s build, tests TIME OUT
+#   these two           42.4s build, tests 16.0s
+#   every dependency   111.8s build, tests  8.7s
+#
+# The middle row buys the whole of the fix for a ninth of the bottom row's extra
+# build time, and the bottom row's remaining 7.3s is not worth 69s of build on
+# every run. Hosted CI is slower than the machine above and is the number that
+# decides it: there the one guest case takes 47.2s against the 120s terminate,
+# so the margin is 2.5x rather than the 7x the middle row suggests locally.
+# That case is the suite's closest approach to the bound, and a third guest, or
+# a slower runner, is what would put it back in reach.
+[profile.dev.package.cranelift-codegen]
+opt-level = 2
+
+[profile.dev.package.regalloc2]
+opt-level = 2
+
 [workspace.package]
 edition = "2024"
 rust-version = "1.97"
@@ -48,3 +80,6 @@ toml = "1.1.4"
 wasmtime = { version = "=47.0.3", default-features = false, features = ["async", "component-model", "cranelift", "runtime", "std", "wat"] }
 wit-bindgen = { version = "=0.57.1", default-features = false, features = ["macros", "realloc", "std"] }
 wit-parser = { version = "=0.252.0", default-features = false, features = ["std"] }
+# Encodes a guest's core module as a component - the step between what a Rust
+# guest toolchain emits and what a host can instantiate.
+wit-component = { version = "=0.247.0", default-features = false }

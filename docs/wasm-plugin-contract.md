@@ -80,6 +80,16 @@ ABI as forgeable typed values. Generic JSON can still carry arbitrary text, so
 a future driver must validate it as one bounded JSON value and must never treat
 caller-supplied IDs or tokens within it as authority.
 
+Two example guests implement this world: `examples/guests/rust-example`, built
+with `wit-bindgen` and `cargo build --target wasm32-unknown-unknown`, and
+`examples/guests/ts-example`, built with `jco componentize`. Neither is
+committed as a binary — `scripts/build-guests.sh` builds both from source and
+the gate runs it before the tests (DEC-038). They answer one tool call
+identically and differ only in the field each uses to name itself, which is
+what makes the world a contract rather than a Rust convention. They are also
+the only guests here that call a host import, so the host's guest-to-host path
+is exercised by them and by nothing else.
+
 `fixture-tool` is only the first portable call shape for the driver and guest
 examples. Its input and output strings are intended to contain one UTF-8 JSON
 value, but neither the driver nor this contract parses or bounds them. They do

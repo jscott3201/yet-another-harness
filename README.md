@@ -246,7 +246,14 @@ call runs on and how deep that guest may recurse, a call deadline that stops a
 guest which will not stop itself, and caps on what one guest-to-host call may
 transfer and what the host retains from it. Guest calls run on their own stack
 and hand the thread back at every tick, so one guest cannot starve another by
-computing. Ceilings are proved in pairs — the same guest refused under a tight
+computing. Two example plugins — one Rust, one TypeScript — implement the same
+world, are built from source by the gate rather than committed as binaries, and
+answer nine inputs identically through the host's own activation lifecycle,
+reaching the host through both of the world's imports. Those inputs are the ones
+two toolchains disagree on most easily — non-ASCII, escapes, `1.0`, an integer
+past 2^53, and input that is not JSON at all — because a pair checked only on
+convenient input makes an equivalence claim look true. Ceilings are proved in
+pairs — the same guest refused under a tight
 ceiling and admitted under a generous one — so a failure is attributable to the
 ceiling rather than to the fixture. Those bound a guest's cost, not its
 authority: guest code still runs in the host process, so the driver runs only

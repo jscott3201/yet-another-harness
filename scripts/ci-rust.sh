@@ -20,4 +20,10 @@ cargo run --locked --manifest-path tools/protocol-codegen/Cargo.toml -- --check
 echo "==> workspace clippy"
 cargo clippy --locked --workspace --all-targets -- -D warnings
 
+# Before the tests, because the example-plugin cases load what it builds and
+# DEC-038 forbids committing the artifacts. This is where the lane acquires its
+# dependency on Node and on an npm registry; `npm ci` installs the committed
+# lockfile exactly.
+bash scripts/build-guests.sh
+
 bash scripts/test.sh ci

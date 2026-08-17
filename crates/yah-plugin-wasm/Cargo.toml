@@ -19,3 +19,4 @@ tokio = { workspace = true, features = ["macros", "rt"] }
 wit-bindgen.workspace = true
 yah-compose = { path = "../yah-compose" }
 wit-parser.workspace = true
+wit-component.workspace = true

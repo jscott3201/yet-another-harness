@@ -63,6 +63,23 @@ else
   target_mode="clean target volumes"
 fi
 
+# The image is Rust and nothing else. Hosted CI adds the lane's two non-image
+# tools with dedicated steps - cargo-nextest and, for the TypeScript example
+# guest, Node - so parity means adding them here too. Not identically: hosted CI
+# shares `scripts/install-nextest.sh`, but takes Node from `actions/setup-node`
+# pinned only to a major, where this pins an exact version. Both land in the
+# reused /opt/yah-tools volume, so only the first run per architecture pays.
+# shellcheck disable=SC2016  # `${PATH}` must expand in the container, not here.
+readonly container_lane='
+set -euo pipefail
+export YAH_NEXTEST_INSTALL_ROOT=/opt/yah-tools
+export YAH_NODE_INSTALL_ROOT=/opt/yah-tools
+export PATH="/opt/yah-tools/bin:/opt/yah-tools/node/bin:${PATH}"
+bash scripts/install-nextest.sh
+bash scripts/install-node.sh
+bash scripts/ci-rust.sh
+'
+
 echo "==> running canonical Rust CI lane in ${platform} (${target_mode})"
 docker run --rm --init --pull=missing --platform "$platform" \
   --mount "type=bind,source=${PWD},target=/workspace,readonly" \
@@ -75,4 +92,4 @@ docker run --rm --init --pull=missing --platform "$platform" \
   --env CARGO_TERM_COLOR=always \
   --env RUST_BACKTRACE=1 \
   "$ci_image" \
-  bash -c 'export PATH="/opt/yah-tools/bin:${PATH}"; export YAH_NEXTEST_INSTALL_ROOT=/opt/yah-tools; bash scripts/install-nextest.sh && bash scripts/ci-rust.sh'
+  bash -c "$container_lane"
