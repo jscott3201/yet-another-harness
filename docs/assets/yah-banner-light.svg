@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="760" height="112" viewBox="0 0 760 112" role="img" aria-label="yah-banner">
+  <g fill="none">
+    <rect x="24" y="26" width="52" height="16" rx="4" fill="#4f46e5" opacity="0.9"/>
+    <rect x="24" y="48" width="52" height="16" rx="4" fill="#0969da" opacity="0.75"/>
+    <rect x="24" y="70" width="52" height="16" rx="4" fill="#1a7f37" opacity="0.6"/>
+  </g>
+  <text x="100" y="60" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif" font-size="34" font-weight="700" fill="#1f2328">Yet Another Harness</text>
+  <text x="102" y="88" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif" font-size="15" fill="#59636e">a Rust-native, graph-backed, plugin-extensible agent harness</text>
+</svg>
