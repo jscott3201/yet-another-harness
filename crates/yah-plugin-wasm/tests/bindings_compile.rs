@@ -23,6 +23,44 @@ mod host {
             false
         }
     }
+
+    // Without the driver's `with` remap the resource is an uninhabited
+    // marker, which is exactly what a compile-proof needs: the trait surface
+    // is checked while no entry can ever exist.
+    impl yah::plugin::capabilities::HostCapability for State {
+        fn invoke(
+            &mut self,
+            _this: wasmtime::component::Resource<yah::plugin::capabilities::Capability>,
+            _input: String,
+        ) -> Result<String, yah::plugin::capabilities::CallError> {
+            Err(yah::plugin::capabilities::CallError {
+                code: yah::plugin::capabilities::CallErrorCode::Failed,
+                message: String::new(),
+            })
+        }
+
+        fn drop(
+            &mut self,
+            _rep: wasmtime::component::Resource<yah::plugin::capabilities::Capability>,
+        ) -> wasmtime::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl yah::plugin::capabilities::Host for State {
+        fn acquire(
+            &mut self,
+            _capability_id: String,
+        ) -> Result<
+            wasmtime::component::Resource<yah::plugin::capabilities::Capability>,
+            yah::plugin::capabilities::AcquireError,
+        > {
+            Err(yah::plugin::capabilities::AcquireError {
+                code: yah::plugin::capabilities::AcquireErrorCode::NotGranted,
+                message: String::new(),
+            })
+        }
+    }
 }
 
 mod guest {

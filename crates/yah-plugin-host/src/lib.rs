@@ -18,7 +18,8 @@ mod revision;
 pub use capability::{
     CapabilityBroker, CapabilityBrokerError, CapabilityDefinition, CapabilityGrant,
     CapabilityGrantError, CapabilityHandle, CapabilityHandleError, CapabilityProviderRegistration,
-    CapabilityRegistrationId, EffectiveCapabilityGrants, PluginStartContext,
+    CapabilityRegistrationId, EffectiveCapabilityGrants, PluginStartContext, TextCapability,
+    TextCapabilityFailure, TextCapabilityFailureCode,
 };
 pub use conformance::{
     DriverActivationObservation, DriverConformanceCase, DriverConformanceCaseReport,

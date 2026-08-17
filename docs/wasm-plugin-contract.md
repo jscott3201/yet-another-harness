@@ -11,7 +11,7 @@ The canonical source is
 
 - package `yah:plugin@0.1.0`;
 - world `conformance`;
-- imports `logging` and `cancellation`; and
+- imports `logging`, `cancellation`, and `capabilities`; and
 - exports `lifecycle` and `fixture-tool`.
 
 ## Why components rather than a byte ABI
@@ -61,24 +61,40 @@ compile-versus-instantiate figures on the checked-in fixtures.
 |---|---|---|
 | Guest to host | `logging` import | Structured level, message, and inert string fields |
 | Guest to host | `cancellation` import | Cooperative read-only cancellation observation |
+| Guest to host | `capabilities` import | Brokered capability acquisition and calls through opaque resources |
 | Host to guest | `lifecycle` export | One fallible activation entry point |
 | Host to guest | `fixture-tool` export | One fallible JSON-shaped request/response used by driver fixtures |
 
 Component imports are statically required. This fixed conformance profile is
 therefore not a universal permission set and is not derived from an SDK-003
 effective grant snapshot. Logging and cancellation are baseline host context
-for this profile. A future loader must reject a component whose required
-imports cannot be linked; it must not install privileged trap stubs for denied
-capabilities.
+for this profile.
+
+`capabilities` is the exception, and its shape is the point: the import is
+present in every activation, but the authority is the handle `acquire`
+returns, not the import. `acquire` names a capability and receives either an
+opaque `capability` resource or a named refusal (`invalid-id`, `not-granted`,
+`revoked`, `unavailable`, `mismatched`, `handle-limit`); each resource wraps
+an activation-scoped broker handle host-side, so every `invoke` re-enters the
+exact registration's revocation gate and the activation's cancellation and
+pre-cleanup fences, and refuses with `revoked` or `exhausted` when they are
+closed. A denied capability is therefore an observable refusal a guest can
+handle politely, never a privileged trap stub — which is the profile shape a
+future loader must preserve. A future loader must still reject a component
+whose required imports cannot be linked.
 
 The world imports no WASI package and declares no filesystem, network,
 environment, clock, random, graph, memory, or artifact interface. It also
 declares no typed activation, grant, provider-registration, or other scalar
-bearer field. Exact revision, activation, cancellation, and grant authority
-remain in host-owned store and resource-table state rather than crossing the
-ABI as forgeable typed values. Generic JSON can still carry arbitrary text, so
-a future driver must validate it as one bounded JSON value and must never treat
-caller-supplied IDs or tokens within it as authority.
+bearer field: the `capability-id` string names a capability, the way a path
+names a file, and confers nothing by itself, while the `capability` resource
+is a store-local table index Wasmtime manages - a forged index traps before
+the host is reached, and an index never crosses activations because each
+activation owns its store. Exact revision, activation, cancellation, and
+grant authority remain in host-owned store and resource-table state rather
+than crossing the ABI as forgeable typed values. Generic JSON can still carry
+arbitrary text, so a future driver must validate it as one bounded JSON value
+and must never treat caller-supplied IDs or tokens within it as authority.
 
 Two example guests implement this world: `examples/guests/rust-example`, built
 with `wit-bindgen` and `cargo build --target wasm32-unknown-unknown`, and
@@ -86,9 +102,10 @@ with `wit-bindgen` and `cargo build --target wasm32-unknown-unknown`, and
 committed as a binary — `scripts/build-guests.sh` builds both from source and
 the gate runs it before the tests (DEC-038). They answer one tool call
 identically and differ only in the field each uses to name itself, which is
-what makes the world a contract rather than a Rust convention. They are also
-the only guests here that call a host import, so the host's guest-to-host path
-is exercised by them and by nothing else.
+what makes the world a contract rather than a Rust convention. Both call the
+`logging` and `cancellation` imports; neither calls `capabilities`, whose
+guest evidence is the hand-written `capability-consumer` fixture, so no
+toolchain-portability claim is made for capability transport yet.
 
 `fixture-tool` is only the first portable call shape for the driver and guest
 examples. Its input and output strings are intended to contain one UTF-8 JSON
@@ -155,6 +172,14 @@ bounded time. Deactivation stops the guest before asking for the lock it holds,
 and the guest reaches that decision at its next epoch deadline. A stop is also
 read on the way into a call, not only at a deadline: a call short enough to
 return before the epoch advances would otherwise never consult it.
+
+One caveat the `capabilities` import introduces: an epoch deadline fires only
+at guest instruction boundaries, so time spent inside a synchronous host
+import extends the bound by exactly that much. `logging` and `cancellation`
+return immediately; a capability call runs whatever the registered provider
+does. That is why the provider contract requires `invoke` neither to block
+indefinitely nor to call back into the driver - the store lock is held for the
+duration of the guest call, and a re-entrant tool call would deadlock on it.
 
 The mechanism's own bound is a single tick: once deactivation raises the stop,
 the next deadline the guest reaches ends the call. A case does kill a live call
@@ -253,8 +278,11 @@ in a diff. These files are corpus rather than an authoring example: the guests
 built from a real toolchain are the WSM-005 examples under `examples/guests/`,
 and they answer a different question.
 
-All but one of the fixtures import nothing; `host-call-flood.wat` imports and
-calls `yah:plugin/logging@0.1.0`, which is what drives the guest-to-host path.
+Most of the fixtures import nothing; `host-call-flood.wat` imports and calls
+`yah:plugin/logging@0.1.0`, which is what drives the guest-to-host path, and
+`capability-consumer.wat` imports `yah:plugin/capabilities@0.1.0` to acquire,
+call, and drop a brokered capability, reporting every refusal code it observes
+as its tool answer instead of trapping on it.
 
 ## Deliberate limits
 
@@ -264,9 +292,13 @@ This slice does not provide:
   from the checked-in fixture corpus;
 - guest SDK artifacts. The Rust and TypeScript example guests WSM-005 added are
   an authoring example and a contract check, not an SDK;
-- capability-resource tables or graph, memory, artifact, tool-registry, or
-  durable-effect host APIs, and no route for a guest to reach a granted
-  capability;
+- graph, memory, artifact, tool-registry, or durable-effect host APIs. What a
+  guest can reach through `capabilities` is exactly the granted subset of
+  portable text contracts; nothing domain-shaped crosses yet;
+- any host-side bound on what a capability *provider* returns. The guest's own
+  memory ceiling bounds what can be lowered into it, so an oversized provider
+  answer traps the guest rather than being refused by the host; providers are
+  host-registered, which is why this is disclosed rather than clipped;
 - WIT async/streams, fuel metering, or per-call output bounds on the ABI
   itself;
 - WASI ambient authority, sandbox enforcement, or cross-runtime equivalence;

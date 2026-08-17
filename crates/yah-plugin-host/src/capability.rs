@@ -8,6 +8,7 @@
 mod broker;
 mod handle;
 mod model;
+mod text;
 
 pub use broker::{
     CapabilityBroker, CapabilityBrokerError, CapabilityProviderRegistration, PluginStartContext,
@@ -17,3 +18,4 @@ pub use model::{
     CapabilityDefinition, CapabilityGrant, CapabilityGrantError, CapabilityRegistrationId,
     EffectiveCapabilityGrants,
 };
+pub use text::{TextCapability, TextCapabilityFailure, TextCapabilityFailureCode};

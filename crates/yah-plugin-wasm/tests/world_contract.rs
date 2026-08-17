@@ -79,7 +79,13 @@ fn world_has_one_versioned_package_and_exact_directional_interfaces() {
             .keys()
             .map(String::as_str)
             .collect::<BTreeSet<_>>(),
-        BTreeSet::from(["cancellation", "fixture-tool", "lifecycle", "logging"])
+        BTreeSet::from([
+            "cancellation",
+            "capabilities",
+            "fixture-tool",
+            "lifecycle",
+            "logging",
+        ])
     );
     assert_eq!(package.worlds.len(), 1);
     assert_eq!(world.name, yah_plugin_wasm::WIT_WORLD);
@@ -99,6 +105,7 @@ fn world_has_one_versioned_package_and_exact_directional_interfaces() {
         imports,
         BTreeSet::from([
             "yah:plugin/cancellation@0.1.0".into(),
+            "yah:plugin/capabilities@0.1.0".into(),
             "yah:plugin/logging@0.1.0".into(),
         ])
     );
@@ -146,6 +153,12 @@ fn interface_functions_remain_small_and_explicit() {
     let expected = [
         ("logging", BTreeSet::from(["log"])),
         ("cancellation", BTreeSet::from(["is-cancelled"])),
+        // wit-parser keys a resource method by its bracketed method name, so
+        // the resource itself appears here only through its one method.
+        (
+            "capabilities",
+            BTreeSet::from(["acquire", "[method]capability.invoke"]),
+        ),
         ("lifecycle", BTreeSet::from(["activate"])),
         ("fixture-tool", BTreeSet::from(["invoke"])),
     ];

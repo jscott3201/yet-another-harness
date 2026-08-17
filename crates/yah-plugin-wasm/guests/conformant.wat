@@ -11,8 +11,9 @@
 ;; interface exports the enum and record its signatures mention, exactly as the
 ;; WIT interface declares them.
 ;;
-;; This fixture imports nothing. The world's logging and cancellation imports
-;; are linked by the host and proved to link, but no guest here calls back.
+;; This fixture imports nothing. The world's imports are linked by the host
+;; and proved to link, but this guest never calls back; the flood and
+;; capability-consumer fixtures are the corpus's import callers.
 
 (component
   (core module $impl

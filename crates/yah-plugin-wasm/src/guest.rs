@@ -37,6 +37,10 @@ pub enum GuestProgram {
     /// Every element of the list it logs aliases one buffer, so the memory
     /// ceiling does not bound what the call costs; `host_call_bytes` does.
     HostCallFlood,
+    /// Acquires a brokered capability at activation and answers tool calls
+    /// through it, reporting every refusal code it observes instead of
+    /// trapping on it.
+    CapabilityConsumer,
 }
 
 impl GuestProgram {
@@ -53,6 +57,7 @@ impl GuestProgram {
             Self::DeepRecursion => DEEP_RECURSION,
             Self::SlowStart => SLOW_START,
             Self::HostCallFlood => HOST_CALL_FLOOD,
+            Self::CapabilityConsumer => CAPABILITY_CONSUMER,
         }
     }
 }
@@ -67,3 +72,4 @@ const MANY_TABLES: &str = include_str!("../guests/many-tables.wat");
 const DEEP_RECURSION: &str = include_str!("../guests/deep-recursion.wat");
 const SLOW_START: &str = include_str!("../guests/slow-start.wat");
 const HOST_CALL_FLOOD: &str = include_str!("../guests/host-call-flood.wat");
+const CAPABILITY_CONSUMER: &str = include_str!("../guests/capability-consumer.wat");

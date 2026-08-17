@@ -57,7 +57,7 @@ fn a_kill_stops_a_call_that_is_already_running() {
     let engine = engine(limits);
     let core = core(&engine, GuestProgram::Runaway, limits);
     let ticker = EpochTicker::start(&engine, limits.epoch_tick);
-    block_on(core.instantiate()).expect("the runaway instantiates");
+    block_on(core.instantiate(None)).expect("the runaway instantiates");
 
     // The result comes back over a channel rather than from `join`. The
     // budget here is effectively infinite by design, so if the kill fails
@@ -108,7 +108,7 @@ fn a_killed_activation_is_refused_before_it_enters_the_guest() {
     let engine = engine(limits);
     let core = core(&engine, GuestProgram::Conformant, limits);
     let _ticker = EpochTicker::start(&engine, limits.epoch_tick);
-    block_on(core.instantiate()).expect("the conformant guest instantiates");
+    block_on(core.instantiate(None)).expect("the conformant guest instantiates");
 
     // This guest returns in microseconds, so it would never reach an epoch
     // deadline and never consult the flag. Entry is the only place a stop
@@ -156,11 +156,11 @@ fn a_compute_bound_guest_does_not_starve_a_sibling_on_the_same_thread() {
         .expect("a current-thread runtime is constructible");
     runtime.block_on(async {
         spinner
-            .instantiate()
+            .instantiate(None)
             .await
             .expect("the runaway instantiates");
         healthy
-            .instantiate()
+            .instantiate(None)
             .await
             .expect("the healthy guest instantiates");
 
@@ -214,7 +214,7 @@ fn a_killed_activation_is_refused_before_it_enters_the_guest_tool() {
     let engine = engine(limits);
     let core = core(&engine, GuestProgram::Conformant, limits);
     let _ticker = EpochTicker::start(&engine, limits.epoch_tick);
-    block_on(core.instantiate()).expect("the conformant guest instantiates");
+    block_on(core.instantiate(None)).expect("the conformant guest instantiates");
     block_on(core.call_activate()).expect("it activates");
     // It answers while live, or the refusal below would prove nothing.
     block_on(core.call_fixture_tool("{}")).expect("a live guest answers its tool");
@@ -243,7 +243,7 @@ fn a_faulted_activation_refuses_the_next_tool_call() {
     let engine = engine(limits);
     let core = core(&engine, GuestProgram::Runaway, limits);
     let _ticker = EpochTicker::start(&engine, limits.epoch_tick);
-    block_on(core.instantiate()).expect("the runaway guest instantiates");
+    block_on(core.instantiate(None)).expect("the runaway guest instantiates");
 
     let trapped = block_on(core.call_fixture_tool("{}"))
         .expect_err("the runaway fixture traps when its allocator runs");
@@ -280,8 +280,8 @@ fn a_live_activation_still_runs_after_a_sibling_core_is_killed() {
     let killed = core(&engine, GuestProgram::Conformant, limits);
     let live = core(&engine, GuestProgram::Conformant, limits);
     let _ticker = EpochTicker::start(&engine, limits.epoch_tick);
-    block_on(killed.instantiate()).expect("first guest instantiates");
-    block_on(live.instantiate()).expect("second guest instantiates");
+    block_on(killed.instantiate(None)).expect("first guest instantiates");
+    block_on(live.instantiate(None)).expect("second guest instantiates");
 
     killed.interrupt.kill();
     block_on(live.call_activate()).expect("a kill on one activation must not reach another");

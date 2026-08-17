@@ -236,10 +236,14 @@ certification.
 A separate `yah-plugin-wasm` crate owns the
 [WIT conformance world](docs/wasm-plugin-contract.md) and the first driver that
 executes against it. Pinned Wasmtime and `wit-bindgen` macros compile host and
-guest Rust bindings from the same versioned source, parser tests freeze its two
-baseline imports and two fixture exports, and a Wasmtime driver compiles
+guest Rust bindings from the same versioned source, parser tests freeze its
+three imports and two fixture exports, and a Wasmtime driver compiles
 checked-in component fixtures, gives each activation its own store, and drops
-that store to deactivate without asking guest code. It loads no plugin package.
+that store to deactivate without asking guest code. Brokered capabilities
+cross the ABI as opaque resources: the authority is the activation-scoped
+handle `acquire` returns against the store's admitted grants, never the
+import, and refusal, revocation, and fencing arrive as named codes a guest can
+observe. It loads no plugin package.
 It enforces host-owned ceilings on an activation's total memory and table size,
 on how many memories, tables, and instances it may hold, on the stack a guest
 call runs on and how deep that guest may recurse, a call deadline that stops a
@@ -257,7 +261,8 @@ pairs — the same guest refused under a tight
 ceiling and admitted under a generous one — so a failure is attributable to the
 ceiling rather than to the fixture. Those bound a guest's cost, not its
 authority: guest code still runs in the host process, so the driver makes no
-capability-transport, WASI, or sandbox claim.
+WASI or sandbox claim, and capability transport is exactly the brokered,
+fenced route above - nothing ambient rides along with it.
 
 What a component is allowed to *declare* is checked separately, before it runs.
 Malformed bytes are refused with the cause named rather than collapsed into one
