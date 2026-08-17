@@ -276,8 +276,9 @@ This slice does not provide:
   becomes a denial of service has not been measured here, which is part of the
   gap rather than a reason to discount it;
 - any check of a component's *exports* beyond requiring the world's own, and no
-  case for the per-poll panic guard, whose premise is confirmed - a store stays
-  callable after a caught host panic - but which no test reaches.
+  case for the per-poll panic guard. Its premise - that a store stays callable
+  after a caught host panic, where a trapped store would not - is reasoned from
+  Wasmtime's unwind behaviour and is not measured anywhere in this tree.
 - a complete import check. What is enforced is exact-name, root-level: a guest
   that declares an undeclared import inside a *nested* component still runs,
   the match is by exact string where Wasmtime's linker matches semver-

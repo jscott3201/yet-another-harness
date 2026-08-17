@@ -88,23 +88,35 @@ mod tests {
         assert_eq!(check_import_surface(&engine, &component), Ok(()));
     }
 
-    /// The case Wasmtime does not refuse on its own.
+    /// The case Wasmtime does not refuse on its own, and the name it reports.
+    ///
+    /// Two components with different undeclared names, because one alone cannot
+    /// tell a refusal that read the import from one that emits a constant - and
+    /// the name is the whole content of the finding.
     #[test]
     fn an_empty_undeclared_instance_import_is_refused_by_name() {
         let engine = WasmLimits::default().engine().expect("engine builds");
-        let component = Component::new(
-            &engine,
-            r#"(component
-                 (type $empty (instance))
-                 (import "wasi:cli/environment@0.2.0" (instance (type $empty))))"#,
-        )
-        .expect("an undeclared import still compiles - that is the point");
-        let refused = check_import_surface(&engine, &component)
-            .expect_err("an import outside the world must be refused");
-        assert!(
-            refused.contains("wasi:cli/environment@0.2.0"),
-            "the refusal must name the interface the guest asked for: {refused}"
-        );
+        for (text, expected) in [
+            (
+                r#"(component
+                     (type $empty (instance))
+                     (import "wasi:cli/environment@0.2.0" (instance (type $empty))))"#,
+                "wasi:cli/environment@0.2.0",
+            ),
+            (
+                r#"(component (import "acme:other/thing@1.0.0" (func)))"#,
+                "acme:other/thing@1.0.0",
+            ),
+        ] {
+            let component = Component::new(&engine, text)
+                .expect("an undeclared import still compiles - that is the point");
+            let refused = check_import_surface(&engine, &component)
+                .expect_err("an import outside the world must be refused");
+            assert!(
+                refused.contains(expected),
+                "the refusal must name the interface the guest asked for,                  expected {expected:?} in {refused:?}"
+            );
+        }
     }
 
     /// A world import is not refused by the rule that refuses the others.

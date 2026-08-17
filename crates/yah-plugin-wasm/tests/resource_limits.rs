@@ -739,14 +739,16 @@ async fn a_guest_may_not_hold_more_tables_than_the_host_allows() {
 /// The control: the same empty tables under a count that allows them.
 ///
 /// Every table the fixture declares is empty, so the element ceiling never
-/// charges for them. Only the count differs between this and the case above,
-/// which is what makes that one attributable to `max_tables`.
+/// charges for them. Built on `test_limits` so that `max_tables` really is the
+/// only field differing from the refusing half: `generous_limits` would also
+/// raise `memory_bytes` 32-fold, which is what makes a pair vary two things and
+/// credit one.
 #[tokio::test]
 async fn the_same_empty_tables_are_admitted_when_the_count_allows_them() {
     let mut rig = Rig::new("wasm.limits.tables.ok", 'e');
     let limits = WasmLimits {
         max_tables: 16,
-        ..generous_limits()
+        ..test_limits()
     };
     let (driver, observer) = driver_with(
         &rig.revision,
