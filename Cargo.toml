@@ -16,11 +16,13 @@ members = [
 # The two crates that do Cranelift's compiling are optimised even in dev and
 # test builds. Nothing else is, including every workspace crate.
 #
-# Guest components are compiled at test time, and unoptimised that takes about
-# 115 seconds over the 12 MB component the TypeScript example produces - past
-# the harness's 120s per-test terminate, so the case fails the run rather than
-# merely running slowly. This changes how fast a dependency runs, not what it
-# does; every other test's duration is unmoved.
+# Guest components are compiled at test time, and unoptimised Cranelift spends
+# about 115 seconds of that on the 12 MB component the TypeScript example
+# produces. The case around it then sits either side of the harness's 120s
+# per-test terminate - measured at 117.7s in one run and terminated at 120.0s in
+# another - so without this it does not merely run slowly, it fails the run, and
+# which way it lands is a matter of machine load. This changes how fast a
+# dependency runs, not what it does; every other test's duration is unmoved.
 #
 # Scoped rather than `"*"` because the cost is recurring: the gate cleans before
 # every run and CI never caches `target/`. Measured on one machine, clean

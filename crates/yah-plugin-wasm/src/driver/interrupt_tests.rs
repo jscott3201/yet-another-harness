@@ -259,9 +259,15 @@ fn a_faulted_activation_refuses_the_next_tool_call() {
 
     let refused = block_on(core.call_fixture_tool("{}"))
         .expect_err("a faulted activation must not be entered again");
+    // Asserted on the host guard's own wording, not on "earlier failure", which
+    // both messages carry. Wasmtime poisons a trapped store itself, so the loose
+    // form was satisfied by `describe_guest_failure`'s `CannotEnterComponent`
+    // arm - "guest invoke was refused because an earlier failure poisoned this
+    // activation" - and passed with the guard it exists for deleted.
     assert!(
-        refused.summary().contains("earlier failure"),
-        "the refusal must name the earlier failure rather than repeat the trap: {}",
+        refused.summary().contains("left it unable to be entered"),
+        "the refusal must come from the host's own entry check rather than from \
+         Wasmtime's poisoned store: {}",
         refused.summary()
     );
 }

@@ -28,7 +28,14 @@
 # Usage: bash scripts/build-guests.sh
 
 set -euo pipefail
-repo_root="$(git rev-parse --show-toplevel)"
+# Derived from this script's own location, like every other script in here, and
+# deliberately not from `git rev-parse --show-toplevel`. Hosted CI checks out as
+# one uid and runs the job container as root, so git refuses the repository as
+# dubiously owned and exits 128. That was already happening before this script
+# needed the value: the old `cd "$(git rev-parse ...)"` swallowed it, because
+# `cd ""` is a successful no-op, and the script carried on from the directory
+# `ci-rust.sh` had already set. Nothing here needs git.
+repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
 cd "$repo_root"
 
 # Preflight rather than a confusing failure three commands in. The Rust half
@@ -37,7 +44,8 @@ cd "$repo_root"
 for tool in node npm; do
   if ! command -v "$tool" >/dev/null 2>&1; then
     echo "FAIL: $tool is required to build the TypeScript example guest." >&2
-    echo "      See docs/development.md for the pinned major; any recent Node works." >&2
+    echo "      Node 26; the dependency floor is ^22.20 || ^24.12 || >=25, and npm" >&2
+    echo "      only warns when it is unmet. See docs/development.md." >&2
     exit 2
   fi
 done

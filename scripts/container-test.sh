@@ -64,10 +64,11 @@ else
 fi
 
 # The image is Rust and nothing else. Hosted CI adds the lane's two non-image
-# tools with dedicated steps — cargo-nextest and, for the TypeScript example
-# guest, Node — so parity means adding them here too, from the same pinned and
-# checksummed installers. Both land in the reused /opt/yah-tools volume, so
-# only the first run of a given architecture pays for them.
+# tools with dedicated steps - cargo-nextest and, for the TypeScript example
+# guest, Node - so parity means adding them here too. Not identically: hosted CI
+# shares `scripts/install-nextest.sh`, but takes Node from `actions/setup-node`
+# pinned only to a major, where this pins an exact version. Both land in the
+# reused /opt/yah-tools volume, so only the first run per architecture pays.
 # shellcheck disable=SC2016  # `${PATH}` must expand in the container, not here.
 readonly container_lane='
 set -euo pipefail

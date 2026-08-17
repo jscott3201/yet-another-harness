@@ -59,7 +59,7 @@ jobs:
           path: |
             /usr/local/cargo/registry
             /usr/local/cargo/git
-          key: cargo-src-linux-${{ runner.arch }}-rust-1.97.1-${{ hashFiles('Cargo.lock', 'tools/protocol-codegen/Cargo.lock') }}
+          key: cargo-src-linux-${{ runner.arch }}-rust-1.97.1-${{ hashFiles('Cargo.lock', 'tools/protocol-codegen/Cargo.lock', 'examples/guests/rust-example/Cargo.lock') }}
           restore-keys: |
             cargo-src-linux-${{ runner.arch }}-rust-1.97.1-
       - name: Install pinned cargo-nextest

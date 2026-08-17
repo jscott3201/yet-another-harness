@@ -8,11 +8,14 @@
 - The `wasm32-unknown-unknown` target, for the Rust example guest. Also pinned
   by `rust-toolchain.toml`, so rustup installs it and no lane adds a step for
   it; it is listed here as something the build depends on, not as a chore.
-- Node 26, installed yourself. Any 26.x works; the floor is `jco`'s own
-  `engines` constraint, which rejects Node 18 and 20 outright. This is the
-  repository's one non-Rust toolchain and the one requirement here that nothing
-  in the repository installs for you on a development machine — it is needed
-  only to build the example guests, see [Example Guests](#example-guests).
+- Node 26, installed yourself. Any 26.x works. The floor is the
+  `^22.20 || ^24.12 || >=25` range `@napi-rs/lzma` brings into `jco`'s
+  dependency tree — `jco` itself declares no `engines` — and npm only *warns*
+  on a dependency engines mismatch, so an older Node fails later and less
+  clearly than it would if npm refused. This is the repository's one non-Rust
+  toolchain and the one requirement here that nothing in the repository
+  installs for you on a development machine; it is needed only to build the
+  example guests, see [Example Guests](#example-guests).
 - Network access on the first build so Cargo can fetch the exact public Selene
   Git revision pinned in `Cargo.toml` and `Cargo.lock`, and so `npm ci` can
   fetch the TypeScript guest's locked dependency tree from the npm registry.
@@ -76,7 +79,7 @@ toolchain without creating root-owned files in the checkout.
 
 The image carries Rust and nothing else, so the container installs the lane's
 two non-image tools itself — `scripts/install-nextest.sh` and, because Debian
-Bookworm's packaged Node is below `jco`'s floor, `scripts/install-node.sh`.
+Bookworm's packaged Node is v18, `scripts/install-node.sh`.
 Both are pinned and checksum-verified, and both land in the reused
 `yah-tools-*` volume, so only the first run per architecture pays for them.
 Hosted CI installs the same two through its own steps. `install-node.sh` covers
@@ -112,11 +115,18 @@ its sources would pass hosted CI and fail the local parity command.
 ### The TypeScript component is not byte-reproducible
 
 `jco componentize` does not produce a stable artifact. Measured on 2026-08-16,
-three builds of identical input with one pinned `jco` on one machine gave three
-different components — 12,493,085, 12,493,116 and 12,493,178 bytes. Two of
-those differ in 2,564,053 bytes: 14 in the first megabyte, which are length
+four builds of identical input with one pinned `jco` on one machine gave four
+different components — 12,493,085, 12,493,116, 12,493,124 and 12,493,178 bytes
+— and the same input in the Linux container gave a fifth, 12,491,867. Two of
+the four differ in 2,564,053 bytes: 14 in the first megabyte, which are length
 prefixes shifting, and the rest concentrated in the trailing four megabytes
 that hold the embedded JavaScript engine snapshot.
+
+The Rust guest is the control: its core module came out at 17,951 bytes on
+every one of those builds, macOS and Linux alike. That is size rather than
+content, so it is not a reproducibility claim for the Rust guest — but it does
+place the instability in the JavaScript toolchain rather than in building
+guests as such.
 
 So the artifact cannot be pinned by checksum the way `scripts/install-node.sh`
 and `scripts/install-nextest.sh` pin their downloads. What *is* pinned is the

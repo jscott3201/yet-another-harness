@@ -6,7 +6,7 @@
   "license": "MIT OR Apache-2.0",
   "type": "module",
   "scripts": {
-    "build": "jco componentize guest.ts --wit ${YAH_GUEST_WIT_DIR:-../../../crates/yah-plugin-wasm/wit} --world-name conformance --disable all --out ${YAH_GUEST_OUT:-guest.component.wasm}"
+    "build": "jco componentize guest.ts --wit \"${YAH_GUEST_WIT_DIR:-../../../crates/yah-plugin-wasm/wit}\" --world-name conformance --disable all --out \"${YAH_GUEST_OUT:-guest.component.wasm}\""
   },
   "devDependencies": {
     "@bytecodealliance/jco": "1.29.0"

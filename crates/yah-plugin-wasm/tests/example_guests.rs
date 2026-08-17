@@ -207,13 +207,21 @@ async fn run_guest(label: &str, digest: char, component: &[u8]) -> GuestRun {
 /// Inputs chosen because a JavaScript guest could plausibly answer them
 /// differently from a Rust one.
 ///
-/// Every one of these diverged while the TypeScript guest round-tripped its
-/// input through `JSON.parse` and `JSON.stringify`, and one input - canonical
-/// JSON with a small number - did not. Testing only that one is what made an
-/// equivalence claim look true. Whitespace and `1.0` survive a JavaScript
-/// round trip changed; an integer past 2^53 comes back rounded; input that is
-/// not JSON throws, which reaches the host as a trap rather than as the
-/// `invalid-input` the world declares.
+/// Five of the nine diverged while the TypeScript guest round-tripped its input
+/// through `JSON.parse` and `JSON.stringify`: both whitespace cases come back
+/// normalised, `1.0` comes back as `1`, an integer past 2^53 comes back
+/// rounded, and input that is not JSON throws, which reaches the host as a trap
+/// rather than as the `invalid-input` the world declares.
+///
+/// The other four - canonical JSON, non-ASCII, escapes, and a bare array -
+/// survive a round trip unchanged, and are here as controls: they must stay
+/// identical, and a change that broke them would be caught by the same
+/// assertion. Non-ASCII earns its place twice over, because it diverged in the
+/// `bytes` field the guests log rather than in the answer, which is a
+/// disagreement no amount of canonical JSON would have surfaced.
+///
+/// Testing only the canonical case is what made the equivalence claim look
+/// true.
 const EQUIVALENCE_INPUTS: &[&str] = &[
     r#"{"n":1}"#,
     r#"{"n": 1}"#,
@@ -247,8 +255,9 @@ async fn both_example_guests_answer_the_same_tool_call_the_same_way() {
         // Anchored on the whole envelope tail rather than replacing "rust"
         // wherever it appears. The loose form passes today only because no
         // input happens to contain that word: the answer echoes the input, so
-        // one added case carrying it would rewrite the echo too and compare two
-        // strings this test had quietly mangled. Stripping a required suffix
+        // one added case carrying it would have the rust answer's echo rewritten
+        // and the typescript answer's left alone, and the two would be compared
+        // after this test had mangled one of them. Stripping a required suffix
         // also asserts the envelope shape, which the replace form never did.
         let rust_body = rust.answers[index]
             .strip_suffix(r#","from":"rust"}"#)
@@ -270,11 +279,12 @@ async fn both_example_guests_answer_the_same_tool_call_the_same_way() {
 
 /// A guest that refuses is reported as refusing, not as failing.
 ///
-/// Both examples return `invalid-input` for an empty request, which is the
-/// world's own error rather than a trap. The driver has to carry that back as a
-/// returned error: a guest that declined is not a guest that broke, and the
-/// distinction is the difference between retrying the call and tearing the
-/// plugin down.
+/// Both examples are written to return `invalid-input` for an empty request,
+/// which is the world's own error rather than a trap; this case drives the Rust
+/// one, because what is under test is the driver's handling rather than either
+/// guest's. The driver has to carry that back as a returned error: a guest that
+/// declined is not a guest that broke, and the distinction is the difference
+/// between retrying the call and tearing the plugin down.
 ///
 /// The same case pins the weak handle the observation holds. After teardown the
 /// core is gone, so the driver cannot reach a store at all - and reports that,

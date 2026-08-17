@@ -29,9 +29,11 @@ cd "$(git rev-parse --show-toplevel)"
 echo "==> cargo clean"
 cargo clean
 cargo clean --manifest-path tools/protocol-codegen/Cargo.toml
-# The example guest is outside the workspace and keeps its own target
-# directory, so a workspace clean would leave its artifacts behind - exactly
-# the stale state this gate exists to rule out.
+# The example guest builds into `target/guests/rust-example.build`, so the
+# workspace clean above already removes its artifacts and this line normally
+# reports "Removed 0 files". It stays as a guard against the one thing that
+# clean cannot reach: a hand-run `cargo build` inside the guest directory,
+# which does write `examples/guests/rust-example/target`.
 cargo clean --manifest-path examples/guests/rust-example/Cargo.toml
 
 echo "==> file-size cap"

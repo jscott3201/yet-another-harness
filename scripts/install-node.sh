@@ -3,9 +3,12 @@
 #
 # This exists for `scripts/container-test.sh`. The canonical Rust CI lane runs
 # in `rust:1.97.1-bookworm`, which carries no Node at all, and Debian bookworm's
-# apt Node is v18 — below `jco`'s own `engines` floor of `^22.20 || ^24.12 ||
-# >=25`, so it fails at install rather than at build. Hosted CI gets Node from
-# `actions/setup-node`; this is the local parity run's equivalent.
+# apt Node is v18 - below the `^22.20 || ^24.12 || >=25` floor that
+# `@napi-rs/lzma` brings into jco's dependency tree. Jco itself declares no
+# `engines`, and npm treats a dependency's `engines` mismatch as a warning that
+# still exits 0, so apt Node would be a silent mismatch rather than a clean
+# refusal. Pinning here is what turns that into a known-good version. Hosted CI
+# gets Node from `actions/setup-node`; this is the local run's equivalent.
 #
 # Developers on macOS and Linux workstations are not expected to run this: use
 # whatever Node manager you already have, per docs/development.md. Nothing here
@@ -23,7 +26,16 @@ set -euo pipefail
 readonly node_version="26.7.0"
 readonly release_base="https://nodejs.org/dist/v${node_version}"
 
-install_root="${YAH_NODE_INSTALL_ROOT:-${HOME}/.local}"
+# Required rather than defaulted to a workstation path. Installing replaces
+# `$install_root/node` outright, and a script whose header says it is not for
+# machines you work on should not have a default that points at one.
+if [[ -z "${YAH_NODE_INSTALL_ROOT:-}" ]]; then
+  echo "YAH_NODE_INSTALL_ROOT must name the directory to install into" >&2
+  echo "scripts/container-test.sh sets it; this script is for that container." >&2
+  echo "To install Node on a machine you work on, see docs/development.md." >&2
+  exit 2
+fi
+readonly install_root="$YAH_NODE_INSTALL_ROOT"
 readonly node_home="${install_root}/node"
 
 if [[ "$("${node_home}/bin/node" --version 2>/dev/null || true)" == "v${node_version}" ]]; then
