@@ -241,21 +241,20 @@ three imports and two fixture exports, and a Wasmtime driver compiles
 checked-in component fixtures, gives each activation its own store, and drops
 that store to deactivate without asking guest code. Brokered capabilities
 cross the ABI as opaque resources: the authority is the resource `acquire`
-returns against the store's admitted grants - activation-scoped through the
-broker handle behind it - never the import, and refusal, revocation, and
-fencing arrive as named codes a guest can observe. It loads no plugin
-package.
-It enforces host-owned ceilings on an activation's total memory and table size,
-on how many memories, tables, and instances it may hold, on how many live
-capability handles it may keep, on the stack a guest call runs on and how deep
-that guest may recurse, a call deadline that stops a guest which will not stop
-itself, and caps on what one guest-to-host call may transfer and what the host
-retains from it. Guest calls run on their own stack
-and hand the thread back at every tick, so one guest cannot starve another by
-computing. Two example plugins — one Rust, one TypeScript — implement the same
-world, are built from source by the gate rather than committed as binaries, and
-answer nine inputs identically through the host's own activation lifecycle,
-reaching the host through both of the world's imports. Those inputs are the ones
+returns against the store's admitted grants — activation-scoped through the
+broker handle behind it — never the import, and refusal, revocation, and
+fencing arrive as named codes a guest can observe. It loads no plugin package.
+It enforces host-owned ceilings on an activation's total memory and table
+size, on how many memories, tables, and instances it may hold, on how many
+live capability handles it may keep, on the stack a guest call runs on and how
+deep that guest may recurse, a call deadline that stops a guest which will not
+stop itself, and caps on what one guest-to-host call may transfer and what the
+host retains from it. Guest calls run on their own stack and hand the thread
+back at every tick, so one guest cannot starve another by computing. Two
+example plugins — one Rust, one TypeScript — implement the same world, are
+built from source by the gate rather than committed as binaries, and answer
+nine inputs identically through the host's own activation lifecycle, reaching
+the host through the logging and cancellation imports. Those inputs are the ones
 two toolchains disagree on most easily — non-ASCII, escapes, `1.0`, an integer
 past 2^53, and input that is not JSON at all — because a pair checked only on
 convenient input makes an equivalence claim look true. Ceilings are proved in

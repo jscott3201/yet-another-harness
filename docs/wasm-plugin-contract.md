@@ -76,13 +76,12 @@ returns, not the import. `acquire` names a capability and receives either an
 opaque `capability` resource or a named refusal (`invalid-id`, `not-granted`,
 `revoked`, `unavailable`, `mismatched`, `handle-limit`); behind each resource
 the host keeps an entry wrapping an activation-scoped broker handle, so every
-`invoke` re-enters the
-exact registration's revocation gate and the activation's cancellation and
-pre-cleanup fences, and refuses with `revoked` once any of them closes. A
-denied capability is therefore an observable refusal a guest can
-handle politely, never a privileged trap stub — which is the profile shape a
-future loader must preserve. A future loader must still reject a component
-whose required imports cannot be linked.
+`invoke` re-enters the exact registration's revocation gate and the
+activation's cancellation and pre-cleanup fences, and refuses with `revoked`
+once any of them closes. A denied capability is therefore an observable
+refusal a guest can handle politely, never a privileged trap stub — which is
+the profile shape a future loader must preserve. A future loader must still
+reject a component whose required imports cannot be linked.
 
 The world imports no WASI package and declares no filesystem, network,
 environment, clock, random, graph, memory, or artifact interface. It also

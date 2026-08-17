@@ -254,7 +254,12 @@ fn call_refusal(error: CapabilityHandleError) -> CallError {
     CallError { code, message }
 }
 
-/// Map a provider's own refusal onto the `invoke` error surface.
+/// Map a provider's own refusal onto the call error surface.
+///
+/// The one message the host does not author: the provider's refusal text is
+/// its caller-facing contract and crosses verbatim, like its answers do.
+/// Providers are host-registered, which is what makes that acceptable where
+/// echoing broker internals or guest text is not.
 fn provider_failure(failure: TextCapabilityFailure) -> CallError {
     let code = match failure.code {
         TextCapabilityFailureCode::InvalidInput => CallErrorCode::InvalidInput,

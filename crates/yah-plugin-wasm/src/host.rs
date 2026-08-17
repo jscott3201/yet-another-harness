@@ -168,7 +168,7 @@ impl HostObserver {
         self.capability_acquire_refusals.load(Ordering::Acquire)
     }
 
-    /// Capability calls the guest attempted through a held handle.
+    /// Capability calls the guest attempted through a held resource.
     pub fn capability_calls(&self) -> usize {
         self.capability_calls.load(Ordering::Acquire)
     }
@@ -178,7 +178,7 @@ impl HostObserver {
         self.capability_call_refusals.load(Ordering::Acquire)
     }
 
-    /// Handles the guest currently holds live - a gauge, not a running total.
+    /// Capability resources the guest holds live - a gauge, not a total.
     ///
     /// Decremented when the guest calls `resource.drop` and equally when the
     /// store drops with handles still held, because both paths drop the table

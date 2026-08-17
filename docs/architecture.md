@@ -283,8 +283,9 @@ be repaired by optimistic labeling.
 
 The WIT draft contains only explicitly named interfaces - baseline logging
 and cancellation, plus the brokered `capabilities` import - and no WASI
-imports, and the Wasm driver links exactly those; the flood and
-capability-consumer fixtures call back through them. It enforces host-owned memory
+imports, and the Wasm driver links exactly those; the flood fixture calls
+back through logging and the capability-consumer fixture through
+capabilities. It enforces host-owned memory
 and table ceilings and a call deadline that terminates a guest which will not
 stop, and it bounds what one host call may retain. Those are resource bounds,
 not isolation: guest code still runs in the authority process, so the driver may

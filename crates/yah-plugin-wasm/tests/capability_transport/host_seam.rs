@@ -10,7 +10,7 @@
 
 use std::sync::{Arc, Mutex};
 
-use yah_compose::{ComponentSlot, ProviderSelectionEpoch, ServiceRegistry};
+use yah_compose::{ComponentSlot, DesiredComponentState, ProviderSelectionEpoch, ServiceRegistry};
 use yah_plugin_host::{
     CapabilityBroker, CapabilityDefinition, CapabilityId, DriverActivationError,
     DriverDeactivationError, DriverFuture, DriverHealthError, DriverKind, DriverPrepareError,
@@ -224,10 +224,24 @@ async fn the_acquire_mapping_is_whole_set_against_an_admitted_context() {
     );
     drop(replacement);
 
-    // Closing the activation fences the context itself: the same acquire that
-    // was `unavailable` a moment ago is now about the activation, not the
-    // provider.
-    stop(epoch, &rig.registry, activation).await;
+    // Beginning the stop fences the context itself, before cleanup runs: the
+    // same acquire that was `unavailable` a moment ago is now about the
+    // activation, not the provider - and this is the mid-window moment the
+    // fixture's "A2" observes, not the settled state after cleanup.
+    let (slot, _handle) = activation.release_active().expect("active releases");
+    let removed = DesiredComponentState::removed(slot.generation(2));
+    slot.reconcile(&rig.registry, removed)
+        .expect("component begins stopping");
+    let revoked = state
+        .acquire(CAPABILITY_ID.to_owned())
+        .expect_err("a closing activation refuses");
+    assert_eq!(revoked.code, AcquireErrorCode::Revoked);
+    assert!(
+        !revoked.message.contains('@'),
+        "activation identities are host internals and must not cross: {:?}",
+        revoked.message
+    );
+    slot.finish_stop(epoch).await.expect("cleanup completes");
     assert_eq!(
         acquire_code(&mut state, CAPABILITY_ID),
         Err(AcquireErrorCode::Revoked)
@@ -295,18 +309,23 @@ async fn the_call_mapping_covers_the_provider_and_the_mismatch() {
     assert_eq!(observer.capability_calls(), 2);
     assert_eq!(observer.capability_call_refusals(), 2);
 
-    // A resource held across the activation's stop refuses as revoked when
-    // invoked afterwards - the host half of the fixture's stale-window "E0".
-    let held_across_stop = state
+    // A resource held into the stop window refuses as revoked - the host
+    // half of the fixture's stale-window "E0", invoked between stop beginning
+    // and cleanup finishing, not after.
+    let held_into_stop = state
         .acquire(CAPABILITY_ID.to_owned())
         .expect("still granted before the stop");
-    stop(epoch, &rig.registry, activation).await;
+    let (slot, _handle) = activation.release_active().expect("active releases");
+    let removed = DesiredComponentState::removed(slot.generation(2));
+    slot.reconcile(&rig.registry, removed)
+        .expect("component begins stopping");
     assert_eq!(
-        HostCapability::invoke(&mut state, held_across_stop, "ping".to_owned())
-            .expect_err("a stale activation's handle refuses")
+        HostCapability::invoke(&mut state, held_into_stop, "ping".to_owned())
+            .expect_err("a closing activation's resource refuses")
             .code,
         CallErrorCode::Revoked
     );
+    slot.finish_stop(epoch).await.expect("cleanup completes");
 
     // The mismatch pair's host half needs its own broker, because the first
     // registration fixes a capability ID's contract type for a broker's life.
@@ -369,11 +388,28 @@ async fn the_handle_ceiling_holds_at_the_host_seam_too() {
         &grants,
     )
     .await;
-    let limits = WasmLimits {
+    let tight = WasmLimits {
         max_capability_handles: 1,
         ..WasmLimits::default()
     };
-    let mut state = HostState::with_grants(HostObserver::new(), limits, context);
+    let generous = WasmLimits {
+        max_capability_handles: 2,
+        ..WasmLimits::default()
+    };
+
+    // The generous half of the pair, so the refusal below is attributable to
+    // the bound rather than to the seam: the same two acquires both admit.
+    let mut roomy = HostState::with_grants(HostObserver::new(), generous, context.clone());
+    let first = roomy
+        .acquire(CAPABILITY_ID.to_owned())
+        .expect("the first handle is admitted");
+    let second = roomy
+        .acquire(CAPABILITY_ID.to_owned())
+        .expect("the second is under the generous bound");
+    HostCapability::drop(&mut roomy, first).expect("drop never errors");
+    HostCapability::drop(&mut roomy, second).expect("drop never errors");
+
+    let mut state = HostState::with_grants(HostObserver::new(), tight, context);
 
     let held = state
         .acquire(CAPABILITY_ID.to_owned())
