@@ -80,8 +80,10 @@ export const fixtureTool = {
 // guest failure rather than as the answer the Rust guest gives.
 //
 // The output is spliced raw into a quoted position, so the answer is
-// well-formed JSON only while the provider's output needs no string escaping
-// - true of every `echo:` answer. Both guests share that limit on purpose: an
+// well-formed JSON only while the provider's output needs no string escaping.
+// What holds that today is the corpus's choice of `cap:` requests, not
+// anything about `echo:` output as such - the provider reflects its request
+// verbatim, quotes included. Both guests share the limit on purpose: an
 // output that needed escaping would malform both answers identically rather
 // than split them.
 //

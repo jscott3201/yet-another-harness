@@ -25,16 +25,15 @@ mod fixtures;
 
 use std::{path::PathBuf, sync::Arc};
 
-use fixtures::revision_requesting;
+use fixtures::{CAPABILITY_ID, EchoText, revision_requesting, text_echo_definition};
 use yah_compose::{
     ComponentDefinition, ComponentRevision, ComponentSlot, ComponentSlotOutcome,
     DesiredComponentState, ProviderAssignments, ProviderSelectionEpoch, ReconcileOutcome, Scope,
     ServiceRegistry,
 };
 use yah_plugin_host::{
-    CapabilityBroker, CapabilityDefinition, CapabilityId, CapabilityProviderRegistration,
-    DriverConformanceCase, EffectiveCapabilityGrants, HostPluginActivation, PluginRevision,
-    TextCapability, TextCapabilityFailure,
+    CapabilityBroker, CapabilityProviderRegistration, DriverConformanceCase,
+    EffectiveCapabilityGrants, HostPluginActivation, PluginRevision, TextCapability,
 };
 use yah_plugin_wasm::{
     LogRecord, ResourceState, WasmComponentDriver, WasmLimits, WasmObserver,
@@ -74,30 +73,6 @@ fn rust_component() -> Vec<u8> {
 
 fn ts_component() -> Vec<u8> {
     artifact("ts-example.component.wasm")
-}
-
-/// The capability both example guests consume, spelled in their sources.
-const CAPABILITY_ID: &str = "example.text-echo/v1";
-
-fn definition() -> CapabilityDefinition<dyn TextCapability> {
-    CapabilityDefinition::new(
-        CapabilityId::new(CAPABILITY_ID).expect("the example capability ID is canonical"),
-    )
-}
-
-/// The provider from `capability_transport.rs`, magic inputs and all: `bad`
-/// is refused as `invalid-input` and `boom` as `failed`, so the corpus can
-/// drive both error renderings through both guests.
-struct EchoText;
-
-impl TextCapability for EchoText {
-    fn invoke(&self, input: &str) -> Result<String, TextCapabilityFailure> {
-        match input {
-            "bad" => Err(TextCapabilityFailure::invalid_input("the input is refused")),
-            "boom" => Err(TextCapabilityFailure::failed("the provider broke")),
-            _ => Ok(format!("echo:{input}")),
-        }
-    }
 }
 
 struct Rig {
@@ -157,7 +132,10 @@ impl Rig {
         let mut broker = CapabilityBroker::new().expect("broker is constructible");
         let (grants, registration) = if granted {
             let registration = broker
-                .register(&definition(), Arc::new(EchoText) as Arc<dyn TextCapability>)
+                .register(
+                    &text_echo_definition(),
+                    Arc::new(EchoText::default()) as Arc<dyn TextCapability>,
+                )
                 .expect("registration succeeds");
             let grants = EffectiveCapabilityGrants::new(&revision, [registration.grant()])
                 .expect("the fixture manifest requests the capability");
@@ -357,8 +335,8 @@ const REFUSAL_INPUTS: &[&str] = &["cap:hello"];
 /// this asks across inputs that give the two toolchains every opportunity to
 /// disagree, not just the one that suits them.
 ///
-/// One test rather than two, because Nextest runs each test in its own process
-/// and the two properties are views of the same run. Split, the pair compiled
+/// One test rather than three, because Nextest runs each test in its own
+/// process and the three properties are views of the same runs. Split, the pair compiled
 /// both components twice instead of once - the TypeScript one is the 12 MB half
 /// of that - and ran two multi-second compiles concurrently, mid-run, beside the
 /// two long subscription cases. The assertions stay separated, and each still
@@ -499,8 +477,10 @@ async fn a_guest_that_declines_is_reported_as_declining_and_then_as_gone() {
 /// one call per `cap:` input, refusals only where the provider's magic inputs
 /// put them, and zero live handles while the activation is still up - which is
 /// the deterministic-release claim, since teardown would zero the count for
-/// any guest. On the refused run, the acquire attempt reached the broker and
-/// came back as the broker's refusal, rendered by the guest as an answer.
+/// any guest. On the refused run, the acquire attempt crossed the ABI into
+/// the host's seam and was refused there, from the activation's own grant
+/// snapshot - the broker is never consulted on this path - and the guest
+/// rendered that refusal as an answer.
 fn assert_capability_transport(name: &str, pair: &GuestPair) {
     let capability_inputs = EQUIVALENCE_INPUTS
         .iter()
@@ -557,7 +537,7 @@ fn assert_capability_transport(name: &str, pair: &GuestPair) {
     );
     assert_eq!(
         refused.capability_acquires, 1,
-        "{name} guest's refused acquire should still have reached the broker"
+        "{name} guest's refused acquire should still have crossed into the host"
     );
     assert_eq!(refused.capability_acquire_refusals, 1, "{name}: refused");
     assert_eq!(

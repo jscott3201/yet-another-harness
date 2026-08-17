@@ -8,11 +8,48 @@
 
 #![allow(dead_code)]
 
+use std::sync::atomic::{AtomicUsize, Ordering};
+
 use yah_plugin_host::{
-    CapabilityId, CapabilityRequest, DriverConformanceCase, DriverConformanceSetupError,
-    PackageDigest, PackageRelativePath, PluginEntrypoint, PluginManifest, PluginPackageId,
-    PluginRevision, PluginVersion, SdkVersionRequirement,
+    CapabilityDefinition, CapabilityId, CapabilityRequest, DriverConformanceCase,
+    DriverConformanceSetupError, PackageDigest, PackageRelativePath, PluginEntrypoint,
+    PluginManifest, PluginPackageId, PluginRevision, PluginVersion, SdkVersionRequirement,
+    TextCapability, TextCapabilityFailure,
 };
+
+/// The capability the example guests and the consumer fixture both ask for,
+/// spelled in their sources.
+pub(super) const CAPABILITY_ID: &str = "example.text-echo/v1";
+
+pub(super) fn text_echo_definition() -> CapabilityDefinition<dyn TextCapability> {
+    CapabilityDefinition::new(
+        CapabilityId::new(CAPABILITY_ID).expect("the fixture capability ID is canonical"),
+    )
+}
+
+/// Example-only provider: echoes, and refuses two magic inputs on purpose, so
+/// a consumer can observe `invalid-input` and `failed` from inside.
+///
+/// One definition for every binary that grants the capability. The corpus
+/// entries `cap:bad` and `cap:boom` in `example_guests` and the fixture
+/// scripts in `capability_transport` both name these magic inputs, and a
+/// private copy of the provider in each is how they would drift apart
+/// silently.
+#[derive(Default)]
+pub(super) struct EchoText {
+    pub(super) calls: AtomicUsize,
+}
+
+impl TextCapability for EchoText {
+    fn invoke(&self, input: &str) -> Result<String, TextCapabilityFailure> {
+        self.calls.fetch_add(1, Ordering::AcqRel);
+        match input {
+            "bad" => Err(TextCapabilityFailure::invalid_input("the input is refused")),
+            "boom" => Err(TextCapabilityFailure::failed("the provider broke")),
+            _ => Ok(format!("echo:{input}")),
+        }
+    }
+}
 
 pub(super) fn revision(
     case: DriverConformanceCase,

@@ -88,9 +88,11 @@ impl fixture_tool::Guest for Example {
 ///
 /// The output is spliced raw into a quoted position, so the answer is
 /// well-formed JSON only while the provider's output needs no string
-/// escaping - true of every `echo:` answer. Both guests share that limit on
-/// purpose: an output that needed escaping would malform both answers
-/// identically rather than split them.
+/// escaping. What holds that today is the corpus's choice of `cap:` requests,
+/// not anything about `echo:` output as such - the provider reflects its
+/// request verbatim, quotes included. Both guests share the limit on purpose:
+/// an output that needed escaping would malform both answers identically
+/// rather than split them.
 fn answer_through_capability(request: &str) -> String {
     let capability = match acquire(CAPABILITY_ID) {
         Ok(capability) => capability,
