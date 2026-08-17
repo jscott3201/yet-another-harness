@@ -85,6 +85,12 @@ impl fixture_tool::Guest for Example {
 /// broke". The handle is released by scope drop at the end of this function,
 /// which is the whole release story in Rust - the generated `Capability` owns
 /// its handle and its `Drop` emits the resource drop the host counts.
+///
+/// The output is spliced raw into a quoted position, so the answer is
+/// well-formed JSON only while the provider's output needs no string
+/// escaping - true of every `echo:` answer. Both guests share that limit on
+/// purpose: an output that needed escaping would malform both answers
+/// identically rather than split them.
 fn answer_through_capability(request: &str) -> String {
     let capability = match acquire(CAPABILITY_ID) {
         Ok(capability) => capability,
@@ -109,8 +115,10 @@ fn answer_through_capability(request: &str) -> String {
 /// wit-bindgen renders enum cases as UpperCamelCase Rust variants, and the
 /// TypeScript guest receives the same cases as kebab-case strings with nothing
 /// to map. A `Debug`-format shortcut here would answer `NotGranted` where the
-/// other guest answers `not-granted` - precisely the divergence the
-/// equivalence corpus exists to catch.
+/// other guest answers `not-granted`. The call codes' guard is the corpus's
+/// two provider refusals; the acquire codes' is the ungranted activation's
+/// exact `not-granted` answer - one arm of these six, which is as far as the
+/// tests reach today.
 fn acquire_code(code: AcquireErrorCode) -> &'static str {
     match code {
         AcquireErrorCode::InvalidId => "invalid-id",

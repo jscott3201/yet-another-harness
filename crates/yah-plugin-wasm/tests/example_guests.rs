@@ -301,14 +301,15 @@ async fn drive(
 /// Inputs chosen because a JavaScript guest could plausibly answer them
 /// differently from a Rust one.
 ///
-/// Five of the nine diverged while the TypeScript guest round-tripped its input
-/// through `JSON.parse` and `JSON.stringify`: both whitespace cases come back
-/// normalised, `1.0` comes back as `1`, an integer past 2^53 comes back
-/// rounded, and input that is not JSON throws, which reaches the host as a trap
-/// rather than as the `invalid-input` the world declares.
+/// Five of the nine echo entries diverged while the TypeScript guest
+/// round-tripped its input through `JSON.parse` and `JSON.stringify`: both
+/// whitespace cases come back normalised, `1.0` comes back as `1`, an integer
+/// past 2^53 comes back rounded, and input that is not JSON throws, which
+/// reaches the host as a trap rather than as the `invalid-input` the world
+/// declares.
 ///
-/// The other four - canonical JSON, non-ASCII, escapes, and a bare array -
-/// survive a round trip unchanged, and are here as controls: they must stay
+/// The other four echo entries - canonical JSON, non-ASCII, escapes, and a bare
+/// array - survive a round trip unchanged, and are here as controls: they must stay
 /// identical, and a change that broke them would be caught by the same
 /// assertion. Non-ASCII earns its place twice over, because it diverged in the
 /// `bytes` field the guests log rather than in the answer, which is a
@@ -346,15 +347,15 @@ const EQUIVALENCE_INPUTS: &[&str] = &[
 /// be the same answer from both toolchains.
 const REFUSAL_INPUTS: &[&str] = &["cap:hello"];
 
-/// The two claims the pair exists to support, over one pair of runs.
+/// The three claims the pair exists to support, over two runs of each guest.
 ///
 /// Same world, same input, same answer apart from the value of the one field
-/// each guest uses to name itself; and both guests reaching the host through
-/// the logging and cancellation imports. If the host could tell them apart
-/// in any other way, the world would not be the contract - so this asks
-/// across inputs that give the two toolchains every opportunity to disagree,
-/// not just the one that
-/// suits them.
+/// each guest uses to name itself; both guests reaching the host through the
+/// logging, cancellation, and capabilities imports; and both releasing every
+/// handle they acquire while their activation is still live. If the host could
+/// tell them apart in any other way, the world would not be the contract - so
+/// this asks across inputs that give the two toolchains every opportunity to
+/// disagree, not just the one that suits them.
 ///
 /// One test rather than two, because Nextest runs each test in its own process
 /// and the two properties are views of the same run. Split, the pair compiled
@@ -514,7 +515,20 @@ fn assert_capability_transport(name: &str, pair: &GuestPair) {
         "the corpus must hold succeeding capability inputs for this to mean anything"
     );
 
+    // One absolute anchor, like the echo path's first answer: cross-guest
+    // agreement alone would hold if both toolchains mangled the provider's
+    // output the same way, so this pins that `echo:hello` itself came back
+    // through the generated lift.
+    let hello = EQUIVALENCE_INPUTS
+        .iter()
+        .position(|input| *input == "cap:hello")
+        .expect("the corpus must hold the succeeding capability input");
     let granted = &pair.granted;
+    assert_eq!(
+        granted.answers[hello],
+        format!("{{\"capability\":\"echo:hello\",\"from\":\"{name}\"}}"),
+        "{name} guest must carry the provider's own output back"
+    );
     assert_eq!(
         granted.capability_acquires, capability_inputs,
         "{name} guest should acquire once per cap: input"

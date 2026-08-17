@@ -79,13 +79,19 @@ export const fixtureTool = {
 // rides in the error record, and rethrowing it would cross the boundary as a
 // guest failure rather than as the answer the Rust guest gives.
 //
+// The output is spliced raw into a quoted position, so the answer is
+// well-formed JSON only while the provider's output needs no string escaping
+// - true of every `echo:` answer. Both guests share that limit on purpose: an
+// output that needed escaping would malform both answers identically rather
+// than split them.
+//
 // The `finally` dispose is load-bearing, not tidiness. The host counts live
 // handles, and this engine never garbage-collects them - a probe holding two
 // hundred undisposed handles under allocation pressure released none - so a
-// guest that skips this leaks against the broker's handle limit. Exactly once,
-// too: a second dispose of the same handle traps. `using cap = acquire(...)`
-// is this same call as scope-exit sugar; it stays spelled out here because the
-// release is part of what this example exists to show.
+// guest that skips this leaks against the host's live-handle ceiling. Exactly
+// once, too: a second dispose of the same handle traps. `using cap =
+// acquire(...)` is this same call as scope-exit sugar; it stays spelled out
+// here because the release is part of what this example exists to show.
 function answerThroughCapability(request: string): string {
   let capability;
   try {
