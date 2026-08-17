@@ -9,9 +9,9 @@ mod peer;
 
 use peer::{assert_fatal, call, reply_ok, wire};
 use serde_json::json;
-use yah_plugin_ipc::MAX_CALL_PAYLOAD_BYTES;
 use yah_plugin_ipc::session::{AppError, SessionConfig, SessionEvent};
 use yah_plugin_ipc::types::*;
+use yah_plugin_ipc::{MAX_CALL_PAYLOAD_BYTES, MAX_INLINE_RESULT_BYTES};
 
 #[test]
 fn a_worker_call_is_delivered_and_the_reply_goes_out() {
@@ -50,9 +50,14 @@ fn a_worker_call_is_delivered_and_the_reply_goes_out() {
         other => panic!("expected the reply, got {other:?}"),
     }
     // Answered means answered: a second terminal for the same call is an
-    // application bug the session refuses to put on the wire.
+    // application bug the session refuses to put on the wire, named apart
+    // from a call that never existed.
     assert_eq!(
         session.reply_to_worker(CallId(7), Outcome::Ok { result: json!(0) }),
+        Err(AppError::AlreadySettled)
+    );
+    assert_eq!(
+        session.reply_to_worker(CallId(99), Outcome::Ok { result: json!(0) }),
         Err(AppError::UnknownCall)
     );
 }
@@ -140,6 +145,61 @@ fn the_in_flight_ceiling_refuses_at_the_bound_and_admits_below_it() {
         .iter()
         .any(|event| matches!(event, SessionEvent::CallDelivered { call_id, .. } if *call_id == CallId(4)));
     assert!(delivered, "the call below the ceiling must be admitted");
+}
+
+#[test]
+fn a_method_name_outside_its_length_bound_is_fatal_and_the_bound_admits() {
+    let mut session = peer::negotiated();
+    session.feed(&wire(&call(1, &"m".repeat(128), json!(null))));
+    assert!(
+        matches!(
+            session.drain_events().as_slice(),
+            [SessionEvent::CallDelivered { .. }]
+        ),
+        "a method at the bound is admitted"
+    );
+    session.feed(&wire(&call(2, &"m".repeat(129), json!(null))));
+    peer::assert_fatal(&mut session, WireErrorKind::InvalidFrame);
+}
+
+#[test]
+fn a_worker_reply_with_an_oversize_inline_result_is_fatal() {
+    let mut session = peer::negotiated();
+    let id = session
+        .call_worker("guest.big", json!(null), None, false)
+        .expect("call goes out");
+    session.drain_outbox();
+    // The worker had the spill path and violated the inline bound instead;
+    // that is a broken SDK, not a per-call mistake.
+    let oversize = "x".repeat(MAX_INLINE_RESULT_BYTES + 1);
+    session.feed(&wire(&reply_ok(id, json!(oversize))));
+    peer::assert_fatal(&mut session, WireErrorKind::PayloadTooLarge);
+}
+
+#[test]
+fn an_oversize_outbound_call_payload_is_refused_before_the_wire() {
+    let mut session = peer::negotiated();
+    // json!(string) serializes to length + 2 quote bytes: this pair sits
+    // exactly at and one past the bound.
+    session
+        .call_worker(
+            "guest.big",
+            json!("x".repeat(MAX_CALL_PAYLOAD_BYTES - 2)),
+            None,
+            false,
+        )
+        .expect("a payload at the bound goes out");
+    match session.call_worker(
+        "guest.big",
+        json!("x".repeat(MAX_CALL_PAYLOAD_BYTES - 1)),
+        None,
+        false,
+    ) {
+        Err(AppError::PayloadTooLarge { bytes }) => assert_eq!(bytes, MAX_CALL_PAYLOAD_BYTES + 1),
+        other => panic!("expected the payload refusal, got {other:?}"),
+    }
+    let outbox = session.drain_outbox();
+    assert_eq!(outbox.len(), 1, "only the bounded call reached the wire");
 }
 
 #[test]

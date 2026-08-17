@@ -37,13 +37,20 @@ host_calls_in_flight: number,
  */
 worker_calls_in_flight: number, 
 /**
- * Live resource handles the worker may hold at once.
+ * Live resource handles the worker may hold at once, capability and
+ * artifact alike — an artifact handle pins its bytes host-side, so an
+ * uncounted kind would be unbounded memory behind a bounded gauge.
  */
 live_handles: number, 
 /**
  * Frames of credit a stream opens with.
  */
-initial_stream_credit: number, };
+initial_stream_credit: number, 
+/**
+ * Ceiling any stream's credit window may reach, open grant and
+ * widenings summed.
+ */
+max_stream_credit: number, };
 
 export type Call = { call_id: CallId, method: string, 
 /**
@@ -51,7 +58,7 @@ export type Call = { call_id: CallId, method: string,
  * has been denied clock access can still count down, and the host
  * enforces the deadline regardless of what the worker does.
  */
-deadline_ms: number | null, 
+deadline_ms?: number, 
 /**
  * Whether the caller wants incremental results. A receiver that agrees
  * answers with [`StreamOpen`] before any data; the terminal reply still

@@ -30,18 +30,7 @@ impl HostSession {
         if !self.worker_calls.contains_key(&minted_for) {
             return Err(AppError::UnknownCall);
         }
-        if self.live_capability_handles >= self.config.ceilings.live_handles {
-            return Err(AppError::HandleCeiling);
-        }
-        let handle = self.next_handle_id();
-        self.handles.insert(
-            handle,
-            Handle {
-                kind: HandleKind::Capability,
-                artifact: None,
-            },
-        );
-        self.live_capability_handles += 1;
+        let handle = self.insert_handle(HandleKind::Capability, None)?;
         self.worker_calls
             .get_mut(&minted_for)
             .expect("checked above")
@@ -52,7 +41,10 @@ impl HostSession {
 
     /// Offer spilled bytes behind an artifact handle. The offer carries
     /// size and digest so the reader can refuse before the first pull and
-    /// verify after the last.
+    /// verify after the last. Counts against the same live-handle ceiling
+    /// as a capability grant: each live artifact pins its bytes host-side,
+    /// so an uncounted offer would be unbounded memory a worker controls by
+    /// never releasing.
     pub fn offer_artifact(
         &mut self,
         minted_for: CallId,
@@ -65,29 +57,40 @@ impl HostSession {
         if !self.worker_calls.contains_key(&minted_for) {
             return Err(AppError::UnknownCall);
         }
-        let handle = self.next_handle_id();
-        let offer = ArtifactOffer {
-            handle,
-            bytes: bytes.len() as u64,
-            media_type: media_type.to_owned(),
-            digest_blake3: hex(blake3::hash(&bytes).as_bytes()),
-        };
-        self.handles.insert(
-            handle,
-            Handle {
-                kind: HandleKind::Artifact,
-                artifact: Some(ArtifactBytes {
-                    bytes,
-                    media_type: media_type.to_owned(),
-                }),
-            },
-        );
+        let offer_bytes = bytes.len() as u64;
+        let digest = hex(blake3::hash(&bytes).as_bytes());
+        let handle = self.insert_handle(
+            HandleKind::Artifact,
+            Some(ArtifactBytes {
+                bytes,
+                media_type: media_type.to_owned(),
+            }),
+        )?;
         self.worker_calls
             .get_mut(&minted_for)
             .expect("checked above")
             .minted
             .push(handle);
-        Ok(offer)
+        Ok(ArtifactOffer {
+            handle,
+            bytes: offer_bytes,
+            media_type: media_type.to_owned(),
+            digest_blake3: digest,
+        })
+    }
+
+    fn insert_handle(
+        &mut self,
+        kind: HandleKind,
+        artifact: Option<ArtifactBytes>,
+    ) -> Result<HandleId, AppError> {
+        if self.live_handle_count >= self.config.ceilings.live_handles {
+            return Err(AppError::HandleCeiling);
+        }
+        let handle = self.next_handle_id();
+        self.handles.insert(handle, Handle { kind, artifact });
+        self.live_handle_count += 1;
+        Ok(handle)
     }
 
     /// A pull-read the session answers itself. The call was id-checked by
@@ -124,6 +127,9 @@ impl HostSession {
             "bytes_hex": hex(chunk),
             "media_type": artifact.media_type,
         });
+        // Served is answered: the reply below is this id's terminal frame,
+        // so the id retires exactly as it would through any other path.
+        self.retired_worker_calls.insert(call_id);
         self.outbox.push(HostMessage::Reply(Reply {
             call_id,
             outcome: Outcome::Ok { result },
@@ -135,7 +141,12 @@ impl HostSession {
     /// dispose for the same reason.
     pub(super) fn on_release(&mut self, release: Release) {
         let Some(entry) = self.handles.get(&release.handle) else {
-            self.fatal(WireErrorKind::UnknownHandle, "release of a handle not held");
+            let detail = if self.retired_handles.contains(&release.handle) {
+                "release of a handle already released"
+            } else {
+                "release of a handle never held"
+            };
+            self.fatal(WireErrorKind::UnknownHandle, detail);
             return;
         };
         if entry.kind != release.kind {
@@ -177,18 +188,42 @@ impl HostSession {
         self.reclaim_handles(&all);
     }
 
-    pub(super) fn artifact_handle_count(&self) -> u32 {
-        self.handles
-            .values()
-            .filter(|handle| handle.kind == HandleKind::Artifact)
-            .count() as u32
+    /// Ask the worker to release a handle it holds (an artifact it spilled
+    /// toward us). The session tracks only the pending ack — the worker's
+    /// own table is the authority on what it holds, and a release it cannot
+    /// honor is the worker's protocol fault to raise.
+    pub fn release_worker_handle(
+        &mut self,
+        handle: HandleId,
+        kind: HandleKind,
+    ) -> Result<(), AppError> {
+        if self.phase != Phase::Active {
+            return Err(AppError::NotActive);
+        }
+        if !self.pending_worker_releases.insert(handle) {
+            return Err(AppError::ReleasePending);
+        }
+        self.outbox
+            .push(HostMessage::Release(Release { handle, kind }));
+        Ok(())
+    }
+
+    /// The worker confirmed a release the host initiated. An ack with no
+    /// release pending is a desync — the host asked for nothing.
+    pub(super) fn on_release_ack(&mut self, ack: ReleaseAck) {
+        if !self.pending_worker_releases.remove(&ack.handle) {
+            self.fatal(WireErrorKind::UnknownHandle, "unsolicited release-ack");
+            return;
+        }
+        self.events.push(SessionEvent::WorkerHandleReleased {
+            handle: ack.handle,
+            kind: ack.kind,
+        });
     }
 
     fn drop_handle(&mut self, handle: HandleId) {
-        if let Some(entry) = self.handles.remove(&handle) {
-            if entry.kind == HandleKind::Capability {
-                self.live_capability_handles -= 1;
-            }
+        if self.handles.remove(&handle).is_some() {
+            self.live_handle_count -= 1;
             self.retired_handles.insert(handle);
         }
     }

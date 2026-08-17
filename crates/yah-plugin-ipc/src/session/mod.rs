@@ -31,7 +31,8 @@ use crate::types::*;
 use crate::{
     DEFAULT_HOST_CALLS_IN_FLIGHT, DEFAULT_LIVE_HANDLES, DEFAULT_WORKER_CALLS_IN_FLIGHT,
     INITIAL_STREAM_CREDIT, MAX_ARTIFACT_READ_BYTES, MAX_CALL_PAYLOAD_BYTES,
-    MAX_CONTROL_FRAME_BYTES, MAX_FRAME_BYTES, MAX_INLINE_RESULT_BYTES, MAX_STREAM_DATA_BYTES,
+    MAX_CONTROL_FRAME_BYTES, MAX_ERROR_DETAIL_CHARS, MAX_FRAME_BYTES, MAX_INLINE_RESULT_BYTES,
+    MAX_METHOD_CHARS, MAX_STREAM_CREDIT, MAX_STREAM_DATA_BYTES, MAX_WIRE_ID,
 };
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -51,6 +52,7 @@ impl Default for SessionConfig {
                 worker_calls_in_flight: DEFAULT_WORKER_CALLS_IN_FLIGHT,
                 live_handles: DEFAULT_LIVE_HANDLES,
                 initial_stream_credit: INITIAL_STREAM_CREDIT,
+                max_stream_credit: MAX_STREAM_CREDIT,
             },
         }
     }
@@ -116,6 +118,9 @@ pub enum SessionEvent {
     },
     /// The worker released a handle; the ack has been queued.
     HandleReleased { handle: HandleId, kind: HandleKind },
+    /// The worker acknowledged a release the host initiated for a
+    /// worker-held handle; that handle's id is spent.
+    WorkerHandleReleased { handle: HandleId, kind: HandleKind },
     /// The session reclaimed handles without a release frame: auto-release
     /// on a failed minting call, goodbye, disconnect, or fatal fault.
     HandlesReclaimed { count: u32 },
@@ -200,6 +205,11 @@ pub enum AppError {
     CallCeiling,
     /// An inline result over the ceiling; spill it instead.
     SpillRequired { bytes: usize },
+    /// An outbound payload over its frame class's byte bound. The session
+    /// refuses to queue a frame the other side is contracted to kill.
+    PayloadTooLarge { bytes: usize },
+    /// A release for that worker-held handle is already on the wire.
+    ReleasePending,
     /// A stream item with no credit left, a credit grant over the ceiling,
     /// a second stream open, or an item after the last one.
     StreamViolation(&'static str),
@@ -225,11 +235,17 @@ pub struct HostSession {
     retired_host_calls: BTreeSet<CallId>,
     next_host_call: u64,
     handles: BTreeMap<HandleId, Handle>,
-    /// Ids that must never be reused within the session, released or
-    /// reclaimed alike — the release-ack contract.
+    /// Handle ids that were live once and are spent forever, released and
+    /// reclaimed alike. Never minted from again (the monotonic counter
+    /// guarantees that); read at release time so a double release names
+    /// itself instead of masquerading as a forged handle.
     retired_handles: BTreeSet<HandleId>,
     next_handle: u64,
-    live_capability_handles: u32,
+    /// Live handles of both kinds, the gauge the `live_handles` ceiling
+    /// bounds. Artifact handles count too: each pins its bytes host-side.
+    live_handle_count: u32,
+    /// Worker-held handles the host has asked to release, awaiting the ack.
+    pending_worker_releases: BTreeSet<HandleId>,
     outbox: Vec<HostMessage>,
     events: Vec<SessionEvent>,
 }
@@ -249,7 +265,8 @@ impl HostSession {
             handles: BTreeMap::new(),
             retired_handles: BTreeSet::new(),
             next_handle: 1,
-            live_capability_handles: 0,
+            live_handle_count: 0,
+            pending_worker_releases: BTreeSet::new(),
             outbox: Vec::new(),
             events: Vec::new(),
         }
@@ -265,11 +282,11 @@ impl HostSession {
         std::mem::take(&mut self.events)
     }
 
-    /// Live handles the worker holds right now. The deterministic-release
-    /// fixtures read this while the session is active: after teardown a
-    /// zero is unconditional and proves nothing.
+    /// Live handles the worker holds right now, both kinds. The
+    /// deterministic-release fixtures read this while the session is
+    /// active: after teardown a zero is unconditional and proves nothing.
     pub fn live_handles(&self) -> u32 {
-        self.live_capability_handles + self.artifact_handle_count()
+        self.live_handle_count
     }
 
     pub fn is_closed(&self) -> bool {
@@ -358,6 +375,14 @@ impl HostSession {
             self.fatal(WireErrorKind::FrameTooLarge, "control frame over bound");
             return;
         }
+        if let Err(reason) = validate_bounds(&message) {
+            // Field bounds are part of strict decoding: the generated
+            // schemas carry the same numbers, so a schema-conformant SDK
+            // never trips this and a non-conformant one is refused at the
+            // same line on both sides.
+            self.fatal(WireErrorKind::InvalidFrame, reason);
+            return;
+        }
         match self.phase {
             Phase::AwaitingHello => self.on_pre_negotiation(message),
             Phase::Active => self.on_active(message),
@@ -377,11 +402,7 @@ impl HostSession {
             WorkerMessage::Credit(credit) => self.on_credit(credit),
             WorkerMessage::Cancel(cancel) => self.on_worker_cancel(cancel),
             WorkerMessage::Release(release) => self.on_release(release),
-            WorkerMessage::ReleaseAck(_) => {
-                // The host releases nothing worker-owned in v1; an ack out
-                // of nowhere is a desync.
-                self.fatal(WireErrorKind::UnknownHandle, "unsolicited release-ack")
-            }
+            WorkerMessage::ReleaseAck(ack) => self.on_release_ack(ack),
             WorkerMessage::Goodbye(goodbye) => self.on_goodbye(goodbye),
         }
     }
@@ -418,7 +439,7 @@ impl HostSession {
         self.phase = Phase::Closed;
         self.events.push(SessionEvent::Fatal {
             kind,
-            detail: detail.chars().take(crate::MAX_ERROR_DETAIL_CHARS).collect(),
+            detail: clip_detail(detail),
         });
     }
 }
@@ -448,6 +469,110 @@ pub(crate) fn kind_name(kind: WireErrorKind) -> &'static str {
         WireErrorKind::Internal => "internal",
         WireErrorKind::Cancelled => "cancelled",
     }
+}
+
+/// Field bounds, enforced at admission and mirrored byte-for-byte by the
+/// `#[schemars]` attributes on the wire types — the generated schemas and
+/// this function must refuse the same frames. Bounds that depend on
+/// negotiated config (credit ceilings, in-flight ceilings) are enforced in
+/// their handlers, not here.
+fn validate_bounds(message: &WorkerMessage) -> Result<(), &'static str> {
+    // The upper arm is defense in depth: strict parsing already refuses any
+    // integer past the I-JSON bound, so only zero can reach this check from
+    // the wire.
+    let id_ok = |id: u64| (1..=MAX_WIRE_ID).contains(&id);
+    let name_ok = |name: &str| {
+        let chars = name.chars().count();
+        (1..=64).contains(&chars)
+    };
+    match message {
+        WorkerMessage::Hello(hello) => {
+            if !name_ok(&hello.sdk_name) || !name_ok(&hello.sdk_version) {
+                return Err("sdk identity outside its length bound");
+            }
+        }
+        WorkerMessage::Call(call) => {
+            if !id_ok(call.call_id.0) {
+                return Err("call id outside wire range");
+            }
+            let method_chars = call.method.chars().count();
+            if method_chars == 0 || method_chars > MAX_METHOD_CHARS {
+                return Err("method name outside its length bound");
+            }
+        }
+        WorkerMessage::Reply(reply) => {
+            if !id_ok(reply.call_id.0) {
+                return Err("call id outside wire range");
+            }
+            match &reply.outcome {
+                Outcome::Err { error } => {
+                    if error.message.chars().count() > MAX_ERROR_DETAIL_CHARS {
+                        return Err("error message outside its length bound");
+                    }
+                }
+                Outcome::Spilled { artifact } => {
+                    if !id_ok(artifact.handle.0) {
+                        return Err("handle id outside wire range");
+                    }
+                    let media_chars = artifact.media_type.chars().count();
+                    if media_chars == 0 || media_chars > 128 {
+                        return Err("media type outside its length bound");
+                    }
+                    if artifact.digest_blake3.len() != 64
+                        || !artifact
+                            .digest_blake3
+                            .bytes()
+                            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+                    {
+                        return Err("digest is not 64 lowercase hex characters");
+                    }
+                }
+                Outcome::Ok { .. } | Outcome::Cancelled { .. } => {}
+            }
+        }
+        WorkerMessage::StreamOpen(open) => {
+            if !id_ok(open.call_id.0) {
+                return Err("call id outside wire range");
+            }
+        }
+        WorkerMessage::StreamData(data) => {
+            if !id_ok(data.call_id.0) {
+                return Err("call id outside wire range");
+            }
+        }
+        WorkerMessage::Credit(credit) => {
+            if !id_ok(credit.call_id.0) {
+                return Err("call id outside wire range");
+            }
+        }
+        WorkerMessage::Cancel(cancel) => {
+            if !id_ok(cancel.call_id.0) {
+                return Err("call id outside wire range");
+            }
+        }
+        WorkerMessage::Release(release) => {
+            if !id_ok(release.handle.0) {
+                return Err("handle id outside wire range");
+            }
+        }
+        WorkerMessage::ReleaseAck(ack) => {
+            if !id_ok(ack.handle.0) {
+                return Err("handle id outside wire range");
+            }
+        }
+        WorkerMessage::Goodbye(goodbye) => {
+            if goodbye.reason.chars().count() > 256 {
+                return Err("goodbye reason outside its length bound");
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Bound an internal detail string for the event log; wire messages carry
+/// only fixed strings and [`kind_name`] values.
+pub(super) fn clip_detail(detail: &str) -> String {
+    detail.chars().take(MAX_ERROR_DETAIL_CHARS).collect()
 }
 
 fn is_control(message: &WorkerMessage) -> bool {

@@ -87,6 +87,16 @@ fn a_worker_that_dies_mid_frame_settles_as_outcome_unknown() {
         }),
         "the in-flight call must settle as outcome-unknown: {events:?}"
     );
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            SessionEvent::Fatal {
+                kind: WireErrorKind::InvalidFrame,
+                ..
+            }
+        )),
+        "a mid-frame end is a framing fault, not a clean close: {events:?}"
+    );
     assert!(session.is_closed(), "half a frame has no continuation");
 }
 
@@ -106,6 +116,16 @@ fn a_clean_disconnect_with_work_in_flight_is_still_outcome_unknown() {
             reconcile: true,
         }),
         "a clean byte boundary does not make the outcome known: {events:?}"
+    );
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            SessionEvent::Fatal {
+                kind: WireErrorKind::OutcomeUnknown,
+                ..
+            }
+        )),
+        "a clean end is loss, not a framing fault: {events:?}"
     );
 }
 

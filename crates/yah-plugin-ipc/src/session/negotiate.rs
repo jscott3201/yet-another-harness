@@ -7,7 +7,7 @@
 //! MCP's 2026 revision adopted exists to keep horizontally scaled stateless
 //! HTTP servers, a constraint this lane does not have).
 
-use super::{HostSession, Phase, SessionEvent, wire_limits};
+use super::{HostSession, Phase, SessionEvent, clip_detail, wire_limits};
 use crate::PROTOCOL_VERSION;
 use crate::types::*;
 
@@ -46,7 +46,7 @@ impl HostSession {
             self.phase = Phase::Closed;
             self.events.push(SessionEvent::Fatal {
                 kind: WireErrorKind::UnsupportedVersion,
-                detail: format!("worker offered {:?}", hello.protocol_versions),
+                detail: clip_detail(&format!("worker offered {:?}", hello.protocol_versions)),
             });
             return;
         }
@@ -69,18 +69,21 @@ impl HostSession {
             self.phase = Phase::Closed;
             self.events.push(SessionEvent::Fatal {
                 kind: WireErrorKind::UnknownRequiredFeature,
-                detail: format!("unknown required features: {unknown:?}"),
+                detail: clip_detail(&format!("unknown required features: {unknown:?}")),
             });
             return;
         }
         // The feature set in force is the intersection; the ceilings are
         // announced, not negotiated — a worker that cannot live with one
-        // says goodbye.
+        // says goodbye. A feature named only under `required_features` is
+        // still a feature the worker uses: requiring is asking, emphatically.
         let features: Vec<String> = self
             .config
             .features
             .iter()
-            .filter(|feature| hello.features.contains(feature))
+            .filter(|feature| {
+                hello.features.contains(feature) || hello.required_features.contains(feature)
+            })
             .cloned()
             .collect();
         self.outbox.push(HostMessage::Accept(Accept {

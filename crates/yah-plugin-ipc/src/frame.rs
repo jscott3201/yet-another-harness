@@ -3,8 +3,11 @@
 //!
 //! The prefix is the whole point. A delimiter scan and a header grammar
 //! both read unbounded bytes before they know the bound; a length prefix
-//! lets [`FrameDecoder`] refuse an oversize frame after four bytes, before
-//! one payload byte is buffered. The decoder is incremental and sans-io:
+//! lets [`FrameDecoder`] refuse an oversize frame from its four prefix
+//! bytes, without waiting for the payload. `feed` does append whatever
+//! chunk the transport handed it, so the exposure before the refusal is one
+//! transport read — the poison then discards the buffer and every later
+//! feed is ignored. The decoder is incremental and sans-io:
 //! feed it whatever chunks the transport produced — a frame split across
 //! reads is ordinary, not an error — and drain complete frames out.
 //!
@@ -41,8 +44,8 @@ pub fn encode(frame: &[u8]) -> Vec<u8> {
 /// later byte is unattributable.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum FrameStreamError {
-    /// A prefix declared more than [`MAX_FRAME_BYTES`]. Refused before any
-    /// payload byte was buffered.
+    /// A prefix declared more than [`MAX_FRAME_BYTES`]. Refused from the
+    /// prefix alone, without assembling the payload.
     FrameTooLarge { declared: u64 },
     /// A prefix declared zero bytes; an empty frame is not a value.
     EmptyFrame,
@@ -71,7 +74,7 @@ impl FrameDecoder {
         Self::default()
     }
 
-    /// Buffer transport bytes. Bounded: between [`Self::next`] drains the
+    /// Buffer transport bytes. Bounded: between [`Self::next_frame`] drains the
     /// buffer never holds more than one maximal frame plus one prefix.
     pub fn feed(&mut self, bytes: &[u8]) {
         if self.poisoned.is_none() {
@@ -113,7 +116,7 @@ impl FrameDecoder {
     }
 
     /// Classify end-of-input against whatever is still buffered. Call after
-    /// draining [`Self::next`] to exhaustion.
+    /// draining [`Self::next_frame`] to exhaustion.
     pub fn finish(&self) -> EndOfInput {
         if self.buffer.is_empty() {
             return EndOfInput::Clean;

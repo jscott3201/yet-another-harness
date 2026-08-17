@@ -7,6 +7,7 @@ use peer::{assert_fatal, call, reply_ok, wire};
 use serde_json::json;
 use yah_plugin_ipc::session::{AppError, SessionEvent};
 use yah_plugin_ipc::types::*;
+use yah_plugin_ipc::{MAX_STREAM_CREDIT, MAX_STREAM_DATA_BYTES};
 
 /// A streaming host call with the worker's open already fed.
 fn open_stream_call(session: &mut yah_plugin_ipc::session::HostSession, credit: u32) -> CallId {
@@ -237,6 +238,198 @@ fn credit_before_the_host_opened_is_fatal() {
         additional: 1,
     })));
     assert_fatal(&mut session, WireErrorKind::InvalidFrame);
+}
+
+#[test]
+fn a_stream_open_with_zero_or_over_ceiling_credit_is_fatal() {
+    for credit in [0, MAX_STREAM_CREDIT + 1] {
+        let mut session = peer::negotiated();
+        let id = session
+            .call_worker("guest.stream", json!(null), None, true)
+            .expect("call goes out");
+        session.drain_outbox();
+        session.feed(&wire(&WorkerMessage::StreamOpen(StreamOpen {
+            call_id: id,
+            credit,
+        })));
+        assert_fatal(&mut session, WireErrorKind::InvalidFrame);
+    }
+    // The ceiling itself is admitted — the pair half.
+    let mut session = peer::negotiated();
+    open_stream_call(&mut session, MAX_STREAM_CREDIT);
+}
+
+#[test]
+fn a_credit_widening_past_the_ceiling_or_by_zero_is_fatal() {
+    for additional in [0u32, 1] {
+        let mut session = peer::negotiated();
+        session.feed(&wire(&WorkerMessage::Call(Call {
+            call_id: CallId(5),
+            method: "host.watch".to_owned(),
+            deadline_ms: None,
+            stream: true,
+            payload: json!(null),
+        })));
+        session.drain_events();
+        // Open at the ceiling: any widening overflows it, and a zero grant
+        // is noise no correct SDK emits.
+        session
+            .open_stream(CallId(5), MAX_STREAM_CREDIT)
+            .expect("ack goes out");
+        session.drain_outbox();
+        session.feed(&wire(&WorkerMessage::Credit(Credit {
+            call_id: CallId(5),
+            additional,
+        })));
+        assert_fatal(&mut session, WireErrorKind::InvalidFrame);
+    }
+}
+
+#[test]
+fn a_credit_grant_that_overflows_the_window_type_is_fatal() {
+    let mut session = peer::negotiated();
+    feed_streaming_call(&mut session, 5);
+    session.open_stream(CallId(5), 4).expect("ack goes out");
+    session.drain_outbox();
+    session.feed(&wire(&WorkerMessage::Credit(Credit {
+        call_id: CallId(5),
+        additional: u32::MAX,
+    })));
+    assert_fatal(&mut session, WireErrorKind::InvalidFrame);
+}
+
+#[test]
+fn an_oversize_stream_item_from_the_worker_is_fatal() {
+    let mut session = peer::negotiated();
+    let id = open_stream_call(&mut session, 8);
+    session.feed(&wire(&WorkerMessage::StreamData(StreamData {
+        call_id: id,
+        seq: 0,
+        more: true,
+        class: StreamClass::Lossless,
+        dropped: 0,
+        payload: json!("x".repeat(MAX_STREAM_DATA_BYTES + 1)),
+    })));
+    assert_fatal(&mut session, WireErrorKind::PayloadTooLarge);
+}
+
+#[test]
+fn a_stream_open_for_an_unknown_call_is_fatal() {
+    let mut session = peer::negotiated();
+    session.feed(&wire(&WorkerMessage::StreamOpen(StreamOpen {
+        call_id: CallId(55),
+        credit: 8,
+    })));
+    assert_fatal(&mut session, WireErrorKind::UnknownCall);
+}
+
+#[test]
+fn stream_data_for_an_unknown_call_is_fatal() {
+    let mut session = peer::negotiated();
+    session.feed(&wire(&item(CallId(55), 0, true, StreamClass::Lossless, 0)));
+    assert_fatal(&mut session, WireErrorKind::UnknownCall);
+}
+
+#[test]
+fn the_host_widens_a_worker_streams_window_with_credit() {
+    let mut session = peer::negotiated();
+    let id = open_stream_call(&mut session, 1);
+    session.feed(&wire(&item(id, 0, true, StreamClass::Lossless, 0)));
+    session.drain_events();
+    // The worker's window is spent; the host, as consumer, is the side
+    // that widens it — the symmetric half of the worker's credit frames.
+    session.grant_credit(id, 1).expect("credit goes out");
+    let outbox = session.drain_outbox();
+    assert!(
+        matches!(
+            outbox.as_slice(),
+            [HostMessage::Credit(credit)] if credit.call_id == id && credit.additional == 1
+        ),
+        "the widening must reach the wire: {outbox:?}"
+    );
+    session.feed(&wire(&item(id, 1, true, StreamClass::Lossless, 0)));
+    assert_eq!(
+        session.drain_events().len(),
+        1,
+        "the widened window admits the item"
+    );
+    assert!(!session.is_closed());
+}
+
+#[test]
+fn a_host_credit_grant_needs_an_open_stream_within_the_ceiling() {
+    let mut session = peer::negotiated();
+    let id = session
+        .call_worker("guest.stream", json!(null), None, true)
+        .expect("call goes out");
+    session.drain_outbox();
+    assert_eq!(
+        session.grant_credit(id, 1),
+        Err(AppError::StreamViolation("stream not open"))
+    );
+    session.feed(&wire(&WorkerMessage::StreamOpen(StreamOpen {
+        call_id: id,
+        credit: MAX_STREAM_CREDIT,
+    })));
+    session.drain_events();
+    assert_eq!(
+        session.grant_credit(id, 1),
+        Err(AppError::StreamViolation("credit outside bounds"))
+    );
+}
+
+/// A worker call that asked to stream, delivered and undrained.
+fn feed_streaming_call(session: &mut yah_plugin_ipc::session::HostSession, id: u64) {
+    session.feed(&wire(&WorkerMessage::Call(Call {
+        call_id: CallId(id),
+        method: "host.watch".to_owned(),
+        deadline_ms: None,
+        stream: true,
+        payload: json!(null),
+    })));
+    session.drain_events();
+}
+
+#[test]
+fn the_host_declares_its_lossy_drops() {
+    let mut session = peer::negotiated();
+    feed_streaming_call(&mut session, 5);
+    assert_eq!(
+        session.note_lossy_drops(CallId(5), 2),
+        Err(AppError::StreamViolation("stream not open")),
+        "drops are per-stream accounting; there is no stream yet"
+    );
+    session.open_stream(CallId(5), 4).expect("ack goes out");
+    session
+        .note_lossy_drops(CallId(5), 2)
+        .expect("drops recorded");
+    session
+        .stream_item(CallId(5), StreamClass::Lossy, true, json!(null))
+        .expect("lossy item goes out");
+    let frames = session.drain_outbox();
+    assert!(
+        matches!(
+            frames.as_slice(),
+            [HostMessage::StreamOpen(_), HostMessage::StreamData(data)] if data.dropped == 2
+        ),
+        "the item carries the declared gap: {frames:?}"
+    );
+}
+
+#[test]
+fn an_outbound_stream_item_over_the_byte_bound_is_refused() {
+    let mut session = peer::negotiated();
+    feed_streaming_call(&mut session, 5);
+    session.open_stream(CallId(5), 4).expect("ack goes out");
+    match session.stream_item(
+        CallId(5),
+        StreamClass::Lossless,
+        true,
+        json!("x".repeat(MAX_STREAM_DATA_BYTES + 1)),
+    ) {
+        Err(AppError::PayloadTooLarge { bytes }) => assert!(bytes > MAX_STREAM_DATA_BYTES),
+        other => panic!("expected the payload refusal, got {other:?}"),
+    }
 }
 
 #[test]

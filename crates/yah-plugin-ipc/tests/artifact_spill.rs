@@ -119,14 +119,13 @@ fn pull_reads_reassemble_the_content_and_release_closes_it() {
 }
 
 #[test]
-fn reads_outside_the_offer_or_over_the_chunk_bound_are_refused() {
+fn reads_outside_the_offer_are_refused() {
     let mut session = peer::negotiated();
     let offer = spilled(&mut session, &[1, 2, 3, 4]);
     for (id, offset, len) in [
-        (10u64, 4u64, 1u64),                         // past the end
-        (11, 0, 5),                                  // over the end
-        (12, 0, 0),                                  // empty read
-        (13, 0, MAX_ARTIFACT_READ_BYTES as u64 + 1), // over the chunk bound
+        (10u64, 4u64, 1u64), // past the end
+        (11, 0, 5),          // over the end
+        (12, 0, 0),          // empty read
     ] {
         session.feed(&read_frame(id, offer.handle, offset, len));
     }
@@ -138,10 +137,100 @@ fn reads_outside_the_offer_or_over_the_chunk_bound_are_refused() {
             _ => None,
         })
         .collect();
-    assert_eq!(refused, vec![WireErrorKind::InvalidRead; 4]);
+    assert_eq!(refused, vec![WireErrorKind::InvalidRead; 3]);
     assert!(
         !session.is_closed(),
         "bad reads refuse the call, not the wire"
+    );
+}
+
+#[test]
+fn a_read_over_the_chunk_bound_is_refused_inside_a_larger_artifact() {
+    let mut session = peer::negotiated();
+    // The artifact is bigger than the chunk bound, so only the bound —
+    // not the artifact's end — can refuse this read.
+    let content = vec![7u8; MAX_ARTIFACT_READ_BYTES + 1];
+    let offer = spilled(&mut session, &content);
+    session.feed(&read_frame(
+        10,
+        offer.handle,
+        0,
+        MAX_ARTIFACT_READ_BYTES as u64 + 1,
+    ));
+    let events = session.drain_events();
+    assert!(
+        matches!(
+            events.as_slice(),
+            [SessionEvent::CallRefused {
+                kind: WireErrorKind::InvalidRead,
+                ..
+            }]
+        ),
+        "the chunk bound must refuse it: {events:?}"
+    );
+    session.drain_outbox();
+    // The pair half: the same offset at the bound is served.
+    session.feed(&read_frame(
+        11,
+        offer.handle,
+        0,
+        MAX_ARTIFACT_READ_BYTES as u64,
+    ));
+    assert_eq!(chunk(&mut session).len(), MAX_ARTIFACT_READ_BYTES);
+}
+
+#[test]
+fn a_served_read_retires_its_call_id() {
+    let mut session = peer::negotiated();
+    let offer = spilled(&mut session, &[9; 8]);
+    session.feed(&read_frame(10, offer.handle, 0, 8));
+    assert_eq!(chunk(&mut session).len(), 8, "the read was served");
+    // Served is answered: the id is spent, and reuse breaks correlation
+    // exactly as any other duplicate does.
+    session.feed(&wire(&call(10, "tool.run", json!(null))));
+    peer::assert_fatal(&mut session, WireErrorKind::DuplicateCall);
+}
+
+#[test]
+fn a_malformed_read_payload_is_refused_on_that_call_only() {
+    let mut session = peer::negotiated();
+    let _offer = spilled(&mut session, &[9; 8]);
+    session.feed(&wire(&call(10, "artifact.read", json!({"nope": 1}))));
+    let events = session.drain_events();
+    assert!(
+        matches!(
+            events.as_slice(),
+            [SessionEvent::CallRefused {
+                kind: WireErrorKind::InvalidFrame,
+                ..
+            }]
+        ),
+        "a read the shape rejects refuses the call: {events:?}"
+    );
+    assert!(!session.is_closed());
+}
+
+#[test]
+fn a_read_against_a_capability_handle_is_refused() {
+    let mut session = peer::negotiated();
+    session.feed(&wire(&call(1, "cap.acquire", json!(null))));
+    session.drain_events();
+    let handle = session
+        .mint_capability_handle(CallId(1))
+        .expect("grant is minted");
+    // A capability handle names no bytes; reading it is a category error
+    // answered as an unknown handle, not a tour of what the id maps to.
+    session.feed(&read_frame(10, handle, 0, 1));
+    let events = session.drain_events();
+    assert!(
+        matches!(
+            events.as_slice(),
+            [SessionEvent::CallRefused {
+                kind: WireErrorKind::UnknownHandle,
+                ..
+            }]
+        ),
+        "got {events:?}"
     );
 }
 

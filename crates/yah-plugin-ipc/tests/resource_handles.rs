@@ -101,6 +101,15 @@ fn releasing_a_handle_never_minted_is_fatal() {
 }
 
 #[test]
+fn handle_id_zero_is_fatal_before_any_table_lookup() {
+    let mut session = peer::negotiated();
+    session.feed(&wire(&release(HandleId(0), HandleKind::Capability)));
+    // Zero is never minted, so the table would refuse it too — but the id
+    // range is a frame-validity rule, decided before any handler runs.
+    assert_fatal(&mut session, WireErrorKind::InvalidFrame);
+}
+
+#[test]
 fn releasing_twice_is_fatal() {
     let mut session = peer::negotiated();
     let serving = in_flight_call(&mut session, 1);
@@ -193,4 +202,78 @@ fn a_released_id_is_never_minted_again() {
         .expect("minted again");
     assert_ne!(second, first);
     assert!(second.0 > first.0, "ids move forward only");
+}
+
+#[test]
+fn artifact_handles_count_against_the_same_ceiling() {
+    let mut config = SessionConfig::default();
+    config.ceilings.live_handles = 1;
+    let mut session = peer::negotiated_with(config);
+    let serving = in_flight_call(&mut session, 1);
+    // An artifact pins its bytes host-side; an uncounted kind would be
+    // unbounded memory behind a bounded gauge.
+    let offer = session
+        .offer_artifact(serving, vec![7; 16], "text/plain")
+        .expect("the first handle fits");
+    assert_eq!(
+        session.mint_capability_handle(serving),
+        Err(AppError::HandleCeiling),
+        "one gauge, both kinds"
+    );
+    assert_eq!(
+        session
+            .offer_artifact(serving, vec![7; 16], "text/plain")
+            .err(),
+        Some(AppError::HandleCeiling)
+    );
+    session.feed(&wire(&release(offer.handle, HandleKind::Artifact)));
+    session.drain_outbox();
+    session.drain_events();
+    session
+        .mint_capability_handle(serving)
+        .expect("the freed slot admits either kind");
+}
+
+#[test]
+fn the_host_releases_a_worker_held_handle_and_reads_the_ack() {
+    let mut session = peer::negotiated();
+    let handle = HandleId(7);
+    session
+        .release_worker_handle(handle, HandleKind::Artifact)
+        .expect("release goes out");
+    // Asking twice before the ack would race two releases for one handle.
+    assert_eq!(
+        session.release_worker_handle(handle, HandleKind::Artifact),
+        Err(AppError::ReleasePending)
+    );
+    let outbox = session.drain_outbox();
+    assert!(
+        matches!(
+            outbox.as_slice(),
+            [HostMessage::Release(r)] if r.handle == handle && r.kind == HandleKind::Artifact
+        ),
+        "one release on the wire: {outbox:?}"
+    );
+    session.feed(&wire(&WorkerMessage::ReleaseAck(ReleaseAck {
+        handle,
+        kind: HandleKind::Artifact,
+    })));
+    assert_eq!(
+        session.drain_events(),
+        vec![SessionEvent::WorkerHandleReleased {
+            handle,
+            kind: HandleKind::Artifact,
+        }]
+    );
+    assert!(!session.is_closed());
+}
+
+#[test]
+fn an_unsolicited_release_ack_is_fatal() {
+    let mut session = peer::negotiated();
+    session.feed(&wire(&WorkerMessage::ReleaseAck(ReleaseAck {
+        handle: HandleId(9),
+        kind: HandleKind::Artifact,
+    })));
+    assert_fatal(&mut session, WireErrorKind::UnknownHandle);
 }

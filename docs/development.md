@@ -162,13 +162,17 @@ exception.
 
 ## Protocol Changes
 
-After editing protocol Rust types:
+Two protocol type sets generate checked-in artifacts: the kernel protocol
+(`crates/yah-kernel/src/protocol/` → `generated/protocol/`) and the worker
+protocol (`crates/yah-plugin-ipc/src/types.rs` →
+`generated/worker-protocol/`). After editing either:
 
 ```bash
-cargo run --locked -p yah-kernel --bin generate-protocol
+cargo run --locked --manifest-path tools/protocol-codegen/Cargo.toml
 ```
 
-Commit the Rust change and all three generated artifacts together. Add or
+Commit the Rust change and its generated artifacts together — six files
+across the two sets; the gate's `--check` run rejects a stale one. Add or
 update a golden or behavioral test that demonstrates the compatibility change.
 
 ## Pull Request Checklist

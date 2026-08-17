@@ -26,7 +26,7 @@ use ts_rs::TS;
     Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema, TS,
 )]
 #[ts(type = "number")]
-pub struct CallId(pub u64);
+pub struct CallId(#[schemars(range(min = 1, max = 9_007_199_254_740_991u64))] pub u64);
 
 /// A live resource named by its owner: a capability handle the host minted,
 /// or an artifact handle minted by whichever side holds the bytes.
@@ -34,7 +34,7 @@ pub struct CallId(pub u64);
     Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema, TS,
 )]
 #[ts(type = "number")]
-pub struct HandleId(pub u64);
+pub struct HandleId(#[schemars(range(min = 1, max = 9_007_199_254_740_991u64))] pub u64);
 
 /// Everything a worker may put on the wire.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema, TS)]
@@ -145,10 +145,15 @@ pub struct Ceilings {
     pub host_calls_in_flight: u32,
     /// Worker-initiated calls that may be in flight toward the host.
     pub worker_calls_in_flight: u32,
-    /// Live resource handles the worker may hold at once.
+    /// Live resource handles the worker may hold at once, capability and
+    /// artifact alike — an artifact handle pins its bytes host-side, so an
+    /// uncounted kind would be unbounded memory behind a bounded gauge.
     pub live_handles: u32,
     /// Frames of credit a stream opens with.
     pub initial_stream_credit: u32,
+    /// Ceiling any stream's credit window may reach, open grant and
+    /// widenings summed.
+    pub max_stream_credit: u32,
 }
 
 /// One request. The initiator mints the id; the receiver answers with
@@ -163,6 +168,7 @@ pub struct Call {
     /// Relative millisecond budget, not an instant: a sandboxed worker that
     /// has been denied clock access can still count down, and the host
     /// enforces the deadline regardless of what the worker does.
+    #[ts(optional)]
     pub deadline_ms: Option<u32>,
     /// Whether the caller wants incremental results. A receiver that agrees
     /// answers with [`StreamOpen`] before any data; the terminal reply still
@@ -328,7 +334,7 @@ pub struct ArtifactOffer {
     /// BLAKE3 of the full content, hex. Whoever stores the artifact
     /// durably mints its durable reference from bytes it hashed itself —
     /// a wire offer is a claim, not provenance.
-    #[schemars(length(min = 64, max = 64))]
+    #[schemars(regex(pattern = r"^[0-9a-f]{64}$"))]
     pub digest_blake3: String,
 }
 
@@ -378,15 +384,21 @@ pub enum WireErrorKind {
     FrameTooLarge,
     /// A payload exceeded its class bound inside a well-formed frame.
     PayloadTooLarge,
-    /// A reply, cancel, credit, or stream frame named a call id that is not
-    /// in flight in that direction.
+    /// A reply, stream-open, or stream-data frame named a call id never
+    /// minted in that direction. Late frames for an id that already settled
+    /// are tolerated as races, and a cancel or credit naming an unknown id
+    /// is ignored — those cross terminals on the wire in ordinary use.
     UnknownCall,
-    /// A call id already in flight in the same direction was reused.
+    /// A call id already spent in the same direction — in flight or already
+    /// answered — was reused.
     DuplicateCall,
     /// The receiver does not offer the named method.
     UnknownMethod,
-    /// A directional in-flight ceiling, credit window, or handle ceiling
-    /// was exceeded; refused rather than queued.
+    /// An in-flight ceiling or the handle ceiling was hit — refused rather
+    /// than queued, and worth retrying once something settles. A lossless
+    /// producer overdrawing its credit window is also this kind, but as a
+    /// fatal fault: the window was announced, so exceeding it is a broken
+    /// producer, not congestion.
     ResourceExhausted,
     /// The call's millisecond budget expired; the host is the enforcer.
     DeadlineExceeded,

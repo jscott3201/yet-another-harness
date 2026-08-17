@@ -83,19 +83,24 @@ fn the_accept_announces_limits_ceilings_and_the_feature_intersection() {
         sdk_name: "scripted".to_owned(),
         sdk_version: "1.2.3".to_owned(),
         features: vec!["b".to_owned(), "c".to_owned()],
-        required_features: Vec::new(),
+        required_features: vec!["a".to_owned()],
     })));
     let outbox = session.drain_outbox();
     match outbox.as_slice() {
         [HostMessage::Accept(accept)] => {
             assert_eq!(accept.protocol_version, PROTOCOL_VERSION);
             // In force: what both sides know. The worker's "c" is not
-            // granted by being asked for.
-            assert_eq!(accept.features, vec!["b".to_owned()]);
+            // granted by being asked for, and "a" — named only as a hard
+            // requirement — is in force, not silently withheld.
+            assert_eq!(accept.features, vec!["a".to_owned(), "b".to_owned()]);
             assert_eq!(accept.limits.max_frame_bytes, MAX_FRAME_BYTES as u64);
             assert_eq!(
                 accept.ceilings.live_handles,
                 yah_plugin_ipc::DEFAULT_LIVE_HANDLES
+            );
+            assert_eq!(
+                accept.ceilings.max_stream_credit,
+                yah_plugin_ipc::MAX_STREAM_CREDIT
             );
         }
         other => panic!("expected the accept, got {other:?}"),
@@ -109,6 +114,47 @@ fn the_accept_announces_limits_ceilings_and_the_feature_intersection() {
         }]
     );
     assert!(!session.is_closed());
+}
+
+#[test]
+fn an_sdk_identity_outside_its_length_bound_is_fatal() {
+    for sdk_name in ["", &"n".repeat(65)] {
+        let mut session = HostSession::new(SessionConfig::default());
+        session.feed(&wire(&WorkerMessage::Hello(Hello {
+            protocol_versions: vec![PROTOCOL_VERSION],
+            sdk_name: sdk_name.to_owned(),
+            sdk_version: "0.0.0".to_owned(),
+            features: Vec::new(),
+            required_features: Vec::new(),
+        })));
+        assert!(
+            session.drain_outbox().is_empty(),
+            "no accept for a hello the schema forbids"
+        );
+        assert_fatal(&mut session, WireErrorKind::InvalidFrame);
+    }
+}
+
+#[test]
+fn a_negotiation_fatal_detail_is_bounded() {
+    let mut session = HostSession::new(SessionConfig::default());
+    // The refusal's event detail quotes the unknown feature; a worker must
+    // not be able to write unbounded text into the host's event log.
+    session.feed(&wire(&WorkerMessage::Hello(Hello {
+        protocol_versions: vec![PROTOCOL_VERSION],
+        sdk_name: "scripted".to_owned(),
+        sdk_version: "0.0.0".to_owned(),
+        features: Vec::new(),
+        required_features: vec!["f".repeat(5000)],
+    })));
+    session.drain_outbox();
+    let (kind, detail) = peer::sole_fatal(&mut session);
+    assert_eq!(kind, WireErrorKind::UnknownRequiredFeature);
+    assert!(
+        detail.chars().count() <= 512,
+        "detail must be clipped, got {} chars",
+        detail.chars().count()
+    );
 }
 
 #[test]

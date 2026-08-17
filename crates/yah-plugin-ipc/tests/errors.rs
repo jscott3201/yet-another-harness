@@ -80,6 +80,94 @@ fn bytes_that_are_not_json_are_fatal() {
 }
 
 #[test]
+fn a_goodbye_reason_outside_its_length_bound_is_fatal_and_the_bound_admits() {
+    let mut session = peer::negotiated();
+    session.feed(&wire(&WorkerMessage::Goodbye(Goodbye {
+        reason: "r".repeat(256),
+    })));
+    let events = session.drain_events();
+    assert!(
+        matches!(
+            events.as_slice(),
+            [yah_plugin_ipc::session::SessionEvent::WorkerGoodbye { .. }]
+        ),
+        "a reason at the bound closes in order: {events:?}"
+    );
+    let mut session = peer::negotiated();
+    session.feed(&wire(&WorkerMessage::Goodbye(Goodbye {
+        reason: "r".repeat(257),
+    })));
+    let (kind, detail) = sole_fatal(&mut session);
+    assert_eq!(kind, WireErrorKind::InvalidFrame);
+    assert!(detail.contains("goodbye reason"), "got {detail}");
+}
+
+#[test]
+fn an_error_message_outside_its_length_bound_is_fatal() {
+    let mut session = peer::negotiated();
+    // The kind proves which rule fired: an in-range message to this
+    // unknown id would be `unknown-call`, not `invalid-frame`.
+    session.feed(&wire(&WorkerMessage::Reply(Reply {
+        call_id: CallId(1),
+        outcome: Outcome::Err {
+            error: WireError {
+                kind: WireErrorKind::Internal,
+                message: "m".repeat(513),
+                retryable: false,
+                reconcile_required: false,
+            },
+        },
+    })));
+    let (kind, detail) = sole_fatal(&mut session);
+    assert_eq!(kind, WireErrorKind::InvalidFrame);
+    assert!(detail.contains("error message"), "got {detail}");
+}
+
+#[test]
+fn a_malformed_digest_in_a_spilled_reply_is_fatal() {
+    // Uppercase hex and non-hex are refused; well-formed lowercase is the
+    // admitted control.
+    for (digest, valid) in [
+        ("AB".repeat(32), false),
+        ("zz".repeat(32), false),
+        ("ab".repeat(32), true),
+    ] {
+        let mut session = peer::negotiated();
+        let id = session
+            .call_worker("guest.big", json!(null), None, false)
+            .expect("call goes out");
+        session.drain_outbox();
+        session.feed(&wire(&WorkerMessage::Reply(Reply {
+            call_id: id,
+            outcome: Outcome::Spilled {
+                artifact: ArtifactOffer {
+                    handle: HandleId(4),
+                    bytes: 10,
+                    media_type: "text/plain".to_owned(),
+                    digest_blake3: digest.clone(),
+                },
+            },
+        })));
+        if valid {
+            assert!(!session.is_closed(), "a well-formed digest is admitted");
+        } else {
+            // The in-flight call settles as lost beside the fatal, so the
+            // drain holds two facts; the fatal is the one under test.
+            let events = session.drain_events();
+            let fatal = events.iter().find_map(|event| match event {
+                yah_plugin_ipc::session::SessionEvent::Fatal { kind, detail } => {
+                    Some((*kind, detail.clone()))
+                }
+                _ => None,
+            });
+            let (kind, detail) = fatal.unwrap_or_else(|| panic!("no fatal in {events:?}"));
+            assert_eq!(kind, WireErrorKind::InvalidFrame, "digest {digest:?}");
+            assert!(detail.contains("digest"), "got {detail}");
+        }
+    }
+}
+
+#[test]
 fn a_refusal_echoes_nothing_the_worker_sent() {
     let mut session = peer::negotiated();
     let marker = format!("SECRET-{}", "x".repeat(MAX_CALL_PAYLOAD_BYTES));

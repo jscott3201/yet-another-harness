@@ -11,8 +11,7 @@
         },
         "digest_blake3": {
           "description": "BLAKE3 of the full content, hex. Whoever stores the artifact\ndurably mints its durable reference from bytes it hashed itself —\na wire offer is a claim, not provenance.",
-          "maxLength": 64,
-          "minLength": 64,
+          "pattern": "^[0-9a-f]{64}$",
           "type": "string"
         },
         "handle": {
@@ -35,7 +34,8 @@
     "CallId": {
       "description": "One call or one stream, numbered by the side that initiated it.\n\nWire form is a JSON number in `1..=2^53-1` so every SDK reads the same\nvalue; zero is reserved as never-valid. `number` on the TypeScript side,\nnot `bigint`: `JSON.parse` produces a `number`, and the I-JSON bound is\nexactly what makes that safe.",
       "format": "uint64",
-      "minimum": 0,
+      "maximum": 9007199254740991,
+      "minimum": 1,
       "type": "integer"
     },
     "CancelReason": {
@@ -78,7 +78,13 @@
           "type": "integer"
         },
         "live_handles": {
-          "description": "Live resource handles the worker may hold at once.",
+          "description": "Live resource handles the worker may hold at once, capability and\nartifact alike — an artifact handle pins its bytes host-side, so an\nuncounted kind would be unbounded memory behind a bounded gauge.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "max_stream_credit": {
+          "description": "Ceiling any stream's credit window may reach, open grant and\nwidenings summed.",
           "format": "uint32",
           "minimum": 0,
           "type": "integer"
@@ -94,14 +100,16 @@
         "host_calls_in_flight",
         "worker_calls_in_flight",
         "live_handles",
-        "initial_stream_credit"
+        "initial_stream_credit",
+        "max_stream_credit"
       ],
       "type": "object"
     },
     "HandleId": {
       "description": "A live resource named by its owner: a capability handle the host minted,\nor an artifact handle minted by whichever side holds the bytes.",
       "format": "uint64",
-      "minimum": 0,
+      "maximum": 9007199254740991,
+      "minimum": 1,
       "type": "integer"
     },
     "HandleKind": {
@@ -264,12 +272,12 @@
         },
         {
           "const": "unknown-call",
-          "description": "A reply, cancel, credit, or stream frame named a call id that is not\nin flight in that direction.",
+          "description": "A reply, stream-open, or stream-data frame named a call id never\nminted in that direction. Late frames for an id that already settled\nare tolerated as races, and a cancel or credit naming an unknown id\nis ignored — those cross terminals on the wire in ordinary use.",
           "type": "string"
         },
         {
           "const": "duplicate-call",
-          "description": "A call id already in flight in the same direction was reused.",
+          "description": "A call id already spent in the same direction — in flight or already\nanswered — was reused.",
           "type": "string"
         },
         {
@@ -279,7 +287,7 @@
         },
         {
           "const": "resource-exhausted",
-          "description": "A directional in-flight ceiling, credit window, or handle ceiling\nwas exceeded; refused rather than queued.",
+          "description": "An in-flight ceiling or the handle ceiling was hit — refused rather\nthan queued, and worth retrying once something settles. A lossless\nproducer overdrawing its credit window is also this kind, but as a\nfatal fault: the window was announced, so exceeding it is a broken\nproducer, not congestion.",
           "type": "string"
         },
         {

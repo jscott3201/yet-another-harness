@@ -41,7 +41,9 @@ pub const PROTOCOL_VERSION: u32 = 1;
 /// single payload byte is allocated.
 pub const MAX_FRAME_BYTES: usize = 1024 * 1024 + 4096;
 
-/// Bound for control frames (handshake, cancel, credit, release, goodbye).
+/// Bound for control frames: hello, accept, refuse, stream-open, credit,
+/// cancel, release, release-ack, and goodbye — everything that is not a
+/// call, reply, or stream-data frame.
 pub const MAX_CONTROL_FRAME_BYTES: usize = 16 * 1024;
 
 /// Bound for one call's request payload.
@@ -69,10 +71,11 @@ pub const MAX_ERROR_DETAIL_CHARS: usize = 512;
 /// Character bound on a call's method name.
 pub const MAX_METHOD_CHARS: usize = 128;
 
-/// Frames of initial credit a stream opens with, and the ceiling any credit
-/// grant may reach. Credit is counted in frames, not bytes: every stream
-/// frame is already byte-bounded, so frame count is the dimension a hostile
-/// producer could still flood.
+/// Frames of initial credit a stream opens with, and the default ceiling
+/// any window may reach (announced in the accept as
+/// `ceilings.max_stream_credit`). Credit is counted in frames, not bytes:
+/// every stream frame is already byte-bounded, so frame count is the
+/// dimension a hostile producer could still flood.
 pub const INITIAL_STREAM_CREDIT: u32 = 16;
 pub const MAX_STREAM_CREDIT: u32 = 1024;
 

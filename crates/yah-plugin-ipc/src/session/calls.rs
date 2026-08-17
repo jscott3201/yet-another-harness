@@ -7,27 +7,20 @@
 
 use super::{AppError, HostCall, HostSession, Phase, SessionEvent, WorkerCall};
 use crate::types::*;
-use crate::{MAX_CALL_PAYLOAD_BYTES, MAX_INLINE_RESULT_BYTES, MAX_METHOD_CHARS, MAX_WIRE_ID};
+use crate::{MAX_CALL_PAYLOAD_BYTES, MAX_INLINE_RESULT_BYTES};
 
 impl HostSession {
     /// A worker-initiated call. Refusable faults answer this call and only
     /// this call; the session continues.
     pub(super) fn on_worker_call(&mut self, call: Call) {
         let call_id = call.call_id;
-        if call_id.0 == 0 || call_id.0 > MAX_WIRE_ID {
-            self.fatal(WireErrorKind::InvalidFrame, "call id outside wire range");
-            return;
-        }
+        // Id range and method length were admitted by `validate_bounds`.
         // A reused id — in flight or already answered — is not a refusable
         // mistake: a reply to that id can no longer be attributed, so the
         // direction's whole correlation space is broken.
         if self.worker_calls.contains_key(&call_id) || self.retired_worker_calls.contains(&call_id)
         {
             self.fatal(WireErrorKind::DuplicateCall, "worker call id reused");
-            return;
-        }
-        if call.method.chars().count() > MAX_METHOD_CHARS {
-            self.refuse_worker_call(call_id, WireErrorKind::InvalidFrame);
             return;
         }
         // The one method protocol law answers itself: a pull-read against a
@@ -97,7 +90,13 @@ impl HostSession {
             return Err(AppError::NotActive);
         }
         let Some(state) = self.worker_calls.get(&call_id) else {
-            return Err(AppError::UnknownCall);
+            // Answered and never-existed are different application bugs;
+            // name them apart.
+            return Err(if self.retired_worker_calls.contains(&call_id) {
+                AppError::AlreadySettled
+            } else {
+                AppError::UnknownCall
+            });
         };
         if let Outcome::Ok { result } = &outcome {
             let bytes = serde_json::to_vec(result).map(|b| b.len()).unwrap_or(0);
@@ -132,6 +131,16 @@ impl HostSession {
         }
         if self.host_calls.len() as u32 >= self.config.ceilings.host_calls_in_flight {
             return Err(AppError::CallCeiling);
+        }
+        // The session refuses to queue a frame the worker is contracted to
+        // kill: the payload bound binds this side's application too.
+        let payload_bytes = serde_json::to_vec(&payload)
+            .map(|bytes| bytes.len())
+            .unwrap_or(usize::MAX);
+        if payload_bytes > MAX_CALL_PAYLOAD_BYTES {
+            return Err(AppError::PayloadTooLarge {
+                bytes: payload_bytes,
+            });
         }
         let call_id = CallId(self.next_host_call);
         self.next_host_call += 1;

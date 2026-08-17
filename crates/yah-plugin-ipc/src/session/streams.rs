@@ -11,8 +11,8 @@
 //! sees the gap rather than infers it.
 
 use super::{AppError, HostSession, Phase, SessionEvent};
+use crate::MAX_STREAM_DATA_BYTES;
 use crate::types::*;
-use crate::{MAX_STREAM_CREDIT, MAX_STREAM_DATA_BYTES};
 
 impl HostSession {
     /// The worker acknowledged a streaming host call and granted the
@@ -33,7 +33,7 @@ impl HostSession {
             self.fatal(WireErrorKind::InvalidFrame, "second stream open");
             return;
         }
-        if open.credit == 0 || open.credit > MAX_STREAM_CREDIT {
+        if open.credit == 0 || open.credit > self.config.ceilings.max_stream_credit {
             self.fatal(WireErrorKind::InvalidFrame, "stream credit outside bounds");
             return;
         }
@@ -69,7 +69,8 @@ impl HostSession {
             self.fatal(WireErrorKind::InvalidFrame, "stream data after last item");
             return;
         }
-        // Monotonic from zero, no gaps the producer did not declare.
+        // Monotonic from zero with no gaps, ever: lossy drops are declared
+        // through `dropped`, never by skipping sequence numbers.
         let expected = state.highest_seq.map_or(0, |seq| seq + 1);
         if data.seq != expected {
             self.fatal(WireErrorKind::InvalidFrame, "stream sequence not monotonic");
@@ -122,7 +123,7 @@ impl HostSession {
             self.fatal(WireErrorKind::InvalidFrame, "credit overflow");
             return;
         };
-        if credit.additional == 0 || next > MAX_STREAM_CREDIT {
+        if credit.additional == 0 || next > self.config.ceilings.max_stream_credit {
             self.fatal(WireErrorKind::InvalidFrame, "credit outside bounds");
             return;
         }
@@ -131,6 +132,50 @@ impl HostSession {
             call_id: credit.call_id,
             additional: credit.additional,
         });
+    }
+
+    /// The embedding host widens the worker's window on a host call the
+    /// worker is streaming into — the consumer's half of backpressure,
+    /// symmetric with the [`Credit`] frames the worker sends the other way.
+    pub fn grant_credit(&mut self, call_id: CallId, additional: u32) -> Result<(), AppError> {
+        if self.phase != Phase::Active {
+            return Err(AppError::NotActive);
+        }
+        let Some(state) = self.host_calls.get_mut(&call_id) else {
+            return Err(AppError::UnknownCall);
+        };
+        if !state.stream_open {
+            return Err(AppError::StreamViolation("stream not open"));
+        }
+        let Some(next) = state.credit_left.checked_add(additional) else {
+            return Err(AppError::StreamViolation("credit overflow"));
+        };
+        if additional == 0 || next > self.config.ceilings.max_stream_credit {
+            return Err(AppError::StreamViolation("credit outside bounds"));
+        }
+        state.credit_left = next;
+        self.outbox.push(HostMessage::Credit(Credit {
+            call_id,
+            additional,
+        }));
+        Ok(())
+    }
+
+    /// The embedding host records lossy items it dropped under pressure on
+    /// a worker call's stream; the next item it sends carries the count, so
+    /// the worker sees the gap rather than infers it.
+    pub fn note_lossy_drops(&mut self, call_id: CallId, dropped: u64) -> Result<(), AppError> {
+        if self.phase != Phase::Active {
+            return Err(AppError::NotActive);
+        }
+        let Some(state) = self.worker_calls.get_mut(&call_id) else {
+            return Err(AppError::UnknownCall);
+        };
+        if state.stream_credit.is_none() {
+            return Err(AppError::StreamViolation("stream not open"));
+        }
+        state.lossy_dropped = state.lossy_dropped.saturating_add(dropped);
+        Ok(())
     }
 
     /// The embedding host acknowledges a worker's streaming call and
@@ -148,7 +193,7 @@ impl HostSession {
         if state.stream_credit.is_some() {
             return Err(AppError::StreamViolation("stream already open"));
         }
-        if credit == 0 || credit > MAX_STREAM_CREDIT {
+        if credit == 0 || credit > self.config.ceilings.max_stream_credit {
             return Err(AppError::StreamViolation("credit outside bounds"));
         }
         state.stream_credit = Some(credit);
@@ -177,6 +222,14 @@ impl HostSession {
         };
         if state.last_item_sent {
             return Err(AppError::StreamViolation("item after the last one"));
+        }
+        let payload_bytes = serde_json::to_vec(&payload)
+            .map(|bytes| bytes.len())
+            .unwrap_or(usize::MAX);
+        if payload_bytes > MAX_STREAM_DATA_BYTES {
+            return Err(AppError::PayloadTooLarge {
+                bytes: payload_bytes,
+            });
         }
         if class == StreamClass::Lossless {
             if window == 0 {
