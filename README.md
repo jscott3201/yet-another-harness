@@ -1,334 +1,201 @@
-# Yet Another Harness
+<h1>
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/assets/yah-banner-dark.svg">
+    <img src="docs/assets/yah-banner-light.svg" alt="Yet Another Harness — a Rust-native, graph-backed, plugin-extensible agent harness" width="760">
+  </picture>
+</h1>
 
-**YAH is a Rust-native, graph-backed, plugin-extensible harness for building
-and operating agents.**
+[![CI](https://github.com/jscott3201/yet-another-harness/actions/workflows/ci.yml/badge.svg)](https://github.com/jscott3201/yet-another-harness/actions/workflows/ci.yml)
+[![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](LICENSE-MIT)
 
-Yet Another Harness (YAH) is an early-stage effort to build a complete agent
-harness whose runtime truth, composition model, memory, and extension
-boundaries are owned in Rust. The harness is designed around a live graph of
-components and a durable Selene graph of work, sessions, memory, evidence,
-artifacts, and external effects.
-
-The project is currently pivoting from a narrow reliability kernel into this
-larger architecture. The existing kernel is a useful foundation, not a frozen
+YAH is an agent harness being built in Rust. The Rust host owns runtime truth,
+composition, policy, and every extension boundary, and the design routes
+everything durable — work, sessions, memory, evidence, artifacts, external
+effects — into one queryable graph (Selene, the storage engine the workspace
+pins to an exact public revision) rather than a collection of unrelated logs.
+The project is mid-pivot: it began as a narrow reliability kernel, and that
+kernel now underpins this larger architecture as a foundation, not a frozen
 specification.
 
 > **Status: pre-0.1 and not ready for use.** There is no installable daemon,
-> live agent loop, plugin runtime, sandbox, or end-user client yet. APIs and
-> crate boundaries will change.
+> live agent loop, plugin package loading, sandbox, or end-user client yet.
+> APIs and crate boundaries will change. What does exist is tested and labeled
+> exactly: [project status](docs/project-status.md) records the implemented
+> boundary, including what each test corpus does *not* prove.
 
-## Direction
+## Why another harness
 
-YAH treats an agent harness as a composition of replaceable components, not one
-privileged loop surrounded by callbacks. Model adapters, tools, prompt and
-context contributors, memory strategies, subagent drivers, execution backends,
-policies, storage projections, and user surfaces all attach through explicit
-capabilities.
-
-The intended result has four defining properties:
+Most harnesses are one privileged loop surrounded by callbacks. YAH treats the
+harness as a composition of replaceable components: model adapters, tools,
+prompt and context contributors, memory strategies, subagent drivers,
+execution backends, policies, and user surfaces all attach through explicit
+capabilities. Four properties define the target:
 
 - **Rust owns authority.** Lifecycle, policy, durable state transitions,
-  permissions, recovery, and external-effect reconciliation remain in the Rust
-  host.
+  permissions, recovery, and external-effect reconciliation stay in the Rust
+  host. Guest code never holds the pen.
 - **Selene stores durable meaning.** Work, attempts, sessions, memories,
-  evidence, decisions, artifacts, plugin revisions, and provenance form a
-  queryable graph rather than a collection of unrelated logs.
+  evidence, decisions, artifacts, plugin revisions, and provenance form one
+  graph you can query, not logs you can only grep.
 - **Plugins are first-class.** Built-in Rust components and sandboxed Wasm,
-  JavaScript/TypeScript, and Python extensions share one semantic SDK surface.
-- **Composition is reactive.** Components declare the services they provide
-  and require. Activation, replacement, failure, and unload have scoped,
-  reversible local effects.
+  TypeScript, and Python extensions share one semantic SDK surface; the
+  isolation mechanism differs by lane, the vocabulary does not.
+- **Composition is reactive.** Components declare what they provide and
+  require. Activation, replacement, failure, and unload have scoped,
+  reversible local effects — and a clean unload still cannot prove an external
+  action never happened, which is why external effects get their own ledger.
 
-## Target Architecture
+## Target architecture
 
-```text
-                    CLI / UI / API / embedding SDKs
-                                  |
-                                  v
-+-------------------------------------------------------------------+
-|                         Rust harness                              |
-|                                                                   |
-|  agent/session loop     contextual composition    policy/approval |
-|  tools + providers  <-> services + effect scopes <-> capabilities |
-|  workflows/subagents          lifecycle             observability |
-+-------------------------------+-----------------------------------+
-                                |
-                 durable commands, facts, and evidence
-                                |
-                                v
-+-------------------------------------------------------------------+
-|                         Selene graph                              |
-| work | sessions | memory | evidence | artifacts | plugin lineage  |
-|       receipts | leases | fencing | external-effect ledger        |
-+-------------------------------------------------------------------+
-                                |
-               explicit, capability-scoped host interfaces
-                                |
-        +-----------------------+------------------------+
-        |                       |                        |
-  built-in Rust          Wasm components       sandboxed processes
-                         Wasmtime + WIT       Node/TS and CPython
-```
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/architecture-dark.svg">
+  <img src="docs/assets/architecture-light.svg" alt="Layered architecture: planned surfaces over the Rust harness, which owns the Selene graph and the execution lanes" width="880">
+</picture>
 
-### Contextual composition
+This is the target shape, not the implemented boundary. Dashed elements are
+unstarted, and the tagged boxes are partial: the harness's composition,
+effect-scope, and capability machinery is tested today while the agent loop,
+policy, and tools are not, and Selene holds the kernel's receipts, leases,
+fencing, and effect ledger today while the work, session, and memory domains
+are design-stage. [Project status](docs/project-status.md) draws the exact
+line; the design detail — composition semantics, graph domains, effect
+scopes, the plugin boundary, sandbox tiers, recovery — lives in
+[architecture](docs/architecture.md).
 
-The live runtime will use an idiomatic Rust interpretation of the contextual
-composition model described by Cordis:
+## What works today
 
-- component instances move through explicit pending, starting, active,
-  stopping, failed, and removed states;
-- required services keep consumers pending until a compatible provider exists;
-- replacing a provider causes controlled recomposition of its dependents;
-- registrations and other local effects belong to nested scopes and unwind
-  automatically;
-- isolation realms and policy interception narrow what a component can see or
-  do.
+Everything below is enforced by the workspace test suite and the from-scratch
+local gate (465 tests at last count), except the storage gate, which is a
+recorded one-off run with its own report. Example guests are built from
+source at gate time; no binary is committed.
 
-Live values, closures, and guest handles remain in memory. Selene records
-durable desired state, identities, relationships, decisions, and evidence.
+**A live composition kernel** (`crates/yah-compose`). Component definition,
+instance, and scope identities; epoch-fenced lifecycle so stale completions
+and stop requests cannot cross incarnations; reversible effect scopes that
+unwind registrations in deterministic reverse order; typed revocable services
+with exact provider assignment; and desired-revision slots that replace a
+component only after controlled removal. An independently authored
+[conformance corpus](docs/composition-conformance.md) exercises the semantics,
+and a deterministic fault corpus covers concurrent close, call draining,
+callback unwind, and destructor panic containment.
 
-### Durable graph and memory
+**A plugin contract that precedes any runtime** (`crates/yah-plugin-host`).
+A [strict manifest](docs/plugin-manifest.md) in which packages request
+capabilities and never grant them; a runtime-neutral two-phase
+[driver lifecycle](docs/plugin-driver.md) that admits cleanup before minting
+the one start permit; an activation-scoped
+[capability broker](docs/plugin-capabilities.md) mapping trusted request
+subsets to exact typed handles that fail closed on revocation and
+replacement; a reusable [driver conformance testkit](docs/plugin-driver-conformance.md);
+and a runnable [authoring example](docs/plugin-authoring.md).
 
-Selene is more than a persistence adapter. It is the substrate for linking:
+**A working Wasm lane** (`crates/yah-plugin-wasm`). A versioned
+[WIT world](docs/wasm-plugin-contract.md) — WIT is the WebAssembly Component
+Model's interface language — compiled into host and guest bindings from one
+source; a Wasmtime driver where each activation owns its store and
+deactivation drops it without asking the guest; and host-owned ceilings on
+memory, tables, instances, live capability handles, guest stack and recursion
+depth, call deadlines, and per-call transfer. Most ceilings are proved in
+pairs — the same guest refused under a tight ceiling and admitted under a
+generous one — and the ones that are not yet are named in
+[project status](docs/project-status.md). Guest calls yield the thread at
+every epoch tick, so a computing guest cannot starve its siblings.
 
-- goals, work items, attempts, dependencies, decisions, and verification;
-- sessions, model turns, tool calls, external effects, and receipts;
-- observations, memories, summaries, source evidence, and retrieval traces;
-- artifacts, code locations, plugin revisions, evaluations, and provenance.
+**Capability transport across the ABI.** Brokered grants reach Wasm guests as
+opaque resources: the authority is the handle `acquire` returns against the
+activation's admitted grants, never the import, and refusal, revocation, and
+fencing arrive as named codes a guest can observe and answer. Two example
+plugins — one Rust built with `wit-bindgen`, one TypeScript built with `jco`,
+from the same WIT — implement the same world and answer thirteen corpus
+inputs identically, apart from the one field where each guest names itself,
+through the same host — including the error renderings where the two
+toolchains disagree most easily.
 
-Plugins will access graph and memory capabilities through namespaced host
-commands and queries. They will not receive a raw database handle or bypass the
-mutation and authority boundaries.
+**Refusal before execution.** Malformed component bytes are refused with the
+cause named. A component may not declare a root-level import the world does
+not declare — checked before any store exists, closing a hole Wasmtime admits
+on its own. Extra exports, nested-component imports, and compile-cost bounds
+are documented gaps, not silent ones.
 
-### Plugin SDK and execution lanes
+**A durability kernel** (`crates/yah-kernel`). Atomic Selene commits for
+state, events, and receipts; authority and attempt epochs, leases, and
+fencing; durable cancellation; external-effect preparation, dispatch
+evidence, settlement, and parking for the uncertain case; provider stream
+normalization fixtures for OpenAI Responses and Anthropic Messages shapes;
+and a versioned JSON [protocol slice](docs/protocol.md) whose Rust types
+generate checked-in JSON Schemas and TypeScript. A storage fan-in and crash-recovery gate
+[passed 1,440 scored trials](docs/gates/G02-storage-fanin-recovery.md). These
+mechanics predate the pivot and are integration candidates for the new
+harness, not architectural authority.
 
-One semantic plugin model will be presented through language-native SDKs. The
-transport and isolation mechanism may differ by lane.
+**Not built yet:** the agent loop, model providers, daemon, CLI, UI, plugin
+package loading and admission, the Node and Python process lanes (next
+milestone), sandbox enforcement, and the graph, memory, and session domains
+beyond the kernel. The Wasm lane bounds a guest's cost, not its authority:
+guest code still runs in the host process, and no sandbox claim is made.
 
-| Lane | Intended use | Boundary |
-|---|---|---|
-| Built-in Rust | First-party components and trusted integrations | Statically linked Rust traits |
-| Wasm Component | Portable third-party plugins | Wasmtime, WIT imports/exports, explicit limits |
-| Node.js / TypeScript | Modern ESM plugins and npm packages allowed by sandbox policy | ESM-first SDK over a sandboxed process protocol |
-| CPython | Modern Python plugins and packages supported by the selected worker and sandbox | Latest stable CPython in a sandboxed process, with PyO3-backed SDK support |
-| Native embedding | Supported foreign-language applications embedding the Rust library | Optional UniFFI bindings; not a plugin sandbox or universal plugin ABI |
-| Browser / JS host | Rust-backed web and JavaScript utilities | Optional `wasm-bindgen` surface |
+## Plugins and capabilities
 
-The compatibility policy will favor current runtimes rather than historical
-versions: the latest stable CPython line, the current Node.js release and active
-LTS line, modern ESM, and contemporary TypeScript syntax.
+A plugin manifest asks; it never receives. Grants are decided host-side,
+snapshotted immutably per activation, and reach the guest as revocable typed
+handles:
 
-Untrusted Python, JavaScript, and native code will not execute inside the Rust
-authority process. In-process Wasm is a target only when explicit WIT imports,
-host-enforced resource limits, and containment for hostile guest code are all in
-place; the first two now exist for the fixture corpus and the third does not.
-Node and Python plugins will run in supervised worker processes constrained by
-an OS sandbox, container, or stronger isolation backend. Runtime permission switches are defense in depth,
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/capability-flow-dark.svg">
+  <img src="docs/assets/capability-flow-light.svg" alt="Capability admission pipeline: manifest request, policy and approval (planned), immutable grant snapshot, broker handle, guest resource with named refusal codes" width="874">
+</picture>
+
+A denied capability is an ordinary refusal the guest observes as data — never
+a trap, and never a missing import that breaks instantiation. One semantic
+plugin model spans the execution lanes; the isolation mechanism differs:
+
+| Lane | Status | Intended use | Boundary |
+|---|---|---|---|
+| Built-in Rust | landed | First-party components and trusted integrations | Statically linked Rust traits |
+| Wasm Component | landed | Portable third-party plugins | Wasmtime, WIT imports/exports, explicit limits |
+| Node.js / TypeScript | next milestone | Modern ESM plugins and npm packages allowed by sandbox policy | ESM-first SDK over a sandboxed process protocol |
+| CPython | next milestone | Modern Python plugins and packages supported by the selected worker and sandbox | Latest stable CPython in a sandboxed process, with PyO3-backed SDK support |
+| Native embedding | later, optional | Foreign-language applications embedding the Rust library | Optional UniFFI bindings; not a plugin sandbox or universal plugin ABI |
+| Browser / JS host | later, optional | Rust-backed web and JavaScript utilities | Optional `wasm-bindgen` surface |
+
+The compatibility policy favors current runtimes — the latest stable CPython
+line, current Node LTS and release lines, modern ESM and TypeScript — rather
+than historical versions. Untrusted Python, JavaScript, and native code will
+not execute inside the Rust authority process; Node and Python plugins will
+run in supervised worker processes behind an OS sandbox, container, or
+stronger isolation backend. Runtime permission switches are defense in depth,
 not the security boundary. No plugin sandbox has been implemented or audited
 yet.
 
-### Two kinds of effects
-
-The design deliberately separates two concerns:
-
-1. **Local reversible effects** register services, tools, listeners, tasks, and
-   other live resources. Closing their scope unwinds them.
-2. **Durable external effects** may escape the process through files, Git,
-   subprocesses, networks, providers, or remote tools. They use the existing
-   prepare, dispatch, settle, and reconciling/parking state machinery; the
-   query-before-retry reconciliation worker remains future work.
-
-The current local scope implementation binds cleanup to one activation,
-requests cancellation before teardown, unwinds mixed synchronous/asynchronous
-and nested registrations in deterministic reverse order, and reports every
-returned error or unwind panic without short-circuiting later cleanup. Explicit
-close also rejects new mediated service and capability calls and drains calls
-already admitted against the relevant scope trees before running any cleanup.
-Owners must drive close to completion; dropping a scope requests cancellation
-but does not drain calls or run registered cleanup. The drain covers synchronous
-callback-scoped admission, not spawned tasks, escaped authority, or a callback
-that never returns. Cancellation is still a request, not proof that other work
-or an escaped action stopped.
-
-A clean plugin unload cannot prove that an external action did not happen. That
-distinction is a hard runtime invariant.
-
-## Existing Foundation
-
-The first pivot implementation is a small live composition core with explicit
-component definition, instance, and scope identities; incarnation-bound
-activation epochs that fence start completions, failure reports, and stop
-requests or completions; activation-owned reversible effect scopes; and a
-process-local typed service registry. Required services produce deterministic
-missing reports, provider publication is owned by effect cleanup, and handles
-bind one exact provider registration, fail closed when either activation scope
-is sealed, and keep explicit cleanup pending until admitted synchronous calls
-release both activations. A level-triggered reconciled component freezes its
-mounted definition and one explicit, exact provider assignment per activation;
-changing or losing an assigned provider cancels and tears down the old
-activation before a replacement can start. Exact-epoch activation failures
-likewise seal their effects and target pending after clean teardown; non-clean
-cleanup remains blocked. Contextual service visibility follows immutable
-scope-tree ancestry: providers are visible in their own scope and descendants,
-while independently minted roots are isolated even when their display IDs
-match. Component callbacks, registry watches, shared/named realms, dynamic
-reparenting, and automatic provider ranking remain deferred.
-
-A stable desired component slot now fences caller-sequenced generations bound
-to a process-unique slot incarnation and immutable component/configuration
-revision identities. It creates enabled
-revisions, replaces changed revisions only after controlled removal, and keeps
-disabled or removed intent unmounted. Stale generations and revision-ID reuse
-fail without disturbing the live instance; cleanups that report failure remain
-blocked unless the owning authority explicitly records abandonment. This is a
-single-component mechanism, not a host-wide scheduler or durable desired graph.
-
-An independently authored
-[composition semantic conformance corpus](docs/composition-conformance.md)
-now exercises nested cleanup, explicit pending dependency convergence, exact
-provider replacement, registry-domain separation, activation failure rollback,
-and latest-desired revision churn across those public primitives. A companion
-deterministic fault corpus covers concurrent provider and consumer close,
-hierarchical call draining, callback unwind, resumable close, and final
-provider-value destructor panic containment. The corpora do not claim
-shared/named realms, automatic injection, file HMR, or task supervision.
-
-A `yah-plugin-host` crate now validates the first
-`yah-plugin.toml` contract: canonical package, service, and capability
-identities; exact package and SDK version vocabulary; typed built-in, Wasm,
-Node, and Python entrypoints; bounded request-only declarations; and
-host-supplied package revision digests. Parsing is not admission: no package is
-loaded or verified, no namespace or built-in code is authorized, and no
-capability is granted by this layer. See the
-[manifest contract](docs/plugin-manifest.md).
-
-The same crate now defines an object-safe, runtime-neutral
-[`PluginDriver` lifecycle](docs/plugin-driver.md). A host-owned activation guard
-binds one package revision to one exact composition epoch, admits deactivation
-cleanup before constructing driver start, preserves pending start across
-dropped waiters, contains ordinary unwind failures, revalidates composition
-readiness before publishing active, and fences advisory health after stop.
-
-An [activation-scoped capability broker](docs/plugin-capabilities.md) now maps a
-trusted host-selected subset of manifest requests to exact typed provider
-registrations. The driver receives its weak, revocable context only in the
-post-cleanup-admission start permit. Synchronous capability calls participate in
-the activation's pre-cleanup drain, and stale contexts never follow provider or
-activation replacement. This is an in-process authority seam, not package
-admission or a hostile-code sandbox. A runnable
-[local authoring example](docs/plugin-authoring.md) now exercises one
-example-only synchronous capability through denial, exact grant, stop, and
-provider replacement with a trusted built-in driver. It is not a production
-capability family or execution backend; no policy engine, durable attempt
-binding, scheduler, guest runtime, or sandbox exists yet.
-
-A reusable [driver conformance testkit](docs/plugin-driver-conformance.md) now
-drives independently described `PluginDriver` subjects through five portable
-host-lifecycle cases without the agent or daemon. Its private instrumentation
-records exact boundary calls, cancellation, cleanup, and activation isolation;
-a trusted fixture probe confirms resource state. The deterministic reference
-fake, the trusted local authoring driver, and the Wasmtime component driver all
-pass. No process backend has passed yet, and the Wasm fixtures exercise one
-activation and one tool call rather than guest semantics, so this is not a
-cross-runtime, guest-ABI, loader, sandbox, or portable capability-transport
-certification.
-
-A separate `yah-plugin-wasm` crate owns the
-[WIT conformance world](docs/wasm-plugin-contract.md) and the first driver that
-executes against it. Pinned Wasmtime and `wit-bindgen` macros compile host and
-guest Rust bindings from the same versioned source, parser tests freeze its
-three imports and two fixture exports, and a Wasmtime driver compiles
-checked-in component fixtures, gives each activation its own store, and drops
-that store to deactivate without asking guest code. Brokered capabilities
-cross the ABI as opaque resources: the authority is the resource `acquire`
-returns against the store's admitted grants — activation-scoped through the
-broker handle behind it — never the import, and refusal, revocation, and
-fencing arrive as named codes a guest can observe. It loads no plugin package.
-It enforces host-owned ceilings on an activation's total memory and table
-size, on how many memories, tables, and instances it may hold, on how many
-live capability handles it may keep, on the stack a guest call runs on and how
-deep that guest may recurse, a call deadline that stops a guest which will not
-stop itself, and caps on what one guest-to-host call may transfer and what the
-host retains from it. Guest calls run on their own stack and hand the thread
-back at every tick, so one guest cannot starve another by computing. Two
-example plugins — one Rust, one TypeScript — implement the same world, are
-built from source by the gate rather than committed as binaries, and answer
-thirteen inputs identically through the host's own activation lifecycle,
-reaching the host through the logging, cancellation, and capabilities imports.
-Those inputs are the ones two toolchains disagree on most easily — non-ASCII,
-escapes, `1.0`, an integer past 2^53, input that is not JSON at all, and
-brokered-capability errors that one toolchain renders as enum variants and the
-other as strings — because a pair checked only on convenient input makes an
-equivalence claim look true. Ceilings are proved in
-pairs — the same guest refused under a tight
-ceiling and admitted under a generous one — so a failure is attributable to the
-ceiling rather than to the fixture. Those bound a guest's cost, not its
-authority: guest code still runs in the host process, so the driver makes no
-WASI or sandbox claim, and capability transport is exactly the brokered,
-fenced route above.
-
-What a component is allowed to *declare* is checked separately, before it runs.
-Malformed bytes are refused with the cause named rather than collapsed into one
-message, and a guest may not declare a root-level import the world does not —
-including an empty instance import, which Wasmtime admits on its own and which
-compiled, activated, and answered a tool call here before the check existed.
-Nothing escaped through it, since an empty instance carries no functions; what it
-cost was the claim, because "the world is the contract" has to mean the whole
-declared surface. The check is exact-name and root-level, so a nested component's
-imports, a semver-compatible version, and the wrong item kind under an allowed
-name all fall outside it; extra exports are admitted unchecked; and nothing
-bounds what a component costs to compile. Each is written down rather than
-implied.
-
-The repository already contains a model-free Rust kernel and evidence harness:
-
-- atomic Selene commits for current state, semantic events, and command
-  receipts;
-- authority and attempt epochs, leases, fencing, and stale-holder rejection;
-- durable cancellation scopes and delivery observations;
-- external-effect preparation, dispatch evidence, settlement, uncertainty, and
-  parking;
-- provider stream normalization fixtures for OpenAI Responses and Anthropic
-  Messages shapes;
-- an in-process JSON protocol slice with generated schemas and TypeScript
-  bindings;
-- a passed storage fan-in and crash-recovery gate across 1,440 scored trials.
-
-These mechanics are candidates for integration into the new harness. The
-current closed command surface, crate layout, and earlier product plan are not
-treated as architectural authority.
-
 ## Roadmap
 
-The pivot is organized around executable vertical slices rather than a large
-up-front specification:
+The pivot proceeds as executable vertical slices, each landing with its own
+tests and evidence. The first three have landed; the fourth is in design:
 
-1. Build the Rust composition kernel and an independent semantic conformance
-   corpus informed by Cordis lifecycle behavior.
-2. Extend the landed plugin manifest vocabulary with driver lifecycle,
-   effective capability grants, and a reusable host-side driver conformance
-   testkit before claiming cross-runtime equivalence.
-3. Connect scoped local effects to the existing durable external-effect and
-   recovery machinery.
-4. Establish Selene-native work, session, memory, evidence, and plugin-lineage
-   graphs.
-5. Prove Wasm, Node/TypeScript, and Python plugins against the same tool and
-   graph capabilities.
-6. Deliver one useful agent vertical slice: session, model provider, prompt
-   assembly, tools, sandboxed execution, memory, and a bounded subagent.
-7. Add the daemon, CLI and UI surfaces, adversarial sandbox tests, evaluations,
+1. Rust composition kernel with an independent semantic conformance corpus.
+2. Plugin manifest, driver lifecycle, capability grants, and a reusable
+   host-side driver conformance testkit.
+3. Wasm lane: WIT world, Wasmtime driver, resource limits, capability
+   transport, and toolchain-built example guests proving equivalence.
+4. Node/TypeScript and Python lanes over a bounded worker IPC protocol, with
+   explicit containment profiles.
+5. Selene-native work, session, memory, evidence, and plugin-lineage graphs.
+6. One useful agent vertical slice: session, model provider, prompt assembly,
+   tools, sandboxed execution, memory, and a bounded subagent.
+7. Daemon, CLI and UI surfaces, adversarial sandbox tests, evaluations,
    packaging, and release discipline.
 
-Detailed working specifications and sprint tracking are intentionally kept out
-of the public repository while the pivot is being explored. Public documents
-describe implemented behavior and stable direction; tests and evidence decide
-when an experiment becomes a commitment.
+Detailed working specifications and sprint tracking stay out of the public
+repository while the pivot is being explored. Public documents describe
+implemented behavior and stable direction; tests and evidence decide when an
+experiment becomes a commitment.
 
-## Prior Art and Attribution
+## Prior art and attribution
 
-YAH is being developed independently in Rust. It currently vendors no code from
-the projects below, but it deliberately learns from them. DeepSeek Harness
-itself is [powered by Cordis](https://github.com/deepseek-ai/deepseek-harness/blob/47f943859bef60e4160492346772ded9b24f765a/README.md),
+YAH is being developed independently in Rust. It currently vendors no code
+from the projects below, but it deliberately learns from them. DeepSeek
+Harness itself is
+[powered by Cordis](https://github.com/deepseek-ai/deepseek-harness/blob/47f943859bef60e4160492346772ded9b24f765a/README.md),
 so we credit DeepSeek Harness for harness-level implementation influences and
 Cordis and its paper for the underlying composition model.
 
@@ -346,11 +213,11 @@ Cordis and its paper for the underlying composition model.
   and [subagent model](https://github.com/deepseek-ai/deepseek-harness/blob/47f943859bef60e4160492346772ded9b24f765a/docs/subsystems/subagent.md).
 - [Cordis](https://github.com/cordiverse/cordis/tree/8cc9e33fab69e2d0476d126baaf2acb24e6a6ab4)
   supplies the semantic inspiration for contexts, reactive dependencies,
-  fibers/component instances, service isolation, and reversible effect scopes.
-  The accompanying paper by Yifan Shi, Wei Zhang, and Tianyi Cui,
+  fibers/component instances, service isolation, and reversible effect
+  scopes. The accompanying paper by Yifan Shi, Wei Zhang, and Tianyi Cui,
   [*A Programming Paradigm for Spatiotemporal Composability*](https://github.com/cordiverse/paper/blob/948a07b369c62adb3b12e102458be5c18dfb69b9/paper.pdf),
-  is the conceptual reference. The target design will implement these ideas
-  idiomatically in Rust and combine them with the existing durability and
+  is the conceptual reference. The target design implements these ideas
+  idiomatically in Rust and combines them with the existing durability and
   authority kernel plus planned graph and memory domains.
 - [NVIDIA OpenShell](https://github.com/NVIDIA/OpenShell/tree/d51a653f9cedeafa602364df61b74c4bd5a9495e)
   informs the planned sandbox-backend boundary for full-language plugins and
@@ -367,11 +234,12 @@ projects are evolving independently and do not define YAH compatibility.
 
 | Path | Contents |
 |---|---|
-| `crates/yah-compose/` | Process-local component identity, epoch-fenced lifecycle, reversible effect scopes, typed revocable services, exact-assignment dependency reconciliation, and fenced desired component revisions |
-| `crates/yah-plugin-host/` | Strict plugin manifest/revision contracts, runtime-neutral driver lifecycle, exact activation-scoped capability grants/handles, and reusable host-side conformance cases |
-| `crates/yah-plugin-wasm/` | Provisional versioned WIT conformance world, its compile-checked host and guest bindings, and the Wasmtime component driver that runs fixture components against it |
-| `crates/yah-kernel/` | Current model-free durability, authority, effect, cancellation, provider, and protocol kernel |
+| `crates/yah-compose/` | Component identity, epoch-fenced lifecycle, reversible effect scopes, typed revocable services, exact-assignment dependency reconciliation, fenced desired revisions |
+| `crates/yah-plugin-host/` | Strict plugin manifest/revision contracts, runtime-neutral driver lifecycle, activation-scoped capability grants and handles, reusable host-side conformance cases |
+| `crates/yah-plugin-wasm/` | Versioned WIT conformance world, compile-checked host and guest bindings, and the Wasmtime component driver with its limit and negative corpora |
+| `crates/yah-kernel/` | Model-free durability, authority, effect, cancellation, provider, and protocol kernel |
 | `crates/exp001-harness/` | Storage fan-in and crash-recovery evidence harness |
+| `examples/guests/` | The Rust and TypeScript example plugins, built from source by the gate |
 | `generated/protocol/` | Checked-in JSON Schemas and TypeScript bindings for the current protocol experiment |
 | `docs/` | Public architecture, protocol, development, status, and gate evidence |
 
@@ -381,14 +249,16 @@ builds use the same storage implementation.
 ## Development
 
 The pinned toolchain is Rust 1.97.1 and the test runner is cargo-nextest
-0.9.143:
+0.9.143. The TypeScript example guest needs Node 26 and npm.
 
 ```bash
 bash scripts/install-nextest.sh
 bash scripts/test.sh
 ```
 
-Run the complete local gate before a pull request:
+Run the complete local gate before a pull request — it builds the example
+guests from source, runs formatting, Clippy, the full test suite, and the
+generated-file and secret checks from a clean state:
 
 ```bash
 bash scripts/full-gate.sh

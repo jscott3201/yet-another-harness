@@ -1,0 +1,40 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="880" height="444" viewBox="0 0 880 444" role="img" aria-label="architecture">
+  <rect x="210" y="16" width="460" height="44" rx="8" fill="#161b22" stroke="#30363d" stroke-width="1.5" stroke-dasharray="6 4"/>
+  <text x="440.0" y="40" text-anchor="middle" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif" font-size="14.5" font-weight="600" fill="#e6edf3">CLI · UI · API · embedding SDKs</text>
+  <rect x="585" y="24" width="77" height="18" rx="9" fill="#1d2033" stroke="#3b3f63"/>
+  <text x="623.5" y="37" text-anchor="middle" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif" font-size="11" fill="#a5b4fc">planned</text>
+  <line x1="440" y1="60" x2="440" y2="92" stroke="#9198a1" stroke-width="1.5"/>
+  <path d="M 436 85 L 440 92 L 444 85" fill="none" stroke="#9198a1" stroke-width="1.5"/>
+  <rect x="90" y="92" width="700" height="128" rx="8" fill="#161b22" stroke="#30363d" stroke-width="1.5"/>
+  <text x="440.0" y="116" text-anchor="middle" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif" font-size="14.5" font-weight="600" fill="#e6edf3">Rust harness — owns authority</text>
+  <text x="440.0" y="138" text-anchor="middle" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif" font-size="12.5" fill="#9198a1">agent/session loop · contextual composition · policy &amp; approval</text>
+  <text x="440.0" y="157" text-anchor="middle" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif" font-size="12.5" fill="#9198a1">tools &amp; providers ⇄ services &amp; effect scopes ⇄ capability broker</text>
+  <text x="440.0" y="176" text-anchor="middle" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif" font-size="12.5" fill="#9198a1">workflows &amp; subagents · lifecycle · observability</text>
+  <rect x="651" y="194" width="131" height="18" rx="9" fill="#1d2033" stroke="#3b3f63"/>
+  <text x="716.5" y="207" text-anchor="middle" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif" font-size="11" fill="#a5b4fc">partial today</text>
+  <line x1="260" y1="220" x2="260" y2="268" stroke="#9198a1" stroke-width="1.5"/>
+  <path d="M 256 261 L 260 268 L 264 261" fill="none" stroke="#9198a1" stroke-width="1.5"/>
+  <text x="270.0" y="262.0" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif" font-size="12" fill="#9198a1">durable commands · facts · evidence</text>
+  <line x1="620" y1="220" x2="620" y2="268" stroke="#9198a1" stroke-width="1.5"/>
+  <path d="M 616 261 L 620 268 L 624 261" fill="none" stroke="#9198a1" stroke-width="1.5"/>
+  <text x="630.0" y="262.0" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif" font-size="12" fill="#9198a1">capability-scoped host interfaces</text>
+  <rect x="60" y="268" width="380" height="160" rx="8" fill="#161b22" stroke="#30363d" stroke-width="1.5"/>
+  <text x="250.0" y="292" text-anchor="middle" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif" font-size="14.5" font-weight="600" fill="#e6edf3">Selene graph — durable meaning</text>
+  <text x="250.0" y="314" text-anchor="middle" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif" font-size="12.5" fill="#9198a1">work · sessions · memory · evidence</text>
+  <text x="250.0" y="333" text-anchor="middle" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif" font-size="12.5" fill="#9198a1">artifacts · plugin lineage</text>
+  <text x="250.0" y="352" text-anchor="middle" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif" font-size="12.5" fill="#9198a1">receipts · leases · fencing</text>
+  <text x="250.0" y="371" text-anchor="middle" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif" font-size="12.5" fill="#9198a1">external-effect ledger</text>
+  <rect x="265" y="402" width="167" height="18" rx="9" fill="#1d2033" stroke="#3b3f63"/>
+  <text x="348.5" y="415" text-anchor="middle" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif" font-size="11" fill="#a5b4fc">kernel only today</text>
+  <rect x="470" y="268" width="352" height="160" rx="8" fill="none" stroke="#30363d" stroke-width="1.5"/>
+  <text x="646" y="290" text-anchor="middle" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif" font-size="14.5" font-weight="600" fill="#e6edf3">Execution lanes</text>
+  <rect x="482" y="300" width="328" height="36" rx="6" fill="#1d2033" stroke="#3b3f63"/>
+  <text x="494" y="315" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif" font-size="12" font-weight="600" fill="#a5b4fc">built-in Rust</text>
+  <text x="494" y="329" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif" font-size="11.5" fill="#9198a1">trusted, statically linked</text>
+  <rect x="482" y="342" width="328" height="36" rx="6" fill="#1d2033" stroke="#3b3f63"/>
+  <text x="494" y="357" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif" font-size="12" font-weight="600" fill="#a5b4fc">Wasm components</text>
+  <text x="494" y="371" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif" font-size="11.5" fill="#9198a1">Wasmtime + WIT, host-enforced limits</text>
+  <rect x="482" y="384" width="328" height="36" rx="6" fill="#1d2033" stroke="#3b3f63" stroke-dasharray="6 4"/>
+  <text x="494" y="399" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif" font-size="12" font-weight="600" fill="#a5b4fc">sandboxed processes</text>
+  <text x="494" y="413" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif" font-size="11.5" fill="#9198a1">Node/TS · CPython over brokered IPC</text>
+</svg>
