@@ -7,12 +7,12 @@ specified and fixture-pinned before either worker runtime exists.
 
 The crate is sans-io: `frame` turns bytes into frames incrementally, and
 `session` is a pure state machine with an injected millisecond clock. Nothing
-in it can block, sleep, spawn, or open a socket. The process driver that
-supplies the transport, the spawned child, the bootstrap file descriptor, and
-the kill path is not implemented; neither is any worker-side SDK.
-One hundred thirteen deterministic fixtures in
-`crates/yah-plugin-ipc/tests/` drive the host side of every rule below
-with a scripted byte-level peer.
+in it can block, sleep, spawn, or open a socket. The real IO lives in the
+[process driver](#process-driver) (`crates/yah-plugin-proc`), which spawns
+the worker, owns the transport and the kill path, and authenticates the
+bootstrap; no worker-side SDK exists yet. One hundred thirteen
+deterministic fixtures in `crates/yah-plugin-ipc/tests/` drive the host
+side of every rule below with a scripted byte-level peer.
 
 ## Framing and strict JSON
 
@@ -262,12 +262,39 @@ Run `cargo run --locked --manifest-path tools/protocol-codegen/Cargo.toml`
 after changing protocol types; the same command with `-- --check` is what the
 local gate runs, and it rejects stale generated files.
 
+## Process driver
+
+`crates/yah-plugin-proc` supervises one worker process per activation
+under the host's driver contract. The bootstrap is authenticated by
+construction: the host spawns the worker with one end of a Unix socketpair
+as fd 3, and holding that inherited descriptor is the whole credential —
+no token in argv (world-readable on most systems), nothing in the
+environment, which is cleared to a PATH allowlist. Node adopts the channel
+with `new net.Socket({ fd: 3 })`, CPython with `socket.socket(fileno=3)`.
+Stdout and stderr stay what they look like: bounded diagnostic text,
+retained tail-first, never protocol bytes.
+
+One activation is one process is one session. A worker that dies poisons
+its activation — there is no resume — health reports why, deactivation
+reclaims the process (goodbye, a grace window, `SIGKILL`, reap,
+unconditionally in that order), and recovery is a fresh activation with a
+fresh process. The driver passes the host's five portable lifecycle
+conformance cases, and a scripted fake worker pins restart, disconnect
+with in-flight work, cancellation, and deadline behaviour end to end. The
+fake worker is a test fixture, not an SDK.
+
+The pathname-socket lane with kernel-attested peer credentials
+(`getpeereid`, `SO_PEERCRED`) is deliberately absent: it exists to attach
+to a process the host did not spawn, and no current scenario does that.
+
 ## Not implemented
 
-- The process driver: transport, spawn, bootstrap fd, peer-credential
-  attestation, kill, and restart all live outside this crate.
+- Restart policy. The driver supervises one process per activation and
+  never respawns inside one; whether and when a fresh activation follows a
+  death is the composition's decision, deliberately deferred.
 - Any worker SDK. The TypeScript declarations and JSON Schemas are
-  generated; no Node or CPython worker exists to load them.
+  generated, and the driver will spawn anything that speaks the protocol
+  over fd 3 — but no Node or CPython worker exists to load them.
 - Reconnect or resume. A session that faults or loses its transport is
   over; there is deliberately no resync path.
 - Retired-id forgetting. Ids are never reused, so the session remembers
