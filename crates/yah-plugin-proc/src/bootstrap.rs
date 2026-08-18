@@ -3,12 +3,15 @@
 //! One Unix socketpair per activation. The host keeps one end; the other is
 //! duplicated onto fd [`crate::WORKER_CHANNEL_FD`] between fork and exec,
 //! where `dup2` clearing close-on-exec is the entire hand-off mechanism.
-//! Everything above the channel is then explicitly closed before exec:
-//! descriptors Rust opened are close-on-exec anyway, but descriptors the
-//! host itself inherited without that flag — from a shell, a hook, a
-//! supervisor — would otherwise ride into every worker, and possession of
-//! the channel must be the only hand-off there is. Possession of that fd is
-//! the whole credential: no token in argv, no
+//! Everything above the channel is then marked close-on-exec before exec:
+//! descriptors Rust opened carry the flag anyway, but descriptors the host
+//! itself inherited without it — from a shell, a hook, a supervisor —
+//! would otherwise ride into every worker, and possession of the channel
+//! must be the only hand-off there is. Marking rather than closing keeps
+//! the standard library's own exec-status pipe alive up to exec, so a
+//! worker path that does not exist still fails the spawn instead of
+//! masquerading as a worker that ran and disconnected. Possession of that
+//! fd is the whole credential: no token in argv, no
 //! secret in the environment, and the environment itself is cleared to an
 //! allowlist so the worker starts from what the host chose, not what the
 //! host happened to inherit.
@@ -104,11 +107,10 @@ pub(crate) fn spawn_worker(command: &WorkerCommand) -> io::Result<SpawnedWorker>
         }
         worker_fd = moved;
     }
-    // Computed here in the parent: sysconf is not async-signal-safe.
-    let fd_ceiling = match unsafe { libc::sysconf(libc::_SC_OPEN_MAX) } {
-        ceiling if ceiling > 0 => ceiling as i32,
-        _ => i16::MAX as i32,
-    };
+    // Computed here in the parent: directory scans and sysconf are not
+    // async-signal-safe, and the descriptors std's own spawn machinery
+    // opens after this point are born close-on-exec and need no visit.
+    let fd_ceiling = fd_table_ceiling();
     unsafe {
         spawn.pre_exec(move || {
             // Group leadership first: the kill path signals the group, so a
@@ -120,7 +122,7 @@ pub(crate) fn spawn_worker(command: &WorkerCommand) -> io::Result<SpawnedWorker>
             if libc::dup2(worker_fd, WORKER_CHANNEL_FD) == -1 {
                 return Err(io::Error::last_os_error());
             }
-            close_above_channel(fd_ceiling);
+            retire_ambient_descriptors(fd_ceiling);
             Ok(())
         });
     }
@@ -142,25 +144,64 @@ pub(crate) fn spawn_worker(command: &WorkerCommand) -> io::Result<SpawnedWorker>
     })
 }
 
-/// Close every descriptor above the channel, between fork and exec.
+/// One above the highest descriptor this process holds open, from the fd
+/// directory; the rlimit ceiling only as a fallback, since a generous
+/// `ulimit -n` would otherwise cost a million wasted probes per spawn.
+fn fd_table_ceiling() -> i32 {
+    let listing = if cfg!(target_os = "linux") {
+        "/proc/self/fd"
+    } else {
+        "/dev/fd"
+    };
+    if let Ok(entries) = std::fs::read_dir(listing) {
+        // The scan's own directory descriptor appears in the listing, so
+        // the +1 below never undercounts the live table.
+        let mut highest = WORKER_CHANNEL_FD;
+        for entry in entries.flatten() {
+            if let Some(fd) = entry
+                .file_name()
+                .to_str()
+                .and_then(|name| name.parse::<i32>().ok())
+            {
+                highest = highest.max(fd);
+            }
+        }
+        return highest + 1;
+    }
+    match unsafe { libc::sysconf(libc::_SC_OPEN_MAX) } {
+        ceiling if ceiling > 0 => ceiling as i32,
+        _ => i16::MAX as i32,
+    }
+}
+
+/// Mark every descriptor above the channel close-on-exec, between fork and
+/// exec.
 ///
-/// Runs inside `pre_exec`, so only async-signal-safe calls: raw `close`
-/// (and on Linux the `close_range` syscall), with the table ceiling
-/// precomputed by the parent. Descriptors the host inherited without
-/// close-on-exec would otherwise survive exec into the worker — and into
-/// everything the worker spawns.
-fn close_above_channel(ceiling: i32) {
+/// Marked, not closed: descriptors already carrying the flag — everything
+/// Rust opens, including the standard library's exec-status pipe — die at
+/// exec on their own, and closing that pipe here would turn a failed exec
+/// into a silently "successful" spawn. What this retires is the ambient
+/// descriptors the host inherited without the flag, which would otherwise
+/// survive exec into the worker and everything the worker spawns. Runs
+/// inside `pre_exec`, so only async-signal-safe calls: `fcntl` (and on
+/// Linux the `close_range` syscall), with the ceiling precomputed by the
+/// parent.
+fn retire_ambient_descriptors(ceiling: i32) {
     #[cfg(target_os = "linux")]
     {
+        // CLOSE_RANGE_CLOEXEC (Linux 5.11+); older kernels fall through.
         let from = (WORKER_CHANNEL_FD + 1) as libc::c_uint;
-        if unsafe { libc::syscall(libc::SYS_close_range, from, libc::c_uint::MAX, 0) } == 0 {
+        let flags = 1u32 << 2;
+        if unsafe { libc::syscall(libc::SYS_close_range, from, libc::c_uint::MAX, flags) } == 0 {
             return;
         }
-        // Pre-5.9 kernels miss the syscall; the loop below still holds.
     }
     for fd in (WORKER_CHANNEL_FD + 1)..ceiling {
         unsafe {
-            libc::close(fd);
+            let flags = libc::fcntl(fd, libc::F_GETFD);
+            if flags != -1 && flags & libc::FD_CLOEXEC == 0 {
+                libc::fcntl(fd, libc::F_SETFD, flags | libc::FD_CLOEXEC);
+            }
         }
     }
 }

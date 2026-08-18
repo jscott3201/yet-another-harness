@@ -15,8 +15,11 @@
 //!   the worker that ignores back-pressure, goodbyes, and end-of-input
 //!   alike, so only `SIGKILL` ends it.
 //! - `spawn-helper`: complete the handshake, spawn a sleeping helper that
-//!   inherits the channel fd, and exit — the death only the process, not
-//!   the socket, can reveal.
+//!   inherits the channel fd (printing its pid to stdout), and exit — the
+//!   death only the process, not the socket, can reveal.
+//! - `goodbye-mid-call`: on the first call, spawn the same fd-holding
+//!   helper, send a goodbye, and exit without answering — the polite quit
+//!   only a drained buffer distinguishes from a bare disconnect.
 //! - `bootstrap-report`: print the inherited environment variable names
 //!   and open file descriptors to stdout (the diagnostics lane), then
 //!   behave as `conformant`.
@@ -98,6 +101,11 @@ fn run(mode: &str, wire: &mut Wire) -> i32 {
                                     reason: CancelReason::Requested,
                                 },
                             }));
+                            // The answered id on the diagnostics lane lets
+                            // a test prove this reply was really sent —
+                            // e.g. as a tolerated late terminal.
+                            println!("answered:{}", cancel.call_id.0);
+                            let _ = std::io::stdout().flush();
                         }
                     }
                     Some(HostMessage::Goodbye(_)) | None => return 0,
@@ -119,12 +127,40 @@ fn run(mode: &str, wire: &mut Wire) -> i32 {
                 return 70;
             }
             // The helper inherits fd 3 (and this process's group), so the
-            // host's socket never reaches end-of-file on this exit.
+            // host's socket never reaches end-of-file on this exit. Its
+            // pid rides the diagnostics lane so a test can prove the
+            // group sweep really took it.
             match std::process::Command::new("/bin/sleep").arg("30").spawn() {
-                Ok(_) => 0,
+                Ok(helper) => {
+                    println!("helper:{}", helper.id());
+                    let _ = std::io::stdout().flush();
+                    0
+                }
                 Err(error) => {
                     eprintln!("helper did not spawn: {error}");
                     70
+                }
+            }
+        }
+        "goodbye-mid-call" => {
+            if !wire.handshake() {
+                return 70;
+            }
+            // A worker that quits politely with work in hand: goodbye,
+            // then exit without answering — while a spawned helper keeps
+            // fd 3 open, so only the buffered goodbye distinguishes this
+            // from a bare disconnect.
+            loop {
+                match wire.next_frame() {
+                    Some(HostMessage::Call(_)) => {
+                        let _ = std::process::Command::new("/bin/sleep").arg("30").spawn();
+                        wire.send(&WorkerMessage::Goodbye(Goodbye {
+                            reason: "worker stopping".to_owned(),
+                        }));
+                        return 0;
+                    }
+                    Some(HostMessage::Goodbye(_)) | None => return 0,
+                    Some(_) => {}
                 }
             }
         }

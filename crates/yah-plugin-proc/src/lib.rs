@@ -62,6 +62,13 @@ pub struct ProcLimits {
     /// first. Diagnostics are evidence, not a channel, so they are bounded
     /// like one.
     pub diagnostics_cap_bytes: usize,
+    /// Bytes of encoded frames the host will hold for a worker that is not
+    /// draining its channel before it declares the worker dead. The
+    /// session's ceilings bound each frame and the in-flight count, but
+    /// only the driver sees the transport back-pressure, so only the
+    /// driver can bound what it buffers. The default holds well over a
+    /// full complement of maximum-size in-flight calls.
+    pub outbound_buffer_cap_bytes: usize,
 }
 
 impl Default for ProcLimits {
@@ -71,6 +78,7 @@ impl Default for ProcLimits {
             kill_grace_ms: 500,
             tick_interval_ms: 10,
             diagnostics_cap_bytes: 64 * 1024,
+            outbound_buffer_cap_bytes: 8 * 1024 * 1024,
         }
     }
 }

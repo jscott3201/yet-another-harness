@@ -6,8 +6,10 @@
 //! shapes the driver can wait on without touching the wire. Every kind of
 //! progress is its own `select!` arm — reads, writes, ticks, commands, and
 //! the child's own exit — so a worker that stops draining its socket stalls
-//! only its bytes, never the clock or the shutdown path, and a worker that
-//! dies is seen even when a descendant keeps its socket open. Everything the
+//! only its bytes (and is cut off at the outbound buffer cap, never buffered
+//! toward host memory exhaustion), never the clock or the shutdown path, and
+//! a worker that dies is seen even when a descendant keeps its socket open.
+//! Everything the
 //! pump owns — the socket, the child, the pending-call table — dies with the
 //! pump, and the pump's exit path always ends in a reaped child: goodbye
 //! first, `SIGKILL` to the worker's whole process group after the grace
@@ -271,7 +273,7 @@ impl Pump {
                 // ends input once what it already wrote is drained.
                 _ = self.worker.child.wait(), if !child_exited => {
                     child_exited = true;
-                    self.drain_dead_peer(&mut wire_buf);
+                    self.drain_buffered_input(&mut wire_buf);
                     if input_open {
                         input_open = false;
                         self.session.end_of_input();
@@ -323,6 +325,9 @@ impl Pump {
         let flush_bound = Duration::from_millis(self.limits.kill_grace_ms);
         let _ = tokio::time::timeout(flush_bound, self.flush_outbuf()).await;
         let _ = self.worker.channel.shutdown().await;
+        // An answer or goodbye already in the receive buffer is a real
+        // terminal, not a loss; feed it before declaring input over.
+        self.drain_buffered_input(&mut wire_buf);
         self.session.end_of_input();
         self.apply_events();
         self.shared.set_closed(
@@ -382,19 +387,33 @@ impl Pump {
         }
     }
 
-    /// Encode every session-queued frame into the outbound buffer. False on
-    /// a frame that does not serialize — unreachable while the session only
-    /// queues values it admitted — which the caller treats as transport
-    /// loss rather than running a session whose peer missed a frame.
+    /// Encode every session-queued frame into the outbound buffer. False
+    /// when the buffer must stop growing: a frame that does not serialize
+    /// (unreachable while the session only queues values it admitted), or
+    /// pending bytes past the cap — a worker that will not drain its
+    /// channel is reclaimed at a bound, never buffered toward host memory
+    /// exhaustion. The recorded cause survives; the caller ends the
+    /// session.
     fn queue_outbox(&mut self) -> bool {
-        let mut intact = true;
         for message in self.session.drain_outbox() {
             match serde_json::to_vec(&message) {
                 Ok(bytes) => self.outbuf.extend_from_slice(&frame::encode(&bytes)),
-                Err(_) => intact = false,
+                Err(_) => {
+                    self.shared
+                        .set_closed("a host frame did not serialize".to_owned());
+                    return false;
+                }
+            }
+            if self.outbuf.len() > self.limits.outbound_buffer_cap_bytes {
+                self.shared.set_closed(format!(
+                    "worker stopped draining its channel: pending output exceeds the \
+                     {}-byte cap",
+                    self.limits.outbound_buffer_cap_bytes
+                ));
+                return false;
             }
         }
-        intact
+        true
     }
 
     /// Feed one readable burst; false when input reached its end.
@@ -423,11 +442,11 @@ impl Pump {
         }
     }
 
-    /// Feed what a dead worker already wrote — its buffered goodbye must
-    /// not be mistaken for a bare disconnect. Bounded: the dead peer's
-    /// buffer is finite, and a descendant still writing on the inherited
-    /// fd is not a session peer this driver will listen to.
-    fn drain_dead_peer(&mut self, buffer: &mut [u8]) {
+    /// Feed what the peer already wrote before input is declared over — a
+    /// buffered goodbye or terminal must not be mistaken for loss. Bounded:
+    /// a finished peer's buffer is finite, and one still writing past the
+    /// budget is not a session this driver will keep listening to.
+    fn drain_buffered_input(&mut self, buffer: &mut [u8]) {
         let mut budget: usize = 1024 * 1024;
         while budget > 0 && !self.session.is_closed() {
             match self.worker.channel.try_read(buffer) {

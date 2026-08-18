@@ -102,10 +102,10 @@ deterministic reference fake, the trusted
 [local authoring driver](plugin-authoring.md), the Wasmtime component driver,
 and the [worker process driver](plugin-worker-protocol.md) pass, but no package
 is ever loaded. Call deadlines and forced termination remain each driver's own
-mechanism, never the host contract's: the Wasmtime driver enforces them with
-epochs and fuel, the process driver with a handshake clock, per-call session
-deadlines, and a process-group kill path, and the host contract itself states
-no deadline. These layers do not implement
+mechanism, never the host contract's: the Wasmtime driver enforces them with a
+per-store epoch deadline re-armed per call, the process driver with a handshake
+clock, per-call session deadlines, and a process-group kill path, and the host
+contract itself states no deadline. These layers do not implement
 package loading or admission, policy/approval evaluation, configuration
 delivery, general component callbacks, async invocation
 draining, recurring health checks, restart/backoff policy, task supervision, WIT

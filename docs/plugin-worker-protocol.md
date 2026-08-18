@@ -270,9 +270,11 @@ construction: the host spawns the worker with one end of a Unix socketpair
 as fd 3, and holding that inherited descriptor is the whole credential —
 no token in argv (world-readable on most systems), nothing in the
 environment, which is cleared to a PATH allowlist, and nothing in the
-descriptor table above the channel, which is closed at spawn so even
-descriptors the host itself inherited without close-on-exec cannot ride
-into a worker. Node adopts the channel
+descriptor table above the channel: everything there is marked
+close-on-exec at spawn, so even descriptors the host itself inherited
+without the flag cannot ride into a worker (marked rather than closed,
+so a misconfigured worker path still fails the spawn by name instead of
+masquerading as a protocol disconnect). Node adopts the channel
 with `new net.Socket({ fd: 3 })`, CPython with `socket.socket(fileno=3)`.
 Stdout and stderr stay what they look like: bounded diagnostic text,
 retained tail-first, never protocol bytes.
@@ -287,15 +289,21 @@ and settles work the worker still holds as outcome-unknown and
 reconcile-required rather than dropping its waiter. Recovery is a fresh
 activation with a fresh process. The pump's reads, writes, deadline
 ticks, and child-exit watch are independent arms of one event loop, so a
-worker that stops draining its socket stalls only its own bytes, never
-the clock or the shutdown; and an activation its composition abandons
-without deactivating reclaims its own worker once the last driver handle
-drops. The driver passes the host's five portable lifecycle conformance
-cases against real child processes, and a scripted fake worker pins
-restart, disconnect with in-flight work, cancellation, deadline expiry
-with an observed late answer, the handshake clock, the forced kill path,
-and the bootstrap's environment and descriptor table end to end. The
-fake worker is a test fixture, not an SDK.
+worker that stops draining its socket stalls only its own bytes — and is
+cut off at the outbound buffer cap rather than buffered toward host
+memory exhaustion — never the clock or the shutdown; and an activation
+its composition abandons without deactivating reclaims its own worker
+once the last driver handle drops. Loss stays classified through every
+exit: a goodbye the worker managed to send settles in-flight work
+cancelled without reconciliation even when a descendant keeps the socket
+open past its death, while a bare disconnect settles it outcome-unknown,
+reconcile-required. The driver passes the host's five portable lifecycle
+conformance cases against real child processes, and a scripted fake
+worker pins restart, disconnect with in-flight work, cancellation,
+deadline expiry with an observed late answer, the handshake clock, the
+outbound cap, the forced kill path with its group sweep, spawn-failure
+reporting, and the bootstrap's environment and descriptor table end to
+end. The fake worker is a test fixture, not an SDK.
 
 The pathname-socket lane with kernel-attested peer credentials
 (`getpeereid`, `SO_PEERCRED`) is deliberately absent: it exists to attach
