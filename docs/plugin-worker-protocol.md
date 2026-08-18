@@ -269,7 +269,10 @@ under the host's driver contract. The bootstrap is authenticated by
 construction: the host spawns the worker with one end of a Unix socketpair
 as fd 3, and holding that inherited descriptor is the whole credential —
 no token in argv (world-readable on most systems), nothing in the
-environment, which is cleared to a PATH allowlist. Node adopts the channel
+environment, which is cleared to a PATH allowlist, and nothing in the
+descriptor table above the channel, which is closed at spawn so even
+descriptors the host itself inherited without close-on-exec cannot ride
+into a worker. Node adopts the channel
 with `new net.Socket({ fd: 3 })`, CPython with `socket.socket(fileno=3)`.
 Stdout and stderr stay what they look like: bounded diagnostic text,
 retained tail-first, never protocol bytes.

@@ -2,9 +2,13 @@
 //!
 //! One Unix socketpair per activation. The host keeps one end; the other is
 //! duplicated onto fd [`crate::WORKER_CHANNEL_FD`] between fork and exec,
-//! where `dup2` clearing close-on-exec is the entire hand-off mechanism —
-//! the duplicate survives exec, every other descriptor Rust opened does
-//! not. Possession of that fd is the whole credential: no token in argv, no
+//! where `dup2` clearing close-on-exec is the entire hand-off mechanism.
+//! Everything above the channel is then explicitly closed before exec:
+//! descriptors Rust opened are close-on-exec anyway, but descriptors the
+//! host itself inherited without that flag — from a shell, a hook, a
+//! supervisor — would otherwise ride into every worker, and possession of
+//! the channel must be the only hand-off there is. Possession of that fd is
+//! the whole credential: no token in argv, no
 //! secret in the environment, and the environment itself is cleared to an
 //! allowlist so the worker starts from what the host chose, not what the
 //! host happened to inherit.
@@ -100,6 +104,11 @@ pub(crate) fn spawn_worker(command: &WorkerCommand) -> io::Result<SpawnedWorker>
         }
         worker_fd = moved;
     }
+    // Computed here in the parent: sysconf is not async-signal-safe.
+    let fd_ceiling = match unsafe { libc::sysconf(libc::_SC_OPEN_MAX) } {
+        ceiling if ceiling > 0 => ceiling as i32,
+        _ => i16::MAX as i32,
+    };
     unsafe {
         spawn.pre_exec(move || {
             // Group leadership first: the kill path signals the group, so a
@@ -111,6 +120,7 @@ pub(crate) fn spawn_worker(command: &WorkerCommand) -> io::Result<SpawnedWorker>
             if libc::dup2(worker_fd, WORKER_CHANNEL_FD) == -1 {
                 return Err(io::Error::last_os_error());
             }
+            close_above_channel(fd_ceiling);
             Ok(())
         });
     }
@@ -130,4 +140,27 @@ pub(crate) fn spawn_worker(command: &WorkerCommand) -> io::Result<SpawnedWorker>
         channel,
         pgid,
     })
+}
+
+/// Close every descriptor above the channel, between fork and exec.
+///
+/// Runs inside `pre_exec`, so only async-signal-safe calls: raw `close`
+/// (and on Linux the `close_range` syscall), with the table ceiling
+/// precomputed by the parent. Descriptors the host inherited without
+/// close-on-exec would otherwise survive exec into the worker — and into
+/// everything the worker spawns.
+fn close_above_channel(ceiling: i32) {
+    #[cfg(target_os = "linux")]
+    {
+        let from = (WORKER_CHANNEL_FD + 1) as libc::c_uint;
+        if unsafe { libc::syscall(libc::SYS_close_range, from, libc::c_uint::MAX, 0) } == 0 {
+            return;
+        }
+        // Pre-5.9 kernels miss the syscall; the loop below still holds.
+    }
+    for fd in (WORKER_CHANNEL_FD + 1)..ceiling {
+        unsafe {
+            libc::close(fd);
+        }
+    }
 }
