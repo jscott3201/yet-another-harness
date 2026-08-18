@@ -2755,6 +2755,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "yah-plugin-ipc"
+version = "0.0.1"
+dependencies = [
+ "blake3",
+ "schemars",
+ "serde",
+ "serde_json",
+ "ts-rs",
+]
+
+[[package]]
 name = "yah-plugin-wasm"
 version = "0.0.1"
 dependencies = [

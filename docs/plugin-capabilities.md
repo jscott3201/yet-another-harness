@@ -102,9 +102,12 @@ This slice does not implement:
 - async calls, streams, task supervision, deadlines, rate limits, or forced
   cancellation;
 - durable work-attempt identity or child invocation scopes;
-- IPC capability-resource encodings, production execution drivers, or sandbox
-  enforcement. The WIT encoding exists for the portable text contract; richer
-  or typed-per-capability encodings do not;
+- a binding from this broker to any transport, production execution drivers,
+  or sandbox enforcement. The WIT encoding exists for the portable text
+  contract, and the [worker wire protocol](plugin-worker-protocol.md) defines
+  a handle encoding for future process lanes, but nothing mints a worker
+  handle from a real grant; richer or typed-per-capability encodings do not
+  exist;
 - provider cleanup ownership, durable external effects, or Selene persistence;
   or
 - automatic lifecycle changes after a host policy decision.
