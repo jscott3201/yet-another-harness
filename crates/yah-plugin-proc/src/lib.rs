@@ -67,7 +67,10 @@ pub struct ProcLimits {
     /// session's ceilings bound each frame and the in-flight count, but
     /// only the driver sees the transport back-pressure, so only the
     /// driver can bound what it buffers. The default holds well over a
-    /// full complement of maximum-size in-flight calls.
+    /// full complement of maximum-size in-flight calls; a value below one
+    /// maximum-size frame is clamped up to it at start, because a cap
+    /// under what the session itself admits would accuse a conformant
+    /// worker of not draining a frame it was never given.
     pub outbound_buffer_cap_bytes: usize,
 }
 

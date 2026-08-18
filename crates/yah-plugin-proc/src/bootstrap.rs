@@ -205,3 +205,25 @@ fn retire_ambient_descriptors(ceiling: i32) {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// On kernels with `close_range` the ceiling goes unread, so this is
+    /// the one place the scan itself is pinned on every platform: a sweep
+    /// beneath a real hazard is a sweep that missed it.
+    #[test]
+    fn the_ceiling_covers_an_armed_high_descriptor() {
+        let armed = unsafe { libc::fcntl(0, libc::F_DUPFD, 200) };
+        assert!(armed >= 200, "the probe descriptor exists");
+        let ceiling = fd_table_ceiling();
+        unsafe {
+            libc::close(armed);
+        }
+        assert!(
+            ceiling > armed,
+            "the ceiling ({ceiling}) covers the armed descriptor ({armed})"
+        );
+    }
+}

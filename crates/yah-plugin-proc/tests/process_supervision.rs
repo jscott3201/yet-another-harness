@@ -20,7 +20,7 @@ use rig::{
 };
 use serde_json::json;
 use yah_plugin_host::{DriverKind, HostPluginActivation, PluginHealth, PluginStartError};
-use yah_plugin_ipc::types::WireErrorKind;
+use yah_plugin_ipc::types::{Outcome, WireErrorKind};
 use yah_plugin_proc::{
     CallEnd, ProcActivationPlan, ProcLimits, ProcessPluginDriver, ResourceState,
 };
@@ -76,13 +76,17 @@ async fn a_worker_that_stops_reading_stalls_neither_the_clock_nor_the_kill() {
 #[tokio::test]
 async fn a_worker_past_the_outbound_cap_is_declared_dead_not_buffered() {
     let revision = lifecycle_revision("outcap", '1');
+    // A cap of one byte: deliberately below any admitted frame, so the
+    // start-time clamp to the session's own frame ceiling is what actually
+    // governs — a conformant worker must never be accused over a single
+    // frame it was not given the chance to read.
     let (driver, observer) = ProcessPluginDriver::scripted_with_limits(
         revision.id().clone(),
         DriverKind::NodeProcess,
         fixtures::worker_program(),
         vec![ProcActivationPlan::worker("deaf")],
         ProcLimits {
-            outbound_buffer_cap_bytes: 64 * 1024,
+            outbound_buffer_cap_bytes: 1,
             kill_grace_ms: 100,
             ..ProcLimits::default()
         },
@@ -95,18 +99,32 @@ async fn a_worker_past_the_outbound_cap_is_declared_dead_not_buffered() {
     let _handle = activation.activate(&rig.registry).await.expect("starts");
     let pid = observer.worker_pid(&id).expect("a live worker has a pid");
 
-    // One frame past the cap: the session admitted the call, the deaf
-    // worker will never drain it, and the driver refuses to hold unbounded
-    // bytes on the worker's behalf — the session ends instead.
-    let call = observer
-        .begin_call(&id, "tool.flood", json!("x".repeat(200 * 1024)), None)
-        .await
-        .expect("the call opens");
-    match settled_within(call).await {
-        CallEnd::Lost { reconcile, .. } => {
-            assert!(reconcile, "the worker may hold the flooded call");
+    // Flood past the clamped floor (~1 MiB) against a worker that will
+    // never drain it; later opens may find the session already ended.
+    let mut calls = Vec::new();
+    for _ in 0..8 {
+        match observer
+            .begin_call(&id, "tool.flood", json!("x".repeat(200 * 1024)), None)
+            .await
+        {
+            Ok(call) => calls.push(call),
+            Err(_) => break,
         }
-        other => panic!("expected the call lost at the cap, got {other:?}"),
+    }
+    // At least two opens prove the clamp: an unclamped one-byte cap would
+    // end the session at the first frame, before a second call could open.
+    assert!(
+        calls.len() >= 2,
+        "the cap floor admits at least one full frame: {} opened",
+        calls.len()
+    );
+    for call in calls {
+        match settled_within(call).await {
+            CallEnd::Lost { reconcile, .. } => {
+                assert!(reconcile, "the worker may hold the flooded calls");
+            }
+            other => panic!("expected the calls lost at the cap, got {other:?}"),
+        }
     }
     let summary = observer.close_summary(&id).expect("the session ended");
     assert!(
@@ -115,6 +133,33 @@ async fn a_worker_past_the_outbound_cap_is_declared_dead_not_buffered() {
     );
     stop_active(activation, &rig.registry, rig.epoch).await;
     process_gone(pid).await;
+}
+
+#[tokio::test]
+async fn a_terminal_arriving_during_deactivation_still_settles_as_itself() {
+    let revision = lifecycle_revision("latereply", '4');
+    let (driver, observer) = scripted(&revision, vec![ProcActivationPlan::worker("late-reply")]);
+    let mut rig = Rig::new("proc.latereply", &revision);
+    let mut activation =
+        HostPluginActivation::prepare(&mut rig.slot, rig.epoch, &rig.broker, &rig.grants, driver)
+            .expect("preparation is inert and succeeds");
+    let id = activation.id().clone();
+    let _handle = activation.activate(&rig.registry).await.expect("starts");
+
+    let call = observer
+        .begin_call(&id, "tool.echo", json!("handed-over"), None)
+        .await
+        .expect("the call opens");
+    // The worker read the call and went deaf; its answer lands a beat
+    // later, while the host is already deactivating. The exit path drains
+    // the receive buffer before declaring input over, so the caller gets
+    // the real outcome — not a synthetic outcome-unknown for work that
+    // was in fact answered.
+    stop_active(activation, &rig.registry, rig.epoch).await;
+    match settled_within(call).await {
+        CallEnd::Settled(Outcome::Ok { result }) => assert_eq!(result, json!("handed-over")),
+        other => panic!("expected the late terminal to settle the call, got {other:?}"),
+    }
 }
 
 #[tokio::test]

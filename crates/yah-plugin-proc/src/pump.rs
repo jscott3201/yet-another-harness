@@ -9,11 +9,12 @@
 //! only its bytes (and is cut off at the outbound buffer cap, never buffered
 //! toward host memory exhaustion), never the clock or the shutdown path, and
 //! a worker that dies is seen even when a descendant keeps its socket open.
-//! Everything the
-//! pump owns — the socket, the child, the pending-call table — dies with the
-//! pump, and the pump's exit path always ends in a reaped child: goodbye
-//! first, `SIGKILL` to the worker's whole process group after the grace
-//! window, `wait` regardless.
+//! Everything the pump owns — the socket, the child, the pending-call
+//! table — dies with the pump, and the pump's exit path always ends in a
+//! reaped child: goodbye first, `SIGKILL` to the worker's whole process
+//! group after the grace window, `wait` regardless. A worker's last words
+//! survive it: terminals already in the socket are drained before input is
+//! declared over, and the diagnostic pipes are drained after the reap.
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::{
@@ -194,8 +195,14 @@ pub(crate) struct PumpHandle {
 pub(crate) fn start(
     worker: SpawnedWorker,
     config: SessionConfig,
-    limits: ProcLimits,
+    mut limits: ProcLimits,
 ) -> PumpHandle {
+    // The cap accuses a worker of not draining, so it must never sit under
+    // one frame the session itself admits: a bound below that would kill a
+    // conformant worker for a frame it was never given the chance to read.
+    limits.outbound_buffer_cap_bytes = limits
+        .outbound_buffer_cap_bytes
+        .max(yah_plugin_ipc::MAX_FRAME_BYTES + 64);
     let shared = Arc::new(PumpShared::new(&limits, worker.pgid));
     let (commands, receiver) = mpsc::unbounded_channel();
     let pump = Pump {
@@ -273,7 +280,7 @@ impl Pump {
                 // ends input once what it already wrote is drained.
                 _ = self.worker.child.wait(), if !child_exited => {
                     child_exited = true;
-                    self.drain_buffered_input(&mut wire_buf);
+                    self.drain_buffered_input(&mut wire_buf).await;
                     if input_open {
                         input_open = false;
                         self.session.end_of_input();
@@ -327,15 +334,32 @@ impl Pump {
         let _ = self.worker.channel.shutdown().await;
         // An answer or goodbye already in the receive buffer is a real
         // terminal, not a loss; feed it before declaring input over.
-        self.drain_buffered_input(&mut wire_buf);
+        self.drain_buffered_input(&mut wire_buf).await;
         self.session.end_of_input();
         self.apply_events();
+        self.reap().await;
+        // The group is dead, so these end at end-of-file promptly; text the
+        // worker wrote just before dying is retained instead of racing the
+        // pump's exit.
+        drain_diagnostics(
+            &self.shared,
+            DiagnosticStream::Stdout,
+            &mut stdout,
+            &mut out_buf,
+        )
+        .await;
+        drain_diagnostics(
+            &self.shared,
+            DiagnosticStream::Stderr,
+            &mut stderr,
+            &mut err_buf,
+        )
+        .await;
         self.shared.set_closed(
             self.shared
                 .close_summary()
                 .unwrap_or_else(|| "worker session ended".to_owned()),
         );
-        self.reap().await;
     }
 
     /// Lift session facts into driver-visible state.
@@ -443,18 +467,35 @@ impl Pump {
     }
 
     /// Feed what the peer already wrote before input is declared over — a
-    /// buffered goodbye or terminal must not be mistaken for loss. Bounded:
-    /// a finished peer's buffer is finite, and one still writing past the
-    /// budget is not a session this driver will keep listening to.
-    fn drain_buffered_input(&mut self, buffer: &mut [u8]) {
+    /// buffered goodbye or terminal must not be mistaken for loss. Doubly
+    /// bounded: bytes against a chatty descendant, wall-clock against a
+    /// trickling one; a peer still writing past either bound is not a
+    /// session this driver will keep listening to.
+    ///
+    /// `WouldBlock` is not trusted as "nothing left": tokio's `try_read`
+    /// reports it from cached readiness without a read syscall, so bytes
+    /// physically queued in the socket would be lost to it. The reactor is
+    /// asked, briefly, before the drain gives up.
+    async fn drain_buffered_input(&mut self, buffer: &mut [u8]) {
+        let deadline = tokio::time::Instant::now() + Duration::from_millis(100);
         let mut budget: usize = 1024 * 1024;
         while budget > 0 && !self.session.is_closed() {
             match self.worker.channel.try_read(buffer) {
-                Ok(0) | Err(_) => return,
+                Ok(0) => return,
                 Ok(count) => {
                     budget = budget.saturating_sub(count);
                     self.session.feed(&buffer[..count]);
                 }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    match tokio::time::timeout_at(deadline, self.worker.channel.readable()).await {
+                        Ok(Ok(())) => {}
+                        _ => return,
+                    }
+                }
+                Err(_) => return,
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return;
             }
         }
     }
@@ -523,6 +564,33 @@ impl Pump {
         match read {
             Ok(0) | Err(_) => *source = None,
             Ok(count) => self.shared.append_diagnostics(stream, &buffer[..count]),
+        }
+    }
+}
+
+/// Retain one diagnostic stream's remaining text at pump exit, to
+/// end-of-file or a bound. Runs after the group sweep, so the pipe's
+/// writers are gone and end-of-file is prompt; the wall-clock bound covers
+/// the paths where something unexpected still holds the write end.
+async fn drain_diagnostics<R: tokio::io::AsyncRead + Unpin>(
+    shared: &PumpShared,
+    stream: DiagnosticStream,
+    source: &mut Option<R>,
+    buffer: &mut [u8],
+) {
+    let deadline = tokio::time::Instant::now() + Duration::from_millis(100);
+    let mut budget: usize = 256 * 1024;
+    let Some(reader) = source.as_mut() else {
+        return;
+    };
+    while budget > 0 {
+        match tokio::time::timeout_at(deadline, reader.read(buffer)).await {
+            Ok(Ok(0)) => return,
+            Ok(Ok(count)) => {
+                budget = budget.saturating_sub(count);
+                shared.append_diagnostics(stream, &buffer[..count]);
+            }
+            _ => return,
         }
     }
 }

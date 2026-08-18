@@ -20,6 +20,8 @@
 //! - `goodbye-mid-call`: on the first call, spawn the same fd-holding
 //!   helper, send a goodbye, and exit without answering — the polite quit
 //!   only a drained buffer distinguishes from a bare disconnect.
+//! - `late-reply`: read one call, stop reading, answer it a beat later,
+//!   and exit — the terminal that lands while the host is deactivating.
 //! - `bootstrap-report`: print the inherited environment variable names
 //!   and open file descriptors to stdout (the diagnostics lane), then
 //!   behave as `conformant`.
@@ -139,6 +141,30 @@ fn run(mode: &str, wire: &mut Wire) -> i32 {
                 Err(error) => {
                     eprintln!("helper did not spawn: {error}");
                     70
+                }
+            }
+        }
+        "late-reply" => {
+            if !wire.handshake() {
+                return 70;
+            }
+            // Read one call, go deaf, then answer it a beat later and
+            // exit: the terminal that lands in the host's receive buffer
+            // while the host is already deactivating.
+            loop {
+                match wire.next_frame() {
+                    Some(HostMessage::Call(call)) => {
+                        std::thread::sleep(std::time::Duration::from_millis(25));
+                        wire.send(&WorkerMessage::Reply(Reply {
+                            call_id: call.call_id,
+                            outcome: Outcome::Ok {
+                                result: call.payload,
+                            },
+                        }));
+                        return 0;
+                    }
+                    Some(HostMessage::Goodbye(_)) | None => return 0,
+                    Some(_) => {}
                 }
             }
         }

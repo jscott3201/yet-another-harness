@@ -214,7 +214,12 @@ async fn the_bootstrap_leaks_nothing_and_diagnostics_stay_diagnostics() {
     // shell or a git hook arrives. `F_DUPFD` (unlike Rust's own opens)
     // leaves the flag clear, and the floor keeps it clear of the channel.
     let ambient = unsafe { libc::fcntl(0, libc::F_DUPFD, WORKER_CHANNEL_FD + 7) };
-    assert!(ambient > WORKER_CHANNEL_FD, "the ambient hazard exists");
+    // The worker's probe enumerates fds 0..64, so the hazard must sit
+    // inside that window or the assertion below pins nothing.
+    assert!(
+        ambient > WORKER_CHANNEL_FD && ambient < 64,
+        "the ambient hazard sits inside the worker's probe range: {ambient}"
+    );
 
     let mut first_rig = Rig::new("proc.bootstrap.first", &revision);
     let mut first = HostPluginActivation::prepare(
