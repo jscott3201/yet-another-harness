@@ -469,14 +469,23 @@ async fn deactivation_reclaims_everything_even_at_a_generous_grace() {
     let pid = observer.worker_pid(&id).expect("a live worker has a pid");
     let helper_pid = reported_helper_pid(&observer, &id).await;
 
-    // Jam the socket so the goodbye flush burns its whole window.
-    let call = observer
-        .begin_call(&id, "tool.flood", json!("x".repeat(200 * 1024)), Some(50))
-        .await
-        .expect("the call opens");
-    match settled_within(call).await {
-        CallEnd::Lost { error, .. } => assert_eq!(error, WireErrorKind::DeadlineExceeded),
-        other => panic!("expected the deadline, got {other:?}"),
+    // Jam the socket past any platform's capacity (one frame fits whole
+    // inside Linux's ~208 KiB buffer) so the goodbye flush really burns
+    // its window.
+    let mut calls = Vec::new();
+    for _ in 0..6 {
+        calls.push(
+            observer
+                .begin_call(&id, "tool.flood", json!("x".repeat(200 * 1024)), Some(50))
+                .await
+                .expect("the call opens"),
+        );
+    }
+    for call in calls {
+        match settled_within(call).await {
+            CallEnd::Lost { error, .. } => assert_eq!(error, WireErrorKind::DeadlineExceeded),
+            other => panic!("expected the deadline, got {other:?}"),
+        }
     }
     let began = std::time::Instant::now();
     stop_active(activation, &rig.registry, rig.epoch).await;

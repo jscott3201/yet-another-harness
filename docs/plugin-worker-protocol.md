@@ -299,16 +299,18 @@ exit: a goodbye the worker managed to send settles in-flight work
 cancelled without reconciliation even when a descendant keeps the socket
 open past its death, while a bare disconnect settles it outcome-unknown,
 reconcile-required. A worker that shuts only its read half kills only
-the outbound direction: the session stays open for its goodbye, health
-reports the half-death, and a call that provably never reached the
-worker settles at once, cancelled, without reconciliation. The driver
-passes the host's five portable lifecycle
-conformance cases against real child processes, and a scripted fake
-worker pins restart, disconnect with in-flight work, cancellation,
-deadline expiry with an observed late answer, the handshake clock, the
-outbound cap, the forced kill path with its group sweep, spawn-failure
-reporting, and the bootstrap's environment and descriptor table end to
-end. The fake worker is a test fixture, not an SDK.
+the outbound direction — wherever the kernel surfaces that to writers
+(Linux does; macOS accepts the writes outright, so the state does not
+arise there): the session stays open for its goodbye, health reports
+the half-death, and a call that provably never reached the worker
+settles at once, cancelled, without reconciliation. The driver passes
+the host's five portable lifecycle conformance cases against real
+child processes, and a scripted fake worker pins restart, disconnect
+with in-flight work, cancellation, deadline expiry with an observed
+late answer, the handshake clock, the outbound cap, the forced kill
+path with its group sweep, spawn-failure reporting, and the
+bootstrap's environment and descriptor table end to end. The fake
+worker is a test fixture, not an SDK.
 
 The pathname-socket lane with kernel-attested peer credentials
 (`getpeereid`, `SO_PEERCRED`) is deliberately absent: it exists to attach
