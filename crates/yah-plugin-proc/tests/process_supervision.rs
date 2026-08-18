@@ -22,7 +22,7 @@ use serde_json::json;
 use yah_plugin_host::{DriverKind, HostPluginActivation, PluginHealth, PluginStartError};
 use yah_plugin_ipc::types::{Outcome, WireErrorKind};
 use yah_plugin_proc::{
-    CallEnd, ProcActivationPlan, ProcLimits, ProcessPluginDriver, ResourceState,
+    CallEnd, DiagnosticStream, ProcActivationPlan, ProcLimits, ProcessPluginDriver, ResourceState,
 };
 
 #[tokio::test]
@@ -71,6 +71,82 @@ async fn a_worker_that_stops_reading_stalls_neither_the_clock_nor_the_kill() {
     stop_active(activation, &rig.registry, rig.epoch).await;
     process_gone(pid).await;
     assert_eq!(observer.resource_state(&id), Ok(ResourceState::Released));
+    // Retirement keeps terminal facts only: the live pump link — and with
+    // it the pid and the diagnostics buffers — does not survive release.
+    assert!(
+        observer.worker_pid(&id).is_none(),
+        "the pid does not survive release"
+    );
+    assert!(
+        observer
+            .diagnostics_tail(&id, DiagnosticStream::Stdout)
+            .is_none(),
+        "diagnostics do not survive release"
+    );
+}
+
+#[tokio::test]
+async fn a_goodbye_behind_a_failing_write_is_still_a_goodbye() {
+    let revision = lifecycle_revision("goodbyewrite", '5');
+    let (driver, observer) = ProcessPluginDriver::scripted_with_limits(
+        revision.id().clone(),
+        DriverKind::NodeProcess,
+        fixtures::worker_program(),
+        vec![ProcActivationPlan::worker("goodbye-then-linger")],
+        ProcLimits {
+            kill_grace_ms: 100,
+            ..ProcLimits::default()
+        },
+    );
+    let mut rig = Rig::new("proc.goodbyewrite", &revision);
+    let mut activation =
+        HostPluginActivation::prepare(&mut rig.slot, rig.epoch, &rig.broker, &rig.grants, driver)
+            .expect("preparation is inert and succeeds");
+    let id = activation.id().clone();
+    let _handle = activation.activate(&rig.registry).await.expect("starts");
+    let pid = observer.worker_pid(&id).expect("a live worker has a pid");
+
+    // One held call, then a flood the worker will never read. The worker
+    // shuts its read half before its goodbye exists, so on Linux the
+    // host's write provably fails first — and a failed write must not end
+    // input: the goodbye that follows still decides the exit (cancelled,
+    // no reconciliation — never a bare disconnect). On macOS the kernel
+    // hides a peer's read-shutdown from the writer entirely, so there the
+    // goodbye simply arrives on the read arm and the same classification
+    // must hold; the write-failure half of the pin is exercised on the
+    // platform CI runs.
+    let held = observer
+        .begin_call(&id, "tool.hold", json!(null), None)
+        .await
+        .expect("the call opens");
+    let mut floods = Vec::new();
+    for _ in 0..6 {
+        match observer
+            .begin_call(&id, "tool.flood", json!("x".repeat(200 * 1024)), None)
+            .await
+        {
+            Ok(call) => floods.push(call),
+            Err(_) => break,
+        }
+    }
+    match settled_within(held).await {
+        CallEnd::Lost { error, reconcile } => {
+            assert_eq!(error, WireErrorKind::Cancelled);
+            assert!(!reconcile, "a goodbye settles without reconciliation");
+        }
+        other => panic!("expected the goodbye's cancellation, got {other:?}"),
+    }
+    let summary = observer.close_summary(&id).expect("the session ended");
+    assert!(
+        summary.contains("worker goodbye"),
+        "the close names the goodbye, not the failed write: {summary}"
+    );
+    for call in floods {
+        let _ = settled_within(call).await;
+    }
+    // The lingering worker only dies by the kill.
+    stop_active(activation, &rig.registry, rig.epoch).await;
+    process_gone(pid).await;
 }
 
 #[tokio::test]

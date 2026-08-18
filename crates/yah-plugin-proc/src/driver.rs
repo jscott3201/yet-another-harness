@@ -138,6 +138,12 @@ struct ActivationScript {
     assigned: HashMap<PluginActivationId, ProcActivationPlan>,
 }
 
+/// The process lane's [`PluginDriver`]: one supervised worker process per
+/// activation, speaking protocol v1 over an inherited fd-3 socketpair.
+///
+/// Scripted construction is the only construction: each activation
+/// consumes one [`ProcActivationPlan`], and the paired [`ProcObserver`]
+/// is the read-only evidence view plus the test-facing call hooks.
 pub struct ProcessPluginDriver {
     revision: PluginRevisionId,
     kind: DriverKind,
@@ -163,6 +169,9 @@ impl ProcessPluginDriver {
         Self::scripted_with_limits(revision, kind, worker_program, plans, ProcLimits::default())
     }
 
+    /// [`Self::scripted`] with explicit [`ProcLimits`]. Out-of-range
+    /// values are clamped where the field documents a floor rather than
+    /// refused; see each field's doc for its bound and unit.
     pub fn scripted_with_limits(
         revision: PluginRevisionId,
         kind: DriverKind,
@@ -249,9 +258,9 @@ struct ActivationCore {
     command: WorkerCommand,
     limits: ProcLimits,
     observation: Arc<ActivationObservation>,
-    /// The running pump, if the activation spawned. Behind an async-aware
-    /// lock because deactivation takes it while a dropped start future may
-    /// still hold nothing — the store rule from the wasm lane, unchanged.
+    /// The running pump, if the activation spawned. An async-aware lock
+    /// for the same store shape as the wasm lane; both critical sections
+    /// here are one statement and never hold the guard across an await.
     live: tokio::sync::Mutex<Option<pump::PumpHandle>>,
 }
 
@@ -306,14 +315,27 @@ impl ActivationCore {
             let _ = handle.commands.send(PumpCommand::Shutdown {
                 reason: "deactivated".to_owned(),
             });
-            // The pump's own exit path is goodbye → grace → SIGKILL → wait,
-            // so this bound only trips if the pump itself is stuck; then
-            // aborting it drops the child, whose kill-on-drop reaps. The
-            // aborted task is still awaited: nothing is Released while the
-            // kill has yet to be sent.
+            // The pump's exit path spends the grace twice — the goodbye
+            // flush and the reap window — plus its bounded drains, so the
+            // join bound must cover both windows or it would abort the
+            // pump before the group sweep. It still can trip on a pump
+            // stuck beyond its own bounds; the sweep is then repeated here,
+            // where the abort cannot cancel it, before kill-on-drop reaps
+            // the leader. The aborted task is still awaited: nothing is
+            // Released while a kill has yet to be sent.
             let mut task = handle.task;
-            let bound = Duration::from_millis(self.limits.kill_grace_ms + 2_000);
+            let bound = Duration::from_millis(2 * self.limits.kill_grace_ms + 2_000);
             if tokio::time::timeout(bound, &mut task).await.is_err() {
+                let pgid = handle.shared.worker_pid();
+                if pgid > 0 {
+                    // SAFETY: kill(2) with a negative pid signals the
+                    // worker's process group; no memory is touched. The
+                    // same narrow recycled-group race the pump's voluntary
+                    // sweep documents is accepted here.
+                    unsafe {
+                        libc::kill(-pgid, libc::SIGKILL);
+                    }
+                }
                 task.abort();
                 let _ = task.await;
             }
@@ -495,11 +517,16 @@ impl ActivationObservation {
     }
 }
 
+/// Where one activation's worker process stands, as the observer reports
+/// it: acquisition is the spawn, release is the reaped end of the pump.
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ResourceState {
+    /// No process was ever spawned — preparation only, or a failed spawn.
     NotAcquired = 0,
+    /// The process exists and deactivation owes it a release.
     Live = 1,
+    /// Deactivation ran: the pump ended and the child was reaped.
     Released = 2,
 }
 

@@ -28,13 +28,16 @@ use std::process::Stdio;
 
 use crate::WORKER_CHANNEL_FD;
 
-/// The command one activation spawns, chosen by the host.
+/// The command one activation spawns, built by the driver from its
+/// worker program and the plan's mode argument.
 ///
-/// Deliberately narrow: program and arguments only. The driver owns stdio
-/// disposition, the environment allowlist, and the channel fd; a caller
+/// Deliberately narrow: program and arguments only. The spawn owns stdio
+/// disposition, the environment allowlist, and the channel fd; anything
 /// that could override those could also un-authenticate the bootstrap.
+/// Crate-private until a driver constructor needs to accept one — no
+/// public API takes or returns it today.
 #[derive(Clone, Debug)]
-pub struct WorkerCommand {
+pub(crate) struct WorkerCommand {
     program: PathBuf,
     args: Vec<OsString>,
 }
@@ -111,6 +114,11 @@ pub(crate) fn spawn_worker(command: &WorkerCommand) -> io::Result<SpawnedWorker>
     // async-signal-safe, and the descriptors std's own spawn machinery
     // opens after this point are born close-on-exec and need no visit.
     let fd_ceiling = fd_table_ceiling();
+    // SAFETY: the closure runs between fork and exec in a multi-threaded
+    // process, so it may only make async-signal-safe calls. It does:
+    // `setpgid`, `dup2`, and (in the sweep) `fcntl` and the `close_range`
+    // syscall are all raw syscalls, and the ceiling was precomputed in
+    // the parent because directory scans and `sysconf` are not safe here.
     unsafe {
         spawn.pre_exec(move || {
             // Group leadership first: the kill path signals the group, so a
@@ -127,8 +135,9 @@ pub(crate) fn spawn_worker(command: &WorkerCommand) -> io::Result<SpawnedWorker>
         });
     }
     let spawned = spawn.spawn();
-    // SAFETY: `worker_fd` was released by `into_raw_fd` above and is owned
-    // here; nothing else closes it in the parent.
+    // SAFETY: `worker_fd` is whichever descriptor this function owns — the
+    // one `into_raw_fd` released, or its relocation — and nothing else
+    // closes it in the parent.
     unsafe {
         libc::close(worker_fd);
     }
@@ -144,18 +153,41 @@ pub(crate) fn spawn_worker(command: &WorkerCommand) -> io::Result<SpawnedWorker>
     })
 }
 
-/// A bound no live descriptor can sit at or above: the soft file limit.
+/// A bound on the worker's inheritable descriptor table, from two sources
+/// combined — because neither alone is a ceiling.
 ///
-/// Deliberately not a snapshot of the open table. Another thread can open
-/// descriptors between a snapshot and the fork — the standard library's
-/// own pipes are briefly inheritable mid-creation on non-Linux hosts —
-/// and a sweep bounded by a stale snapshot misses exactly those; it did,
-/// at a few percent per spawn under concurrent activations. The limit
-/// cannot be outrun. The cost is the fcntl loop's length on non-Linux
-/// hosts with a generous ulimit (on the order of 100 ms per spawn at a
-/// million); Linux never walks the loop, and correctness beats spawn
-/// latency here.
+/// The soft file limit bounds every descriptor a concurrent thread can
+/// still allocate, so unlike a table snapshot it cannot be outrun between
+/// this call and the fork (the standard library's own pipes are briefly
+/// inheritable mid-creation on non-Linux hosts, and a stale snapshot
+/// missed exactly those, at a few percent per spawn under concurrent
+/// activations). The snapshot of the highest live descriptor covers what
+/// the limit does not: descriptors obtained before the limit was lowered,
+/// or under an unlimited rlimit, both of which sit above it. The residual
+/// — a concurrent thread placing a descriptor above both bounds while the
+/// rlimit is unlimited — requires the host to do that deliberately
+/// mid-spawn and is accepted. The cost is the fcntl loop's length under a
+/// generous ulimit (on the order of 100 ms per spawn at a million);
+/// Linux 5.11+ never walks the loop, older kernels and other hosts pay
+/// it, and correctness beats spawn latency here.
 fn fd_table_ceiling() -> i32 {
+    let listing = if cfg!(target_os = "linux") {
+        "/proc/self/fd"
+    } else {
+        "/dev/fd"
+    };
+    let mut ceiling = WORKER_CHANNEL_FD + 1;
+    if let Ok(entries) = std::fs::read_dir(listing) {
+        for entry in entries.flatten() {
+            if let Some(fd) = entry
+                .file_name()
+                .to_str()
+                .and_then(|name| name.parse::<i32>().ok())
+            {
+                ceiling = ceiling.max(fd.saturating_add(1));
+            }
+        }
+    }
     let mut limit = libc::rlimit {
         rlim_cur: 0,
         rlim_max: 0,
@@ -164,11 +196,11 @@ fn fd_table_ceiling() -> i32 {
         && limit.rlim_cur > 0
         && limit.rlim_cur < i32::MAX as libc::rlim_t
     {
-        return limit.rlim_cur as i32;
+        return ceiling.max(limit.rlim_cur as i32);
     }
     match unsafe { libc::sysconf(libc::_SC_OPEN_MAX) } {
-        ceiling if ceiling > 0 && ceiling < i32::MAX as libc::c_long => ceiling as i32,
-        _ => i16::MAX as i32,
+        bound if bound > 0 && bound < i32::MAX as libc::c_long => ceiling.max(bound as i32),
+        _ => ceiling.max(i16::MAX as i32),
     }
 }
 

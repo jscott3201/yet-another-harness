@@ -38,9 +38,15 @@ pub enum CallEnd {
     /// The worker's terminal frame arrived.
     Settled(Outcome),
     /// The session settled it locally: deadline, goodbye, disconnect, or
-    /// fatal fault. `reconcile` carries the session's own judgment.
+    /// fatal fault.
     Lost {
+        /// Why: `DeadlineExceeded`, `Cancelled` (a worker goodbye),
+        /// `OutcomeUnknown` (a bare disconnect), and so on.
         error: WireErrorKind,
+        /// The session's own judgment of whether the worker may have acted
+        /// on work whose outcome the host never learned. True demands
+        /// reconciliation; false (a goodbye, an expired budget the worker
+        /// acknowledged) does not.
         reconcile: bool,
     },
 }
@@ -179,9 +185,13 @@ impl PumpShared {
     }
 }
 
+/// Which of the worker's two diagnostic pipes a tail is read from.
+/// Diagnostics are evidence text, never protocol bytes.
 #[derive(Clone, Copy, Debug)]
 pub enum DiagnosticStream {
+    /// The worker's standard output.
     Stdout,
+    /// The worker's standard error.
     Stderr,
 }
 
@@ -203,6 +213,9 @@ pub(crate) fn start(
     limits.outbound_buffer_cap_bytes = limits
         .outbound_buffer_cap_bytes
         .max(yah_plugin_ipc::MAX_FRAME_BYTES + 64);
+    // A zero interval would panic tokio's timer; one millisecond is the
+    // clock's floor.
+    limits.tick_interval_ms = limits.tick_interval_ms.max(1);
     let shared = Arc::new(PumpShared::new(&limits, worker.pgid));
     let (commands, receiver) = mpsc::unbounded_channel();
     let pump = Pump {
@@ -212,6 +225,7 @@ pub(crate) fn start(
         shared: Arc::clone(&shared),
         pending: HashMap::new(),
         outbuf: Vec::new(),
+        output_open: true,
         limits,
     };
     let task = tokio::spawn(pump.run());
@@ -231,6 +245,11 @@ struct Pump {
     /// Encoded frames awaiting the socket. Progress on it is a `select!`
     /// arm, so transport back-pressure never stalls the rest of the pump.
     outbuf: Vec<u8>,
+    /// False once a write failed: the peer shut its read half. That kills
+    /// only the outbound direction — the peer's own goodbye or terminals
+    /// may still be in flight toward the host, so input runs to its
+    /// natural end and undeliverable output is discarded.
+    output_open: bool,
     limits: ProcLimits,
 }
 
@@ -266,10 +285,14 @@ impl Pump {
                         self.end_input(&mut wire_buf).await;
                     }
                 }
-                ready = self.worker.channel.writable(), if !self.outbuf.is_empty() => {
+                ready = self.worker.channel.writable(), if self.output_open && !self.outbuf.is_empty() => {
                     if ready.is_err() || !self.write_ready() {
-                        input_open = false;
-                        self.end_input(&mut wire_buf).await;
+                        // Not an end of input: what the peer already sent —
+                        // its goodbye above all — still decides how this
+                        // session closes. Input ends by goodbye,
+                        // end-of-file, the child's exit, or the clock.
+                        self.output_open = false;
+                        self.outbuf.clear();
                     }
                 }
                 _ = ticker.tick() => {
@@ -328,8 +351,10 @@ impl Pump {
         // reconcile-required, and dropping a waiter silently is not an end
         // this driver permits.
         let _ = self.queue_outbox();
-        let flush_bound = Duration::from_millis(self.limits.kill_grace_ms);
-        let _ = tokio::time::timeout(flush_bound, self.flush_outbuf()).await;
+        if self.output_open {
+            let flush_bound = Duration::from_millis(self.limits.kill_grace_ms);
+            let _ = tokio::time::timeout(flush_bound, self.flush_outbuf()).await;
+        }
         let _ = self.worker.channel.shutdown().await;
         self.end_input(&mut wire_buf).await;
         self.apply_events();
@@ -415,6 +440,13 @@ impl Pump {
     /// exhaustion. The recorded cause survives; the caller ends the
     /// session.
     fn queue_outbox(&mut self) -> bool {
+        if !self.output_open {
+            // Undeliverable: the peer shut its read half. Dropping these is
+            // not silence — the peer cannot observe anything else — and it
+            // keeps a dead write side from tripping the cap.
+            self.session.drain_outbox();
+            return true;
+        }
         for message in self.session.drain_outbox() {
             match serde_json::to_vec(&message) {
                 Ok(bytes) => self.outbuf.extend_from_slice(&frame::encode(&bytes)),
@@ -544,17 +576,28 @@ impl Pump {
         let pgid = self.worker.pgid;
         let graced = tokio::time::timeout(grace, self.worker.child.wait()).await;
         if pgid > 0 {
-            // On the forced path the leader is still unreaped here, so the
-            // group id cannot have been recycled: this hits exactly the
-            // worker's group. After a voluntary exit the id stays reserved
-            // while any group member lives, so the sweep is precise
-            // whenever it has work to do; the remaining race — an empty
-            // group's id recycled within microseconds — is accepted.
+            // SAFETY: kill(2) with a negative pid signals the process
+            // group; no memory is touched. On the forced path the leader
+            // is still unreaped here, so the group id cannot have been
+            // recycled: this hits exactly the worker's group. After a
+            // voluntary exit the id stays reserved while any group member
+            // lives, so the sweep is precise whenever it has work to do;
+            // the remaining race — an empty group's id recycled within
+            // microseconds — is accepted.
             unsafe {
                 libc::kill(-pgid, libc::SIGKILL);
             }
         }
         if graced.is_err() {
+            if pgid > 0 {
+                // The group sweep misses a worker that moved itself out of
+                // its group, and the wait below is unbounded; the leader is
+                // provably unreaped here (its pid still reserved), so it is
+                // also signalled directly.
+                unsafe {
+                    libc::kill(pgid, libc::SIGKILL);
+                }
+            }
             let _ = self.worker.child.wait().await;
         }
     }

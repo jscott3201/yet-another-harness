@@ -28,7 +28,6 @@ mod bootstrap;
 mod driver;
 mod pump;
 
-pub use bootstrap::WorkerCommand;
 pub use driver::{
     PendingCall, ProcActivationPlan, ProcObserver, ProcessPluginDriver, ResourceState,
 };
@@ -53,10 +52,14 @@ pub struct ProcLimits {
     /// measured from spawn. A worker that connects and says nothing is not
     /// an error the protocol can see, so the driver enforces the clock.
     pub handshake_deadline_ms: u64,
-    /// How long an orderly shutdown waits between the host's goodbye and
-    /// `SIGKILL`. The goodbye is a courtesy; the kill is the guarantee.
+    /// How long each bounded phase of an orderly shutdown waits: the
+    /// goodbye flush against a worker that stopped draining, and the
+    /// window between the goodbye and `SIGKILL` — so an exit can spend it
+    /// twice, and the driver's deactivation bound budgets for both. The
+    /// goodbye is a courtesy; the kill is the guarantee.
     pub kill_grace_ms: u64,
-    /// How often session time advances for deadline enforcement.
+    /// How often session time advances for deadline enforcement, in
+    /// milliseconds; zero is clamped to one at start (the clock's floor).
     pub tick_interval_ms: u64,
     /// Bytes of stdout and stderr retained per stream, oldest discarded
     /// first. Diagnostics are evidence, not a channel, so they are bounded

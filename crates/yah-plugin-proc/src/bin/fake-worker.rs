@@ -22,6 +22,9 @@
 //!   only a drained buffer distinguishes from a bare disconnect.
 //! - `late-reply`: read one call, stop reading, answer it a beat later,
 //!   and exit — the terminal that lands while the host is deactivating.
+//! - `goodbye-then-linger`: read one call, shut the read half so the
+//!   host's writes fail first, send a goodbye a beat later, then linger
+//!   until killed — the goodbye a failing write must not eclipse.
 //! - `bootstrap-report`: print the inherited environment variable names
 //!   and open file descriptors to stdout (the diagnostics lane), then
 //!   behave as `conformant`.
@@ -141,6 +144,32 @@ fn run(mode: &str, wire: &mut Wire) -> i32 {
                 Err(error) => {
                     eprintln!("helper did not spawn: {error}");
                     70
+                }
+            }
+        }
+        "goodbye-then-linger" => {
+            if !wire.handshake() {
+                return 70;
+            }
+            // Read one call, then shut this end's READ half — the host's
+            // next write fails while nothing is yet readable, so the
+            // failing write provably comes first — and only then send the
+            // goodbye, lingering until killed. The goodbye must still
+            // decide the close.
+            loop {
+                match wire.next_frame() {
+                    Some(HostMessage::Call(_)) => {
+                        let _ = wire.channel.shutdown(std::net::Shutdown::Read);
+                        std::thread::sleep(std::time::Duration::from_millis(200));
+                        wire.send(&WorkerMessage::Goodbye(Goodbye {
+                            reason: "worker stopping".to_owned(),
+                        }));
+                        loop {
+                            std::thread::sleep(std::time::Duration::from_secs(3600));
+                        }
+                    }
+                    Some(HostMessage::Goodbye(_)) | None => return 0,
+                    Some(_) => {}
                 }
             }
         }
