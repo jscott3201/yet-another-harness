@@ -144,32 +144,30 @@ pub(crate) fn spawn_worker(command: &WorkerCommand) -> io::Result<SpawnedWorker>
     })
 }
 
-/// One above the highest descriptor this process holds open, from the fd
-/// directory; the rlimit ceiling only as a fallback, since a generous
-/// `ulimit -n` would otherwise cost a million wasted probes per spawn.
+/// A bound no live descriptor can sit at or above: the soft file limit.
+///
+/// Deliberately not a snapshot of the open table. Another thread can open
+/// descriptors between a snapshot and the fork — the standard library's
+/// own pipes are briefly inheritable mid-creation on non-Linux hosts —
+/// and a sweep bounded by a stale snapshot misses exactly those; it did,
+/// at a few percent per spawn under concurrent activations. The limit
+/// cannot be outrun. The cost is the fcntl loop's length on non-Linux
+/// hosts with a generous ulimit (on the order of 100 ms per spawn at a
+/// million); Linux never walks the loop, and correctness beats spawn
+/// latency here.
 fn fd_table_ceiling() -> i32 {
-    let listing = if cfg!(target_os = "linux") {
-        "/proc/self/fd"
-    } else {
-        "/dev/fd"
+    let mut limit = libc::rlimit {
+        rlim_cur: 0,
+        rlim_max: 0,
     };
-    if let Ok(entries) = std::fs::read_dir(listing) {
-        // The scan's own directory descriptor appears in the listing, so
-        // the +1 below never undercounts the live table.
-        let mut highest = WORKER_CHANNEL_FD;
-        for entry in entries.flatten() {
-            if let Some(fd) = entry
-                .file_name()
-                .to_str()
-                .and_then(|name| name.parse::<i32>().ok())
-            {
-                highest = highest.max(fd);
-            }
-        }
-        return highest + 1;
+    if unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) } == 0
+        && limit.rlim_cur > 0
+        && limit.rlim_cur < i32::MAX as libc::rlim_t
+    {
+        return limit.rlim_cur as i32;
     }
     match unsafe { libc::sysconf(libc::_SC_OPEN_MAX) } {
-        ceiling if ceiling > 0 => ceiling as i32,
+        ceiling if ceiling > 0 && ceiling < i32::MAX as libc::c_long => ceiling as i32,
         _ => i16::MAX as i32,
     }
 }
@@ -211,13 +209,15 @@ mod tests {
     use super::*;
 
     /// On kernels with `close_range` the ceiling goes unread, so this is
-    /// the one place the scan itself is pinned on every platform: a sweep
-    /// beneath a real hazard is a sweep that missed it.
+    /// the one place it is pinned on every platform: the bound must cover
+    /// any descriptor the process can actually hold — including one armed
+    /// after the ceiling was computed, which is exactly the window a
+    /// table snapshot got wrong.
     #[test]
     fn the_ceiling_covers_an_armed_high_descriptor() {
+        let ceiling = fd_table_ceiling();
         let armed = unsafe { libc::fcntl(0, libc::F_DUPFD, 200) };
         assert!(armed >= 200, "the probe descriptor exists");
-        let ceiling = fd_table_ceiling();
         unsafe {
             libc::close(armed);
         }

@@ -251,7 +251,7 @@ impl Pump {
             self.apply_events();
             if !self.queue_outbox() {
                 input_open = false;
-                self.session.end_of_input();
+                self.end_input(&mut wire_buf).await;
                 self.apply_events();
             }
             if self.session.is_closed() {
@@ -263,13 +263,13 @@ impl Pump {
                 ready = self.worker.channel.readable(), if input_open => {
                     if ready.is_err() || !self.read_ready(&mut wire_buf) {
                         input_open = false;
-                        self.session.end_of_input();
+                        self.end_input(&mut wire_buf).await;
                     }
                 }
                 ready = self.worker.channel.writable(), if !self.outbuf.is_empty() => {
                     if ready.is_err() || !self.write_ready() {
                         input_open = false;
-                        self.session.end_of_input();
+                        self.end_input(&mut wire_buf).await;
                     }
                 }
                 _ = ticker.tick() => {
@@ -280,10 +280,9 @@ impl Pump {
                 // ends input once what it already wrote is drained.
                 _ = self.worker.child.wait(), if !child_exited => {
                     child_exited = true;
-                    self.drain_buffered_input(&mut wire_buf).await;
                     if input_open {
                         input_open = false;
-                        self.session.end_of_input();
+                        self.end_input(&mut wire_buf).await;
                     }
                 }
                 read = read_stream(&mut stdout, &mut out_buf) => {
@@ -332,10 +331,7 @@ impl Pump {
         let flush_bound = Duration::from_millis(self.limits.kill_grace_ms);
         let _ = tokio::time::timeout(flush_bound, self.flush_outbuf()).await;
         let _ = self.worker.channel.shutdown().await;
-        // An answer or goodbye already in the receive buffer is a real
-        // terminal, not a loss; feed it before declaring input over.
-        self.drain_buffered_input(&mut wire_buf).await;
-        self.session.end_of_input();
+        self.end_input(&mut wire_buf).await;
         self.apply_events();
         self.reap().await;
         // The group is dead, so these end at end-of-file promptly; text the
@@ -464,6 +460,15 @@ impl Pump {
             Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => true,
             Err(_) => false,
         }
+    }
+
+    /// Drain what the peer already delivered, then declare input over.
+    /// Every termination routes through here — the write arm's failure and
+    /// the child's exit as much as the read arm's end-of-file — so no
+    /// `select!` arm ordering can lose a buffered terminal.
+    async fn end_input(&mut self, buffer: &mut [u8]) {
+        self.drain_buffered_input(buffer).await;
+        self.session.end_of_input();
     }
 
     /// Feed what the peer already wrote before input is declared over — a

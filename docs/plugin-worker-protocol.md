@@ -2,8 +2,9 @@
 
 This page documents protocol v1 between the YAH host and a supervised worker
 process, implemented in `crates/yah-plugin-ipc`. It is the wire contract the
-future Node and CPython process drivers and their worker SDKs must satisfy,
-specified and fixture-pinned before either worker runtime exists.
+supervised process driver serves and the future Node and CPython worker SDKs
+must satisfy, specified and fixture-pinned before either worker runtime
+exists.
 
 The crate is sans-io: `frame` turns bytes into frames incrementally, and
 `session` is a pure state machine with an injected millisecond clock. Nothing
