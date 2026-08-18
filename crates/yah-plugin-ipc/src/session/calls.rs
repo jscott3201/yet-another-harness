@@ -241,6 +241,20 @@ impl HostSession {
             // worker's answer was in flight. A terminal for an id this
             // session never minted is forgery.
             if self.retired_host_calls.contains(&call_id) {
+                // Tolerated, but an offer inside it still spends its
+                // handle id: the worker minted the id whether or not the
+                // settled call could hear about it.
+                if let Outcome::Spilled { artifact } = &reply.outcome
+                    && self
+                        .offered_worker_handles
+                        .insert(artifact.handle, HandleKind::Artifact)
+                        .is_some()
+                {
+                    self.fatal(
+                        WireErrorKind::UnknownHandle,
+                        "spilled offer reuses a worker handle id",
+                    );
+                }
                 return;
             }
             self.fatal(WireErrorKind::UnknownCall, "reply to unknown host call");
@@ -266,7 +280,11 @@ impl HostSession {
             // Worker handle ids are never reused, live or spent: each
             // offer mints a fresh id, so a repeat is the same correlation
             // break a duplicate call id is.
-            if !self.offered_worker_handles.insert(artifact.handle) {
+            if self
+                .offered_worker_handles
+                .insert(artifact.handle, HandleKind::Artifact)
+                .is_some()
+            {
                 self.fatal(
                     WireErrorKind::UnknownHandle,
                     "spilled offer reuses a worker handle id",

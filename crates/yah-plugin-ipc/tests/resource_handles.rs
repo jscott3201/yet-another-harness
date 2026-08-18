@@ -510,6 +510,63 @@ fn pending_releases_are_bounded_by_the_handle_ceiling() {
 }
 
 #[test]
+fn releasing_an_offered_id_under_the_wrong_kind_is_refused() {
+    let mut session = peer::negotiated();
+    worker_offer(&mut session, HandleId(7));
+    // The offer carried the kind; a release naming another would be the
+    // wrong-kind desync a strict worker fatals on. Refused host-side.
+    assert_eq!(
+        session.release_worker_handle(HandleId(7), HandleKind::Capability),
+        Err(AppError::InvalidField("release with the wrong kind"))
+    );
+    assert!(session.drain_outbox().is_empty());
+}
+
+#[test]
+fn a_late_offer_still_spends_its_handle_id() {
+    let mut session = peer::negotiated();
+    let expired = session
+        .call_worker("guest.slow", json!(null), Some(10), false)
+        .expect("call goes out");
+    session.tick(50);
+    session.drain_outbox();
+    session.drain_events();
+    // The reply lost the race with the deadline; tolerated. But the offer
+    // inside it minted a handle id, and minted is minted.
+    session.feed(&wire(&WorkerMessage::Reply(Reply {
+        call_id: expired,
+        outcome: Outcome::Spilled {
+            artifact: ArtifactOffer {
+                handle: HandleId(7),
+                bytes: 9,
+                media_type: "text/plain".to_owned(),
+                digest_blake3: "ab".repeat(32),
+            },
+        },
+    })));
+    assert!(
+        !session.is_closed(),
+        "the late terminal itself is tolerated"
+    );
+    let id = session
+        .call_worker("guest.big", json!(null), None, false)
+        .expect("call goes out");
+    session.drain_outbox();
+    session.feed(&wire(&WorkerMessage::Reply(Reply {
+        call_id: id,
+        outcome: Outcome::Spilled {
+            artifact: ArtifactOffer {
+                handle: HandleId(7),
+                bytes: 9,
+                media_type: "text/plain".to_owned(),
+                digest_blake3: "ab".repeat(32),
+            },
+        },
+    })));
+    assert_fatal(&mut session, WireErrorKind::UnknownHandle);
+}
+
+#[test]
 fn releasing_an_id_the_worker_never_offered_is_refused() {
     let mut session = peer::negotiated();
     // Nothing was offered under this id — perhaps it is host-minted, the

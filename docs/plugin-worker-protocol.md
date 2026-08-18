@@ -10,8 +10,9 @@ The crate is sans-io: `frame` turns bytes into frames incrementally, and
 in it can block, sleep, spawn, or open a socket. The process driver that
 supplies the transport, the spawned child, the bootstrap file descriptor, and
 the kill path is not implemented; neither is any worker-side SDK.
-One hundred eleven deterministic fixtures in `crates/yah-plugin-ipc/tests/`
-drive the host side of every rule below with a scripted byte-level peer.
+One hundred thirteen deterministic fixtures in
+`crates/yah-plugin-ipc/tests/` drive the host side of every rule below
+with a scripted byte-level peer.
 
 ## Framing and strict JSON
 
@@ -154,14 +155,15 @@ continues: an oversize call payload, a ceiling, and everything a served
 unknown, released, or the wrong kind, a read outside the offer — because
 those arrive inside a call the session can answer. A fatal fault poisons
 the session: framing violations, strict-JSON and field-bound violations, id
-reuse, credit overdraw, handle desyncs, an oversize inline result or
-stream item — the sender had the spill path or the byte bound and violated
-it instead — and the stream-order family: data before open or after the
-last item, an open on a call that did not ask to stream, a sequence gap, a
-second open, a credit value of zero or past the ceiling at open or at
-widening, a drop count going backwards, a zero-byte spilled offer, a
-spilled offer reusing a handle id. A kind can sit on both sides of the
-split: `invalid-frame` and `unknown-handle` are fatal at frame admission
+reuse, credit overdraw, handle desyncs — a spilled offer reusing a handle
+id among them — an oversize inline result or stream item, where the
+sender had the spill path or the byte bound and violated it instead, and
+the stream-order family: data before open or after the last item, an open
+on a call that did not ask to stream, a sequence gap, a second open, a
+credit value of zero or past the ceiling at open or at widening, a drop
+count going backwards, a zero-byte spilled offer. A kind can sit on both
+sides of the split:
+`invalid-frame` and `unknown-handle` are fatal at frame admission
 and refusable inside a served read, `payload-too-large` is refusable on a
 call payload and fatal on a result or stream item, and
 `resource-exhausted` is refusable at a ceiling and fatal on a credit

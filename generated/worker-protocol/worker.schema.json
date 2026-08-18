@@ -215,7 +215,7 @@
         },
         {
           "const": "invalid-frame",
-          "description": "The frame failed admission — bad JSON, duplicate member names,\nnumbers outside the I-JSON safe range, an unknown tag or enum\nmember, or a field violating its bound — or an admitted frame broke\nstream order or shape: data before open, a sequence gap, a drop\ncount going backwards, a second open, a zero-byte spilled offer.\nFatal everywhere except one place: a malformed payload on a served\n`artifact.read` call is refused on that call alone.",
+          "description": "The frame failed admission — bad JSON, duplicate member names,\nnumbers outside the I-JSON safe range, an unknown tag or enum\nmember, or a field violating its bound — or an admitted frame broke\nstream order or shape: data before open or after the last item, an\nopen on a call that did not ask to stream, a second open, a\nsequence gap, a credit value of zero or past the ceiling, a drop\ncount going backwards, a zero-byte spilled offer. Fatal everywhere\nexcept one place: a malformed payload on a served `artifact.read`\ncall is refused on that call alone.",
           "type": "string"
         },
         {
@@ -260,7 +260,7 @@
         },
         {
           "const": "unknown-handle",
-          "description": "A handle desync: a release, read, or use named a handle the owner\ndoes not hold, a release or release-ack named the wrong kind, an\nack answered a release that was never sent, or an offer reused a\nspent handle id.",
+          "description": "A handle desync: a release, read, or use named a handle the owner\ndoes not hold, a release or release-ack named the wrong kind, an\nack answered a release that was never sent, or an offer reused a\nhandle id — spent or still live, ids are minted fresh forever.",
           "type": "string"
         },
         {

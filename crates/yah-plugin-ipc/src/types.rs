@@ -395,10 +395,12 @@ pub enum WireErrorKind {
     /// The frame failed admission — bad JSON, duplicate member names,
     /// numbers outside the I-JSON safe range, an unknown tag or enum
     /// member, or a field violating its bound — or an admitted frame broke
-    /// stream order or shape: data before open, a sequence gap, a drop
-    /// count going backwards, a second open, a zero-byte spilled offer.
-    /// Fatal everywhere except one place: a malformed payload on a served
-    /// `artifact.read` call is refused on that call alone.
+    /// stream order or shape: data before open or after the last item, an
+    /// open on a call that did not ask to stream, a second open, a
+    /// sequence gap, a credit value of zero or past the ceiling, a drop
+    /// count going backwards, a zero-byte spilled offer. Fatal everywhere
+    /// except one place: a malformed payload on a served `artifact.read`
+    /// call is refused on that call alone.
     InvalidFrame,
     /// The length prefix exceeded the frame class's byte bound.
     FrameTooLarge,
@@ -431,7 +433,7 @@ pub enum WireErrorKind {
     /// A handle desync: a release, read, or use named a handle the owner
     /// does not hold, a release or release-ack named the wrong kind, an
     /// ack answered a release that was never sent, or an offer reused a
-    /// spent handle id.
+    /// handle id — spent or still live, ids are minted fresh forever.
     UnknownHandle,
     /// An artifact pull-read went outside the offered byte range, over
     /// the per-read bound, or asked for zero bytes.

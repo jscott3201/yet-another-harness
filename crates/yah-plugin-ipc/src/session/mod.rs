@@ -273,10 +273,11 @@ pub struct HostSession {
     /// Worker-held handle ids the worker confirmed released; spent forever,
     /// so a second release for one is the application's bug to hear about.
     retired_worker_handles: BTreeSet<HandleId>,
-    /// Every handle id the worker has ever offered. Membership gates the
-    /// host's own releases, and a repeat offer is the id-reuse desync the
-    /// never-reuse law promises against.
-    offered_worker_handles: BTreeSet<HandleId>,
+    /// Every handle id the worker has ever offered, with the kind its
+    /// offer carried. Membership and kind gate the host's own releases,
+    /// and a repeat offer is the id-reuse desync the never-reuse law
+    /// promises against.
+    offered_worker_handles: BTreeMap<HandleId, HandleKind>,
     outbox: Vec<HostMessage>,
     events: Vec<SessionEvent>,
 }
@@ -300,7 +301,7 @@ impl HostSession {
             live_handle_count: 0,
             pending_worker_releases: BTreeMap::new(),
             retired_worker_handles: BTreeSet::new(),
-            offered_worker_handles: BTreeSet::new(),
+            offered_worker_handles: BTreeMap::new(),
             outbox: Vec::new(),
             events: Vec::new(),
         }

@@ -235,11 +235,16 @@ impl HostSession {
         if !(1..=MAX_WIRE_ID).contains(&handle.0) {
             return Err(AppError::InvalidField("handle id outside wire range"));
         }
-        // Only what the worker offered is the worker's to be asked for. A
-        // release for any other id — a host-minted handle, a typo — would
-        // arm a desync against a worker that did nothing wrong.
-        if !self.offered_worker_handles.contains(&handle) {
-            return Err(AppError::UnknownWorkerHandle);
+        // Only what the worker offered is the worker's to be asked for,
+        // and only under the kind the offer carried. A release for any
+        // other id — a host-minted handle, a typo — or the wrong kind
+        // would arm a desync against a worker that did nothing wrong.
+        match self.offered_worker_handles.get(&handle) {
+            None => return Err(AppError::UnknownWorkerHandle),
+            Some(offered) if *offered != kind => {
+                return Err(AppError::InvalidField("release with the wrong kind"));
+            }
+            Some(_) => {}
         }
         if self.retired_worker_handles.contains(&handle) {
             return Err(AppError::AlreadyReleased);
