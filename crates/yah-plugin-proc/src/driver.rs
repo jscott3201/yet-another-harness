@@ -2,10 +2,14 @@
 //!
 //! `prepare` is inert bookkeeping; `start` spawns the worker with its fd-3
 //! channel, runs the pump, and resolves when negotiation completes. Health
-//! reads the pump's snapshot without blocking. Deactivation is the only
-//! shutdown authority: goodbye, grace, `SIGKILL`, reap — and because the
-//! activation core owns the child and pump behind an `Arc`, a start future
-//! the host drops mid-poll takes nothing with it that deactivation needs.
+//! reads the pump's snapshot without blocking. Deactivation is the orderly
+//! shutdown authority — goodbye, grace, `SIGKILL` to the worker's group,
+//! reap — and because the activation core owns the child and pump behind an
+//! `Arc`, a start future the host drops mid-poll takes nothing with it that
+//! deactivation needs. An activation abandoned without deactivation still
+//! reclaims its worker: the pump treats its last command sender dropping as
+//! the signal, which is why the observation map below never holds one
+//! strongly.
 //!
 //! A worker that dies is not restarted here. The protocol has no resume, so
 //! the death poisons this activation, health reports it, and recovery is a
@@ -98,6 +102,16 @@ impl ProcActivationPlan {
     pub const fn worker(mode: &'static str) -> Self {
         Self {
             mode,
+            handshake: HandshakeBehavior::Deadline,
+            deactivate: DeactivateBehavior::Release,
+        }
+    }
+
+    /// A mute worker under the handshake clock: start must fail when the
+    /// deadline passes, not pend the way [`Self::pending_start`] arranges.
+    pub const fn handshake_timeout() -> Self {
+        Self {
+            mode: "silent",
             handshake: HandshakeBehavior::Deadline,
             deactivate: DeactivateBehavior::Release,
         }
@@ -294,12 +308,16 @@ impl ActivationCore {
             });
             // The pump's own exit path is goodbye → grace → SIGKILL → wait,
             // so this bound only trips if the pump itself is stuck; then
-            // aborting it drops the child, whose kill-on-drop reaps.
-            let abort = handle.task.abort_handle();
+            // aborting it drops the child, whose kill-on-drop reaps. The
+            // aborted task is still awaited: nothing is Released while the
+            // kill has yet to be sent.
+            let mut task = handle.task;
             let bound = Duration::from_millis(self.limits.kill_grace_ms + 2_000);
-            if tokio::time::timeout(bound, handle.task).await.is_err() {
-                abort.abort();
+            if tokio::time::timeout(bound, &mut task).await.is_err() {
+                task.abort();
+                let _ = task.await;
             }
+            self.observation.retire();
             self.observation
                 .resource
                 .store(ResourceState::Released as u8, Ordering::Release);
@@ -384,15 +402,27 @@ impl PreparedDriverActivation for PreparedProcActivation {
 struct ActivationObservation {
     resource: AtomicU8,
     deactivation_calls: AtomicUsize,
-    /// Set once at spawn. `PumpShared` is snapshot state and the sender is
-    /// a handle; neither keeps the child or its buffers alive.
-    link: Mutex<Option<ActivationLink>>,
+    link: Mutex<ObservationLink>,
+}
+
+/// What the observation holds about its pump, by lifecycle stage.
+///
+/// The live link's command sender is deliberately weak: the pump treats
+/// "every strong sender gone" as a driver dropped without deactivation and
+/// self-reaps, and a strong sender parked in the driver's observation map
+/// would keep an abandoned activation's worker alive forever. Retirement
+/// keeps the terminal facts a test reads after release and drops the pump
+/// state — its buffers do not outlive the activation.
+enum ObservationLink {
+    Idle,
+    Live(ActivationLink),
+    Retired { close_summary: Option<String> },
 }
 
 #[derive(Clone)]
 struct ActivationLink {
     shared: Arc<PumpShared>,
-    commands: mpsc::UnboundedSender<PumpCommand>,
+    commands: mpsc::WeakUnboundedSender<PumpCommand>,
 }
 
 impl ActivationObservation {
@@ -400,7 +430,7 @@ impl ActivationObservation {
         Self {
             resource: AtomicU8::new(ResourceState::NotAcquired as u8),
             deactivation_calls: AtomicUsize::new(0),
-            link: Mutex::new(None),
+            link: Mutex::new(ObservationLink::Idle),
         }
     }
 
@@ -408,21 +438,51 @@ impl ActivationObservation {
         *self
             .link
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(ActivationLink {
-            shared: Arc::clone(&handle.shared),
-            commands: handle.commands.clone(),
-        });
+            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+            ObservationLink::Live(ActivationLink {
+                shared: Arc::clone(&handle.shared),
+                commands: handle.commands.downgrade(),
+            });
+    }
+
+    /// Swap the live link for its terminal facts once the pump has ended.
+    fn retire(&self) {
+        let mut held = self
+            .link
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let ObservationLink::Live(link) = &*held {
+            *held = ObservationLink::Retired {
+                close_summary: link.shared.close_summary(),
+            };
+        }
     }
 
     fn link(&self) -> Option<ActivationLink> {
-        self.link
+        match &*self
+            .link
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone()
+        {
+            ObservationLink::Live(link) => Some(link.clone()),
+            _ => None,
+        }
     }
 
     fn pump_shared(&self) -> Option<Arc<PumpShared>> {
         self.link().map(|link| link.shared)
+    }
+
+    fn close_summary(&self) -> Option<String> {
+        match &*self
+            .link
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+        {
+            ObservationLink::Idle => None,
+            ObservationLink::Live(link) => link.shared.close_summary(),
+            ObservationLink::Retired { close_summary } => close_summary.clone(),
+        }
     }
 
     fn resource_state(&self) -> Result<ResourceState, String> {
@@ -468,9 +528,16 @@ impl ProcObserver {
             .map_or(0, |state| state.deactivation_calls.load(Ordering::Acquire))
     }
 
-    /// Why the session ended, once it has.
+    /// Why the session ended, once it has; survives the activation's
+    /// release as a retained terminal fact.
     pub fn close_summary(&self, id: &PluginActivationId) -> Option<String> {
-        self.observation(id)?.pump_shared()?.close_summary()
+        self.observation(id)?.close_summary()
+    }
+
+    /// The worker's pid while the activation is live, so a test can prove
+    /// the process itself is gone afterward.
+    pub fn worker_pid(&self, id: &PluginActivationId) -> Option<i32> {
+        Some(self.observation(id)?.pump_shared()?.worker_pid())
     }
 
     /// The retained tail of one diagnostic stream.
@@ -498,9 +565,13 @@ impl ProcObserver {
             .observation(id)
             .and_then(|state| state.link())
             .ok_or_else(|| format!("no live worker for activation {id}"))?;
+        let commands = link
+            .commands
+            .upgrade()
+            .ok_or_else(|| "the worker pump has ended".to_owned())?;
         let (opened_sender, opened) = oneshot::channel();
         let (settled_sender, settled) = oneshot::channel();
-        link.commands
+        commands
             .send(PumpCommand::Call {
                 method: method.to_owned(),
                 payload,
@@ -527,8 +598,12 @@ impl ProcObserver {
             .observation(id)
             .and_then(|state| state.link())
             .ok_or_else(|| format!("no live worker for activation {id}"))?;
+        let commands = link
+            .commands
+            .upgrade()
+            .ok_or_else(|| "the worker pump has ended".to_owned())?;
         let (done_sender, done) = oneshot::channel();
-        link.commands
+        commands
             .send(PumpCommand::Cancel {
                 call_id,
                 target,

@@ -3,10 +3,15 @@
 //!
 //! The session is a pure state machine; the pump feeds it socket bytes,
 //! writes out what it queues, advances its clock, and lifts its events into
-//! shapes the driver can wait on without touching the wire. Everything the
+//! shapes the driver can wait on without touching the wire. Every kind of
+//! progress is its own `select!` arm — reads, writes, ticks, commands, and
+//! the child's own exit — so a worker that stops draining its socket stalls
+//! only its bytes, never the clock or the shutdown path, and a worker that
+//! dies is seen even when a descendant keeps its socket open. Everything the
 //! pump owns — the socket, the child, the pending-call table — dies with the
 //! pump, and the pump's exit path always ends in a reaped child: goodbye
-//! first, `SIGKILL` after the grace window, `wait` regardless.
+//! first, `SIGKILL` to the worker's whole process group after the grace
+//! window, `wait` regardless.
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::{
@@ -69,6 +74,8 @@ pub(crate) struct PumpShared {
     /// discarded first. Diagnostics are evidence, not a channel.
     diagnostics: Mutex<Diagnostics>,
     diagnostics_cap: usize,
+    /// The worker's pid, held so tests can prove the process is gone.
+    worker_pid: i32,
 }
 
 #[derive(Default)]
@@ -78,14 +85,19 @@ struct Diagnostics {
 }
 
 impl PumpShared {
-    fn new(limits: &ProcLimits) -> Self {
+    fn new(limits: &ProcLimits, worker_pid: i32) -> Self {
         Self {
             phase: AtomicU8::new(PHASE_HANDSHAKE),
             close_summary: Mutex::new(None),
             changed: Notify::new(),
             diagnostics: Mutex::new(Diagnostics::default()),
             diagnostics_cap: limits.diagnostics_cap_bytes,
+            worker_pid,
         }
+    }
+
+    pub fn worker_pid(&self) -> i32 {
+        self.worker_pid
     }
 
     pub fn is_negotiated(&self) -> bool {
@@ -182,7 +194,7 @@ pub(crate) fn start(
     config: SessionConfig,
     limits: ProcLimits,
 ) -> PumpHandle {
-    let shared = Arc::new(PumpShared::new(&limits));
+    let shared = Arc::new(PumpShared::new(&limits, worker.pgid));
     let (commands, receiver) = mpsc::unbounded_channel();
     let pump = Pump {
         session: HostSession::new(config),
@@ -190,6 +202,7 @@ pub(crate) fn start(
         commands: receiver,
         shared: Arc::clone(&shared),
         pending: HashMap::new(),
+        outbuf: Vec::new(),
         limits,
     };
     let task = tokio::spawn(pump.run());
@@ -206,6 +219,9 @@ struct Pump {
     commands: mpsc::UnboundedReceiver<PumpCommand>,
     shared: Arc<PumpShared>,
     pending: HashMap<CallId, oneshot::Sender<CallEnd>>,
+    /// Encoded frames awaiting the socket. Progress on it is a `select!`
+    /// arm, so transport back-pressure never stalls the rest of the pump.
+    outbuf: Vec<u8>,
     limits: ProcLimits,
 }
 
@@ -220,36 +236,46 @@ impl Pump {
         let mut out_buf = [0u8; 4 * 1024];
         let mut err_buf = [0u8; 4 * 1024];
         let mut input_open = true;
-        let mut goodbye_reason: Option<String> = None;
+        let mut child_exited = false;
 
         loop {
             self.apply_events();
-            if !self.write_outbox().await {
+            if !self.queue_outbox() {
                 input_open = false;
                 self.session.end_of_input();
                 self.apply_events();
             }
             if self.session.is_closed() {
-                // The session's own goodbye (on a fatal) is already in the
-                // bytes written above; what remains is process supervision.
-                break;
-            }
-            if let Some(reason) = goodbye_reason.take() {
-                self.say_goodbye(&reason).await;
+                // The session's own goodbye (on a fatal) is already queued;
+                // what remains is the shared exit path below.
                 break;
             }
             tokio::select! {
-                read = self.worker.channel.read(&mut wire_buf), if input_open => {
-                    match read {
-                        Ok(0) | Err(_) => {
-                            input_open = false;
-                            self.session.end_of_input();
-                        }
-                        Ok(count) => self.session.feed(&wire_buf[..count]),
+                ready = self.worker.channel.readable(), if input_open => {
+                    if ready.is_err() || !self.read_ready(&mut wire_buf) {
+                        input_open = false;
+                        self.session.end_of_input();
+                    }
+                }
+                ready = self.worker.channel.writable(), if !self.outbuf.is_empty() => {
+                    if ready.is_err() || !self.write_ready() {
+                        input_open = false;
+                        self.session.end_of_input();
                     }
                 }
                 _ = ticker.tick() => {
                     self.session.tick(started.elapsed().as_millis() as u64);
+                }
+                // The process is the session peer even though a descendant
+                // it spawned may hold the socket open past its death: exit
+                // ends input once what it already wrote is drained.
+                _ = self.worker.child.wait(), if !child_exited => {
+                    child_exited = true;
+                    self.drain_dead_peer(&mut wire_buf);
+                    if input_open {
+                        input_open = false;
+                        self.session.end_of_input();
+                    }
                 }
                 read = read_stream(&mut stdout, &mut out_buf) => {
                     self.on_diagnostics(DiagnosticStream::Stdout, &mut stdout, &out_buf, read);
@@ -273,25 +299,38 @@ impl Pump {
                         let _ = done.send(self.session.cancel(call_id, target));
                     }
                     Some(PumpCommand::Shutdown { reason }) => {
-                        goodbye_reason = Some(reason);
+                        self.begin_goodbye(&reason);
+                        break;
                     }
                     // Every command sender is gone: the driver was dropped
                     // without deactivation. The kill path is the safety net.
                     None => {
-                        goodbye_reason = Some("driver dropped".to_owned());
+                        self.begin_goodbye("driver dropped");
+                        break;
                     }
                 },
             }
         }
 
+        // The shared exit path. Flush what is queued — bounded, because the
+        // kill below is the guarantee and a worker that stopped draining
+        // must not stall it — then half-close so the worker sees
+        // end-of-input, then settle whatever the worker may still hold: the
+        // session marks handed-over work outcome-unknown and
+        // reconcile-required, and dropping a waiter silently is not an end
+        // this driver permits.
+        let _ = self.queue_outbox();
+        let flush_bound = Duration::from_millis(self.limits.kill_grace_ms);
+        let _ = tokio::time::timeout(flush_bound, self.flush_outbuf()).await;
+        let _ = self.worker.channel.shutdown().await;
+        self.session.end_of_input();
+        self.apply_events();
         self.shared.set_closed(
             self.shared
                 .close_summary()
                 .unwrap_or_else(|| "worker session ended".to_owned()),
         );
         self.reap().await;
-        // Whatever is still waiting learns the pump is gone by its sender
-        // dropping here; the session already settled real in-flight work.
     }
 
     /// Lift session facts into driver-visible state.
@@ -343,43 +382,114 @@ impl Pump {
         }
     }
 
-    /// Write every queued frame. Returns false when the transport is gone.
-    async fn write_outbox(&mut self) -> bool {
+    /// Encode every session-queued frame into the outbound buffer. False on
+    /// a frame that does not serialize — unreachable while the session only
+    /// queues values it admitted — which the caller treats as transport
+    /// loss rather than running a session whose peer missed a frame.
+    fn queue_outbox(&mut self) -> bool {
+        let mut intact = true;
         for message in self.session.drain_outbox() {
-            let bytes = match serde_json::to_vec(&message) {
-                Ok(bytes) => bytes,
-                Err(_) => return false,
-            };
-            let framed = frame::encode(&bytes);
-            if self.worker.channel.write_all(&framed).await.is_err() {
-                return false;
+            match serde_json::to_vec(&message) {
+                Ok(bytes) => self.outbuf.extend_from_slice(&frame::encode(&bytes)),
+                Err(_) => intact = false,
             }
         }
-        true
+        intact
     }
 
-    /// The orderly half of shutdown: a goodbye frame, then a half-close so
-    /// the worker sees end-of-input. The kill in [`Self::reap`] is what
-    /// makes it bounded.
-    async fn say_goodbye(&mut self, reason: &str) {
+    /// Feed one readable burst; false when input reached its end.
+    fn read_ready(&mut self, buffer: &mut [u8]) -> bool {
+        match self.worker.channel.try_read(buffer) {
+            Ok(0) => false,
+            Ok(count) => {
+                self.session.feed(&buffer[..count]);
+                true
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => true,
+            Err(_) => false,
+        }
+    }
+
+    /// Advance the queued outbound bytes; false when the transport is gone.
+    fn write_ready(&mut self) -> bool {
+        match self.worker.channel.try_write(&self.outbuf) {
+            Ok(0) => false,
+            Ok(count) => {
+                self.outbuf.drain(..count);
+                true
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => true,
+            Err(_) => false,
+        }
+    }
+
+    /// Feed what a dead worker already wrote — its buffered goodbye must
+    /// not be mistaken for a bare disconnect. Bounded: the dead peer's
+    /// buffer is finite, and a descendant still writing on the inherited
+    /// fd is not a session peer this driver will listen to.
+    fn drain_dead_peer(&mut self, buffer: &mut [u8]) {
+        let mut budget: usize = 1024 * 1024;
+        while budget > 0 && !self.session.is_closed() {
+            match self.worker.channel.try_read(buffer) {
+                Ok(0) | Err(_) => return,
+                Ok(count) => {
+                    budget = budget.saturating_sub(count);
+                    self.session.feed(&buffer[..count]);
+                }
+            }
+        }
+    }
+
+    /// Record the host's goodbye as the close cause — before the
+    /// settlements that follow can claim it — and queue its frame.
+    fn begin_goodbye(&mut self, reason: &str) {
+        self.shared.set_closed(format!("host goodbye: {reason}"));
         let goodbye = HostMessage::Goodbye(Goodbye {
             reason: reason.to_owned(),
         });
         if let Ok(bytes) = serde_json::to_vec(&goodbye) {
-            let _ = self.worker.channel.write_all(&frame::encode(&bytes)).await;
+            self.outbuf.extend_from_slice(&frame::encode(&bytes));
         }
-        let _ = self.worker.channel.shutdown().await;
-        self.shared.set_closed(format!("host goodbye: {reason}"));
+    }
+
+    /// Write the queued bytes until empty or the transport is gone. Callers
+    /// bound it: this must never be the reason shutdown hangs.
+    async fn flush_outbuf(&mut self) {
+        while !self.outbuf.is_empty() {
+            if self.worker.channel.writable().await.is_err() {
+                return;
+            }
+            match self.worker.channel.try_write(&self.outbuf) {
+                Ok(0) => return,
+                Ok(count) => {
+                    self.outbuf.drain(..count);
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
+                Err(_) => return,
+            }
+        }
     }
 
     /// Grace, kill, reap — in that order, unconditionally ending in `wait`.
+    /// The kill signals the worker's whole process group, so helpers the
+    /// worker spawned die with it instead of orphaning with the host's
+    /// ambient authority.
     async fn reap(&mut self) {
         let grace = Duration::from_millis(self.limits.kill_grace_ms);
-        if tokio::time::timeout(grace, self.worker.child.wait())
-            .await
-            .is_err()
-        {
-            let _ = self.worker.child.start_kill();
+        let pgid = self.worker.pgid;
+        let graced = tokio::time::timeout(grace, self.worker.child.wait()).await;
+        if pgid > 0 {
+            // On the forced path the leader is still unreaped here, so the
+            // group id cannot have been recycled: this hits exactly the
+            // worker's group. After a voluntary exit the id stays reserved
+            // while any group member lives, so the sweep is precise
+            // whenever it has work to do; the remaining race — an empty
+            // group's id recycled within microseconds — is accepted.
+            unsafe {
+                libc::kill(-pgid, libc::SIGKILL);
+            }
+        }
+        if graced.is_err() {
             let _ = self.worker.child.wait().await;
         }
     }

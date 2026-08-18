@@ -275,12 +275,23 @@ Stdout and stderr stay what they look like: bounded diagnostic text,
 retained tail-first, never protocol bytes.
 
 One activation is one process is one session. A worker that dies poisons
-its activation — there is no resume — health reports why, deactivation
-reclaims the process (goodbye, a grace window, `SIGKILL`, reap,
-unconditionally in that order), and recovery is a fresh activation with a
-fresh process. The driver passes the host's five portable lifecycle
-conformance cases, and a scripted fake worker pins restart, disconnect
-with in-flight work, cancellation, and deadline behaviour end to end. The
+its activation — there is no resume — health reports why, and the driver
+watches the process itself, not just its socket, so the death is seen
+even when a descendant the worker spawned keeps the channel open.
+Deactivation reclaims the process (goodbye, a grace window, `SIGKILL` to
+the worker's whole process group, reap, unconditionally in that order)
+and settles work the worker still holds as outcome-unknown and
+reconcile-required rather than dropping its waiter. Recovery is a fresh
+activation with a fresh process. The pump's reads, writes, deadline
+ticks, and child-exit watch are independent arms of one event loop, so a
+worker that stops draining its socket stalls only its own bytes, never
+the clock or the shutdown; and an activation its composition abandons
+without deactivating reclaims its own worker once the last driver handle
+drops. The driver passes the host's five portable lifecycle conformance
+cases against real child processes, and a scripted fake worker pins
+restart, disconnect with in-flight work, cancellation, deadline expiry
+with an observed late answer, the handshake clock, the forced kill path,
+and the bootstrap's environment and descriptor table end to end. The
 fake worker is a test fixture, not an SDK.
 
 The pathname-socket lane with kernel-attested peer credentials

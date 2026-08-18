@@ -11,8 +11,15 @@
 //! - `exit-mid-call`: take one call and exit without answering it.
 //! - `cancel-ack`: hold each call until its cancel arrives, then answer
 //!   with the cancelled outcome.
-//! - `env-report`: print the inherited environment variable names to
-//!   stdout (the diagnostics lane), then behave as `conformant`.
+//! - `deaf`: complete the handshake, then never touch the channel again —
+//!   the worker that ignores back-pressure, goodbyes, and end-of-input
+//!   alike, so only `SIGKILL` ends it.
+//! - `spawn-helper`: complete the handshake, spawn a sleeping helper that
+//!   inherits the channel fd, and exit — the death only the process, not
+//!   the socket, can reveal.
+//! - `bootstrap-report`: print the inherited environment variable names
+//!   and open file descriptors to stdout (the diagnostics lane), then
+//!   behave as `conformant`.
 //!
 //! This is a test fixture, not a worker SDK: it implements exactly what its
 //! scripts need and nothing else.
@@ -98,12 +105,42 @@ fn run(mode: &str, wire: &mut Wire) -> i32 {
                 }
             }
         }
-        "env-report" => {
+        "deaf" => {
+            if !wire.handshake() {
+                return 70;
+            }
+            // Not even an EOF read: this worker's only exit is the kill.
+            loop {
+                std::thread::sleep(std::time::Duration::from_secs(3600));
+            }
+        }
+        "spawn-helper" => {
+            if !wire.handshake() {
+                return 70;
+            }
+            // The helper inherits fd 3 (and this process's group), so the
+            // host's socket never reaches end-of-file on this exit.
+            match std::process::Command::new("/bin/sleep").arg("30").spawn() {
+                Ok(_) => 0,
+                Err(error) => {
+                    eprintln!("helper did not spawn: {error}");
+                    70
+                }
+            }
+        }
+        "bootstrap-report" => {
             let mut names: Vec<String> = std::env::vars_os()
                 .map(|(name, _)| name.to_string_lossy().into_owned())
                 .collect();
             names.sort();
             println!("env:{}", names.join(","));
+            // Probe by fcntl rather than listing /dev/fd, which would open
+            // a descriptor of its own and report it.
+            let fds: Vec<String> = (0..64)
+                .filter(|&fd| unsafe { libc::fcntl(fd, libc::F_GETFD) } != -1)
+                .map(|fd| fd.to_string())
+                .collect();
+            println!("fds:{}", fds.join(","));
             let _ = std::io::stdout().flush();
             serve_conformant(wire)
         }

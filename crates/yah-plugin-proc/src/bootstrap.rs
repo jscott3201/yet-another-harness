@@ -8,6 +8,10 @@
 //! secret in the environment, and the environment itself is cleared to an
 //! allowlist so the worker starts from what the host chose, not what the
 //! host happened to inherit.
+//!
+//! The worker is also made its own process-group leader between fork and
+//! exec, so the driver's kill path can sweep everything the worker spawned
+//! rather than only the worker itself.
 
 use std::ffi::OsString;
 use std::io;
@@ -46,6 +50,10 @@ impl WorkerCommand {
 pub(crate) struct SpawnedWorker {
     pub child: tokio::process::Child,
     pub channel: tokio::net::UnixStream,
+    /// The child's pid, which is also its process-group id: `pre_exec` makes
+    /// the worker a group leader so the kill path can sweep anything the
+    /// worker spawned, not just the worker.
+    pub pgid: i32,
 }
 
 /// Spawn `command` with the protocol channel on fd 3.
@@ -76,20 +84,31 @@ pub(crate) fn spawn_worker(command: &WorkerCommand) -> io::Result<SpawnedWorker>
     // Ownership of the raw fd passes to this function; the child's copy is
     // made in pre_exec and the parent's original is closed after spawn on
     // every path, success and failure alike.
-    let worker_fd = worker_end.into_raw_fd();
+    let mut worker_fd = worker_end.into_raw_fd();
+    if worker_fd == WORKER_CHANNEL_FD {
+        // `dup2` onto itself would not clear close-on-exec, so the hand-off
+        // below requires source and target to differ. Move the descriptor
+        // out of the way here in the parent, where failure is an ordinary
+        // error, so pre_exec has exactly one path — the one every test runs.
+        let moved = unsafe { libc::fcntl(worker_fd, libc::F_DUPFD_CLOEXEC, WORKER_CHANNEL_FD + 1) };
+        let move_error = (moved == -1).then(io::Error::last_os_error);
+        unsafe {
+            libc::close(worker_fd);
+        }
+        if let Some(error) = move_error {
+            return Err(error);
+        }
+        worker_fd = moved;
+    }
     unsafe {
         spawn.pre_exec(move || {
-            if worker_fd == WORKER_CHANNEL_FD {
-                // `dup2` onto itself would leave close-on-exec set; clear
-                // the flag directly instead.
-                let flags = libc::fcntl(WORKER_CHANNEL_FD, libc::F_GETFD);
-                if flags == -1 {
-                    return Err(io::Error::last_os_error());
-                }
-                if libc::fcntl(WORKER_CHANNEL_FD, libc::F_SETFD, flags & !libc::FD_CLOEXEC) == -1 {
-                    return Err(io::Error::last_os_error());
-                }
-            } else if libc::dup2(worker_fd, WORKER_CHANNEL_FD) == -1 {
+            // Group leadership first: the kill path signals the group, so a
+            // worker's own children die with it instead of orphaning with
+            // the host's ambient authority.
+            if libc::setpgid(0, 0) == -1 {
+                return Err(io::Error::last_os_error());
+            }
+            if libc::dup2(worker_fd, WORKER_CHANNEL_FD) == -1 {
                 return Err(io::Error::last_os_error());
             }
             Ok(())
@@ -102,5 +121,13 @@ pub(crate) fn spawn_worker(command: &WorkerCommand) -> io::Result<SpawnedWorker>
         libc::close(worker_fd);
     }
     let child = spawned?;
-    Ok(SpawnedWorker { child, channel })
+    let pgid = child.id().map_or_else(
+        || Err(io::Error::other("a freshly spawned child has no pid")),
+        |pid| Ok(pid as i32),
+    )?;
+    Ok(SpawnedWorker {
+        child,
+        channel,
+        pgid,
+    })
 }

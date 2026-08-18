@@ -7,9 +7,11 @@ composition, registry, capability-broker, and activation ownership for every
 case and drives the subject only through public host APIs.
 
 The first corpus is reference-proven by a deterministic built-in fake and is
-also passed by the trusted [local authoring driver](plugin-authoring.md) and by
+also passed by the trusted [local authoring driver](plugin-authoring.md), by
 the [Wasmtime component driver](wasm-plugin-contract.md), which runs it against
-components Wasmtime compiles and instantiates. That is evidence that other
+components Wasmtime compiles and instantiates, and by the
+[worker process driver](plugin-worker-protocol.md), which runs it against real
+spawned child processes. That is evidence that other
 driver families can use the harness without the agent, daemon, or private
 permit constructors. It is not evidence that a production Node or Python
 backend works, that guest semantics are covered, or that any two runtimes are

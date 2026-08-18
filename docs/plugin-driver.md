@@ -99,15 +99,17 @@ grant bindings and mediated synchronous handles. The reusable
 [host-side conformance testkit](plugin-driver-conformance.md) now exercises five
 portable lifecycle cases against an independently described driver subject; a
 deterministic reference fake, the trusted
-[local authoring driver](plugin-authoring.md), and the Wasmtime component
-driver pass, but no process backend exists and no package is ever loaded. Call
-deadlines and forced termination exist only in the Wasmtime driver, as its own
-mechanism; the host contract states no deadline and no other driver has one.
-These layers do not implement
+[local authoring driver](plugin-authoring.md), the Wasmtime component driver,
+and the [worker process driver](plugin-worker-protocol.md) pass, but no package
+is ever loaded. Call deadlines and forced termination remain each driver's own
+mechanism, never the host contract's: the Wasmtime driver enforces them with
+epochs and fuel, the process driver with a handshake clock, per-call session
+deadlines, and a process-group kill path, and the host contract itself states
+no deadline. These layers do not implement
 package loading or admission, policy/approval evaluation, configuration
 delivery, general component callbacks, async invocation
 draining, recurring health checks, restart/backoff policy, task supervision, WIT
-execution/resource transport, worker IPC, sandboxing, or durable
+execution/resource transport, sandboxing, or durable
 activation identity or work-attempt fencing. Portable nonempty capability
 transport, guest ABI behavior, backend containment, and multi-runtime
 equivalence remain later evidence profiles. A separate
