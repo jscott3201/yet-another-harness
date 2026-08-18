@@ -1,0 +1,28 @@
+[package]
+name = "yah-plugin-proc"
+version = "0.0.1"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+description = "Supervised process driver and authenticated fd-3 worker bootstrap for YAH"
+
+# The protocol crate stays sans-io on purpose; this crate owns the only real
+# IO: the socketpair, the spawned child, the byte pump, and the kill path.
+[dependencies]
+libc.workspace = true
+serde_json.workspace = true
+tokio = { workspace = true, features = [
+    "io-util",
+    "macros",
+    "net",
+    "process",
+    "rt",
+    "sync",
+    "time",
+] }
+yah-plugin-host = { path = "../yah-plugin-host" }
+yah-plugin-ipc = { path = "../yah-plugin-ipc" }
+
+[dev-dependencies]
+yah-compose = { path = "../yah-compose" }

@@ -130,8 +130,10 @@ harness, not architectural authority.
 
 **Not built yet:** the agent loop, model providers, daemon, CLI, UI, plugin
 package loading and admission, the Node and Python process lanes (in
-progress — the [wire protocol](docs/plugin-worker-protocol.md) is specified
-and fixture-pinned, but no worker runs yet), sandbox enforcement, and the
+progress — the [wire protocol](docs/plugin-worker-protocol.md) is
+fixture-pinned and a supervised process driver spawns and authenticates
+workers over an inherited fd, but the Node and CPython SDKs do not exist
+yet), sandbox enforcement, and the
 graph, memory, and session domains beyond the kernel. The Wasm lane bounds a guest's cost, not its authority:
 guest code still runs in the host process, and no sandbox claim is made.
 
@@ -154,8 +156,8 @@ plugin model spans the execution lanes; the isolation mechanism differs:
 |---|---|---|---|
 | Built-in Rust | landed | First-party components and trusted integrations | Statically linked Rust traits |
 | Wasm Component | landed | Portable third-party plugins | Wasmtime, WIT imports/exports, explicit limits |
-| Node.js / TypeScript | wire protocol landed | Modern ESM plugins and npm packages allowed by sandbox policy | ESM-first SDK over a sandboxed [process protocol](docs/plugin-worker-protocol.md) |
-| CPython | wire protocol landed | Modern Python plugins and packages supported by the selected worker and sandbox | Latest stable CPython in a sandboxed process, with PyO3-backed SDK support |
+| Node.js / TypeScript | protocol and process driver landed | Modern ESM plugins and npm packages allowed by sandbox policy | ESM-first SDK over a sandboxed [process protocol](docs/plugin-worker-protocol.md) |
+| CPython | protocol and process driver landed | Modern Python plugins and packages supported by the selected worker and sandbox | Latest stable CPython in a sandboxed process, with PyO3-backed SDK support |
 | Native embedding | later, optional | Foreign-language applications embedding the Rust library | Optional UniFFI bindings; not a plugin sandbox or universal plugin ABI |
 | Browser / JS host | later, optional | Rust-backed web and JavaScript utilities | Optional `wasm-bindgen` surface |
 
@@ -172,7 +174,8 @@ yet.
 
 The pivot proceeds as executable vertical slices, each landing with its own
 tests and evidence. The first three have landed; the fourth is underway, its
-worker wire protocol specified and fixture-pinned:
+worker wire protocol fixture-pinned and its supervised process driver
+spawning authenticated workers:
 
 1. Rust composition kernel with an independent semantic conformance corpus.
 2. Plugin manifest, driver lifecycle, capability grants, and a reusable

@@ -1,0 +1,386 @@
+//! Scripted worker for the process driver's tests.
+//!
+//! Speaks protocol v1 over inherited fd 3 with plain blocking IO — no SDK,
+//! no runtime, no cleverness, so what a test observes is the driver's
+//! behaviour and not this binary's. The single argument names the script:
+//!
+//! - `conformant`: hello, then serve echo calls until goodbye or EOF.
+//! - `silent`: connect and never speak; the pending-start worker.
+//! - `bad-version`: offer only protocol version 99 and read the refusal.
+//! - `crash-after-hello`: complete the handshake, then exit without goodbye.
+//! - `exit-mid-call`: take one call and exit without answering it.
+//! - `cancel-ack`: hold each call until its cancel arrives, then answer
+//!   with the cancelled outcome.
+//! - `deaf`: complete the handshake, then never touch the channel again —
+//!   the worker that ignores back-pressure, goodbyes, and end-of-input
+//!   alike, so only `SIGKILL` ends it.
+//! - `deaf-with-helper`: deaf, plus a sleeping helper (pid on stdout)
+//!   spawned first — the worst-case deactivation: every grace window
+//!   spent, a descendant still owed to the group sweep.
+//! - `leave-group`: move into the host's process group, then go deaf —
+//!   reclaimable only by a direct kill of this pid.
+//! - `read-shut-linger`: after one call, shut the read half and never
+//!   speak again — no goodbye, no end-of-file, no exit.
+//! - `spawn-helper`: complete the handshake, spawn a sleeping helper that
+//!   inherits the channel fd (printing its pid to stdout), and exit — the
+//!   death only the process, not the socket, can reveal.
+//! - `goodbye-mid-call`: on the first call, spawn the same fd-holding
+//!   helper, send a goodbye, and exit without answering — the polite quit
+//!   only a drained buffer distinguishes from a bare disconnect.
+//! - `late-reply`: read one call, stop reading, answer it a beat later,
+//!   and exit — the terminal that lands while the host is deactivating.
+//! - `goodbye-then-linger`: read one call, shut the read half so the
+//!   host's writes fail first, send a goodbye a beat later, then linger
+//!   until killed — the goodbye a failing write must not eclipse.
+//! - `bootstrap-report`: print the inherited environment variable names
+//!   and open file descriptors to stdout (the diagnostics lane), then
+//!   behave as `conformant`.
+//!
+//! This is a test fixture, not a worker SDK: it implements exactly what its
+//! scripts need and nothing else.
+
+use std::io::{Read, Write};
+use std::os::fd::FromRawFd;
+use std::os::unix::net::UnixStream;
+
+use yah_plugin_ipc::PROTOCOL_VERSION;
+use yah_plugin_ipc::frame::{self, FrameDecoder};
+use yah_plugin_ipc::types::*;
+use yah_plugin_proc::WORKER_CHANNEL_FD;
+
+fn main() {
+    let mode = std::env::args().nth(1).unwrap_or_default();
+    // SAFETY: the driver contract places the channel on this fd and nothing
+    // else in this process owns it.
+    let channel = unsafe { UnixStream::from_raw_fd(WORKER_CHANNEL_FD) };
+    let mut wire = Wire::new(channel);
+    let code = run(&mode, &mut wire);
+    std::process::exit(code);
+}
+
+fn run(mode: &str, wire: &mut Wire) -> i32 {
+    match mode {
+        "silent" => {
+            // Never a byte; exit only when the host is gone.
+            while wire.next_frame().is_some() {}
+            0
+        }
+        "bad-version" => {
+            wire.send_hello(&[99]);
+            match wire.next_frame() {
+                Some(HostMessage::Refuse(refuse)) => {
+                    eprintln!("refused as expected: {:?}", refuse.error.kind);
+                    2
+                }
+                other => {
+                    eprintln!("expected a refuse, got {other:?}");
+                    70
+                }
+            }
+        }
+        "crash-after-hello" => {
+            if !wire.handshake() {
+                return 70;
+            }
+            // No goodbye on purpose: this is the bare-disconnect script.
+            70
+        }
+        "exit-mid-call" => {
+            if !wire.handshake() {
+                return 70;
+            }
+            loop {
+                match wire.next_frame() {
+                    Some(HostMessage::Call(_)) => return 70,
+                    Some(_) => {}
+                    None => return 70,
+                }
+            }
+        }
+        "cancel-ack" => {
+            if !wire.handshake() {
+                return 70;
+            }
+            let mut held: Option<CallId> = None;
+            loop {
+                match wire.next_frame() {
+                    Some(HostMessage::Call(call)) => held = Some(call.call_id),
+                    Some(HostMessage::Cancel(cancel)) => {
+                        if held.take() == Some(cancel.call_id) {
+                            wire.send(&WorkerMessage::Reply(Reply {
+                                call_id: cancel.call_id,
+                                outcome: Outcome::Cancelled {
+                                    reason: CancelReason::Requested,
+                                },
+                            }));
+                            // The answered id on the diagnostics lane lets
+                            // a test prove this reply was really sent —
+                            // e.g. as a tolerated late terminal.
+                            println!("answered:{}", cancel.call_id.0);
+                            let _ = std::io::stdout().flush();
+                        }
+                    }
+                    Some(HostMessage::Goodbye(_)) | None => return 0,
+                    Some(_) => {}
+                }
+            }
+        }
+        "deaf" => {
+            if !wire.handshake() {
+                return 70;
+            }
+            // Not even an EOF read: this worker's only exit is the kill.
+            loop {
+                std::thread::sleep(std::time::Duration::from_secs(3600));
+            }
+        }
+        "deaf-with-helper" => {
+            if !wire.handshake() {
+                return 70;
+            }
+            // Deaf AND holding a descendant: the shape that spends the
+            // whole deactivation budget — the goodbye flush, the reap
+            // grace — and still owes the group sweep a helper.
+            match std::process::Command::new("/bin/sleep").arg("30").spawn() {
+                Ok(helper) => {
+                    println!("helper:{}", helper.id());
+                    let _ = std::io::stdout().flush();
+                }
+                Err(error) => {
+                    eprintln!("helper did not spawn: {error}");
+                    return 70;
+                }
+            }
+            loop {
+                std::thread::sleep(std::time::Duration::from_secs(3600));
+            }
+        }
+        "leave-group" => {
+            if !wire.handshake() {
+                return 70;
+            }
+            // Move out of the group the bootstrap made this process lead,
+            // then go deaf: the group sweep now signals an empty group,
+            // and only a direct kill of this pid reclaims anything.
+            let joined = unsafe { libc::setpgid(0, libc::getpgid(libc::getppid())) == 0 };
+            println!("left-group:{}", if joined { "ok" } else { "err" });
+            let _ = std::io::stdout().flush();
+            loop {
+                std::thread::sleep(std::time::Duration::from_secs(3600));
+            }
+        }
+        "read-shut-linger" => {
+            if !wire.handshake() {
+                return 70;
+            }
+            // Shut the read half after one call and never speak again: no
+            // goodbye, no end-of-file, no exit — the half-death only
+            // health can report and only deactivation can end.
+            loop {
+                match wire.next_frame() {
+                    Some(HostMessage::Call(_)) => {
+                        let _ = wire.channel.shutdown(std::net::Shutdown::Read);
+                        loop {
+                            std::thread::sleep(std::time::Duration::from_secs(3600));
+                        }
+                    }
+                    Some(HostMessage::Goodbye(_)) | None => return 0,
+                    Some(_) => {}
+                }
+            }
+        }
+        "spawn-helper" => {
+            if !wire.handshake() {
+                return 70;
+            }
+            // The helper inherits fd 3 (and this process's group), so the
+            // host's socket never reaches end-of-file on this exit. Its
+            // pid rides the diagnostics lane so a test can prove the
+            // group sweep really took it.
+            match std::process::Command::new("/bin/sleep").arg("30").spawn() {
+                Ok(helper) => {
+                    println!("helper:{}", helper.id());
+                    let _ = std::io::stdout().flush();
+                    0
+                }
+                Err(error) => {
+                    eprintln!("helper did not spawn: {error}");
+                    70
+                }
+            }
+        }
+        "goodbye-then-linger" => {
+            if !wire.handshake() {
+                return 70;
+            }
+            // Read one call, then shut this end's READ half — the host's
+            // next write fails while nothing is yet readable, so the
+            // failing write provably comes first — and only then send the
+            // goodbye, lingering until killed. The goodbye must still
+            // decide the close.
+            loop {
+                match wire.next_frame() {
+                    Some(HostMessage::Call(_)) => {
+                        let _ = wire.channel.shutdown(std::net::Shutdown::Read);
+                        std::thread::sleep(std::time::Duration::from_millis(200));
+                        wire.send(&WorkerMessage::Goodbye(Goodbye {
+                            reason: "worker stopping".to_owned(),
+                        }));
+                        loop {
+                            std::thread::sleep(std::time::Duration::from_secs(3600));
+                        }
+                    }
+                    Some(HostMessage::Goodbye(_)) | None => return 0,
+                    Some(_) => {}
+                }
+            }
+        }
+        "late-reply" => {
+            if !wire.handshake() {
+                return 70;
+            }
+            // Read one call, go deaf, then answer it a beat later and
+            // exit: the terminal that lands in the host's receive buffer
+            // while the host is already deactivating.
+            loop {
+                match wire.next_frame() {
+                    Some(HostMessage::Call(call)) => {
+                        std::thread::sleep(std::time::Duration::from_millis(25));
+                        wire.send(&WorkerMessage::Reply(Reply {
+                            call_id: call.call_id,
+                            outcome: Outcome::Ok {
+                                result: call.payload,
+                            },
+                        }));
+                        return 0;
+                    }
+                    Some(HostMessage::Goodbye(_)) | None => return 0,
+                    Some(_) => {}
+                }
+            }
+        }
+        "goodbye-mid-call" => {
+            if !wire.handshake() {
+                return 70;
+            }
+            // A worker that quits politely with work in hand: goodbye,
+            // then exit without answering — while a spawned helper keeps
+            // fd 3 open, so only the buffered goodbye distinguishes this
+            // from a bare disconnect.
+            loop {
+                match wire.next_frame() {
+                    Some(HostMessage::Call(_)) => {
+                        let _ = std::process::Command::new("/bin/sleep").arg("30").spawn();
+                        wire.send(&WorkerMessage::Goodbye(Goodbye {
+                            reason: "worker stopping".to_owned(),
+                        }));
+                        return 0;
+                    }
+                    Some(HostMessage::Goodbye(_)) | None => return 0,
+                    Some(_) => {}
+                }
+            }
+        }
+        "bootstrap-report" => {
+            let mut names: Vec<String> = std::env::vars_os()
+                .map(|(name, _)| name.to_string_lossy().into_owned())
+                .collect();
+            names.sort();
+            println!("env:{}", names.join(","));
+            // Probe by fcntl rather than listing /dev/fd, which would open
+            // a descriptor of its own and report it.
+            let fds: Vec<String> = (0..64)
+                .filter(|&fd| unsafe { libc::fcntl(fd, libc::F_GETFD) } != -1)
+                .map(|fd| fd.to_string())
+                .collect();
+            println!("fds:{}", fds.join(","));
+            let _ = std::io::stdout().flush();
+            serve_conformant(wire)
+        }
+        "conformant" => serve_conformant(wire),
+        other => {
+            eprintln!("unknown fake-worker mode {other:?}");
+            64
+        }
+    }
+}
+
+/// Handshake, then answer every call by echoing its payload, until the host
+/// says goodbye or closes the channel.
+fn serve_conformant(wire: &mut Wire) -> i32 {
+    if !wire.handshake() {
+        return 70;
+    }
+    loop {
+        match wire.next_frame() {
+            Some(HostMessage::Call(call)) => {
+                wire.send(&WorkerMessage::Reply(Reply {
+                    call_id: call.call_id,
+                    outcome: Outcome::Ok {
+                        result: call.payload,
+                    },
+                }));
+            }
+            Some(HostMessage::Goodbye(_)) | None => return 0,
+            Some(_) => {}
+        }
+    }
+}
+
+struct Wire {
+    channel: UnixStream,
+    decoder: FrameDecoder,
+}
+
+impl Wire {
+    fn new(channel: UnixStream) -> Self {
+        Self {
+            channel,
+            decoder: FrameDecoder::new(),
+        }
+    }
+
+    fn send_hello(&mut self, versions: &[u32]) {
+        self.send(&WorkerMessage::Hello(Hello {
+            protocol_versions: versions.to_vec(),
+            sdk_name: "fake-worker".to_owned(),
+            sdk_version: "0.0.1".to_owned(),
+            features: Vec::new(),
+            required_features: Vec::new(),
+        }));
+    }
+
+    /// Hello and await the accept. False on refusal or a closed channel.
+    fn handshake(&mut self) -> bool {
+        self.send_hello(&[PROTOCOL_VERSION]);
+        matches!(self.next_frame(), Some(HostMessage::Accept(_)))
+    }
+
+    fn send(&mut self, message: &WorkerMessage) {
+        let bytes = serde_json::to_vec(message).expect("worker message serializes");
+        if self.channel.write_all(&frame::encode(&bytes)).is_err() {
+            // The host is gone; nothing useful remains to do.
+            std::process::exit(0);
+        }
+    }
+
+    /// The next decoded host frame, or `None` once the channel is done.
+    fn next_frame(&mut self) -> Option<HostMessage> {
+        let mut chunk = [0u8; 4096];
+        loop {
+            match self.decoder.next_frame() {
+                Ok(Some(bytes)) => {
+                    let message: HostMessage =
+                        serde_json::from_slice(&bytes).expect("host frame decodes");
+                    return Some(message);
+                }
+                Ok(None) => {}
+                Err(error) => panic!("host framing violation: {error:?}"),
+            }
+            match self.channel.read(&mut chunk) {
+                Ok(0) | Err(_) => return None,
+                Ok(count) => self.decoder.feed(&chunk[..count]),
+            }
+        }
+    }
+}
