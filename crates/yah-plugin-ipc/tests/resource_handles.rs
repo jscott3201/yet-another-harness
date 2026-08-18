@@ -22,6 +22,27 @@ fn release(handle: HandleId, kind: HandleKind) -> WorkerMessage {
     WorkerMessage::Release(Release { handle, kind })
 }
 
+/// The worker offers an artifact under `handle` in a spilled reply to a
+/// fresh host call, making the id one the worker actually holds.
+fn worker_offer(session: &mut HostSession, handle: HandleId) {
+    let id = session
+        .call_worker("guest.big", json!(null), None, false)
+        .expect("call goes out");
+    session.drain_outbox();
+    session.feed(&wire(&WorkerMessage::Reply(Reply {
+        call_id: id,
+        outcome: Outcome::Spilled {
+            artifact: ArtifactOffer {
+                handle,
+                bytes: 9,
+                media_type: "text/plain".to_owned(),
+                digest_blake3: "ab".repeat(32),
+            },
+        },
+    })));
+    session.drain_events();
+}
+
 #[test]
 fn mint_use_release_ack_with_the_gauge_read_while_live() {
     let mut session = peer::negotiated();
@@ -238,6 +259,7 @@ fn artifact_handles_count_against_the_same_ceiling() {
 fn the_host_releases_a_worker_held_handle_and_reads_the_ack() {
     let mut session = peer::negotiated();
     let handle = HandleId(7);
+    worker_offer(&mut session, handle);
     session
         .release_worker_handle(handle, HandleKind::Artifact)
         .expect("release goes out");
@@ -281,6 +303,7 @@ fn an_unsolicited_release_ack_is_fatal() {
 #[test]
 fn a_release_ack_with_the_wrong_kind_is_fatal() {
     let mut session = peer::negotiated();
+    worker_offer(&mut session, HandleId(7));
     session
         .release_worker_handle(HandleId(7), HandleKind::Artifact)
         .expect("release goes out");
@@ -298,6 +321,7 @@ fn a_release_ack_with_the_wrong_kind_is_fatal() {
 fn a_worker_handle_is_spent_once_its_release_is_acked() {
     let mut session = peer::negotiated();
     let handle = HandleId(7);
+    worker_offer(&mut session, handle);
     session
         .release_worker_handle(handle, HandleKind::Artifact)
         .expect("release goes out");
@@ -320,6 +344,7 @@ fn a_worker_handle_is_spent_once_its_release_is_acked() {
 #[test]
 fn pending_releases_are_void_after_a_goodbye() {
     let mut session = peer::negotiated();
+    worker_offer(&mut session, HandleId(7));
     session
         .release_worker_handle(HandleId(7), HandleKind::Artifact)
         .expect("release goes out");
@@ -384,6 +409,10 @@ fn a_release_racing_the_reclaiming_terminal_is_acked_not_fatal() {
         matches!(outbox.as_slice(), [HostMessage::ReleaseAck(ack)] if ack.handle == handle),
         "a reclaimed handle's release is acked: {outbox:?}"
     );
+    assert!(
+        session.drain_events().is_empty(),
+        "the application already heard the reclamation"
+    );
     assert!(!session.is_closed());
     // The ack spent the id for real; a second release is the ordinary
     // double-release desync again.
@@ -411,18 +440,10 @@ fn a_reclaimed_handles_release_still_checks_the_kind() {
 }
 
 #[test]
-fn a_spilled_offer_reusing_a_spent_worker_handle_is_fatal() {
-    // Spent by ack: the worker gave the id back, then offered it again.
+fn a_spilled_offer_reusing_a_worker_handle_id_is_fatal() {
+    // A plain repeat: the id is live, and each offer must mint fresh.
     let mut session = peer::negotiated();
-    session
-        .release_worker_handle(HandleId(7), HandleKind::Artifact)
-        .expect("release goes out");
-    session.feed(&wire(&WorkerMessage::ReleaseAck(ReleaseAck {
-        handle: HandleId(7),
-        kind: HandleKind::Artifact,
-    })));
-    session.drain_outbox();
-    session.drain_events();
+    worker_offer(&mut session, HandleId(7));
     let id = session
         .call_worker("guest.big", json!(null), None, false)
         .expect("call goes out");
@@ -440,12 +461,18 @@ fn a_spilled_offer_reusing_a_spent_worker_handle_is_fatal() {
     })));
     assert_fatal(&mut session, WireErrorKind::UnknownHandle);
 
-    // Spent by asking: the host's release is on the wire, still unacked.
+    // Release does not free the id either: released means spent forever.
     let mut session = peer::negotiated();
+    worker_offer(&mut session, HandleId(8));
     session
         .release_worker_handle(HandleId(8), HandleKind::Artifact)
         .expect("release goes out");
+    session.feed(&wire(&WorkerMessage::ReleaseAck(ReleaseAck {
+        handle: HandleId(8),
+        kind: HandleKind::Artifact,
+    })));
     session.drain_outbox();
+    session.drain_events();
     let id = session
         .call_worker("guest.big", json!(null), None, false)
         .expect("call goes out");
@@ -469,6 +496,8 @@ fn pending_releases_are_bounded_by_the_handle_ceiling() {
     let mut config = SessionConfig::default();
     config.ceilings.live_handles = 1;
     let mut session = peer::negotiated_with(config);
+    worker_offer(&mut session, HandleId(1));
+    worker_offer(&mut session, HandleId(2));
     session
         .release_worker_handle(HandleId(1), HandleKind::Artifact)
         .expect("the first pending release fits");
@@ -478,4 +507,17 @@ fn pending_releases_are_bounded_by_the_handle_ceiling() {
         session.release_worker_handle(HandleId(2), HandleKind::Artifact),
         Err(AppError::HandleCeiling)
     );
+}
+
+#[test]
+fn releasing_an_id_the_worker_never_offered_is_refused() {
+    let mut session = peer::negotiated();
+    // Nothing was offered under this id — perhaps it is host-minted, the
+    // two spaces being numbered alike. A release frame for it would arm a
+    // desync against an innocent worker, so the application is refused.
+    assert_eq!(
+        session.release_worker_handle(HandleId(5), HandleKind::Artifact),
+        Err(AppError::UnknownWorkerHandle)
+    );
+    assert!(session.drain_outbox().is_empty());
 }

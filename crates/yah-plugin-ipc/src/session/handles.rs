@@ -221,9 +221,9 @@ impl HostSession {
     }
 
     /// Ask the worker to release a handle it holds (an artifact it spilled
-    /// toward us). The session tracks only the pending ack — the worker's
-    /// own table is the authority on what it holds, and a release it cannot
-    /// honor is the worker's protocol fault to raise.
+    /// toward us). Only ids the worker actually offered are releasable;
+    /// the worker's own table stays the authority on the bytes behind
+    /// them, and a release it cannot honor is its protocol fault to raise.
     pub fn release_worker_handle(
         &mut self,
         handle: HandleId,
@@ -234,6 +234,12 @@ impl HostSession {
         }
         if !(1..=MAX_WIRE_ID).contains(&handle.0) {
             return Err(AppError::InvalidField("handle id outside wire range"));
+        }
+        // Only what the worker offered is the worker's to be asked for. A
+        // release for any other id — a host-minted handle, a typo — would
+        // arm a desync against a worker that did nothing wrong.
+        if !self.offered_worker_handles.contains(&handle) {
+            return Err(AppError::UnknownWorkerHandle);
         }
         if self.retired_worker_handles.contains(&handle) {
             return Err(AppError::AlreadyReleased);

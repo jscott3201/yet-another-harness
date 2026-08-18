@@ -65,7 +65,7 @@
     },
     "Ceilings": {
       "additionalProperties": false,
-      "description": "Count ceilings the session enforces by refusal — except\n`initial_stream_credit`, which is an announced default, not a law.",
+      "description": "Count ceilings the session enforces — the in-flight and live-handle\nceilings by refusal, a credit value past `max_stream_credit` as a\nfatal frame, and `initial_stream_credit` not at all: it is an\nannounced default, not a law.",
       "properties": {
         "host_calls_in_flight": {
           "description": "Host-initiated calls that may be in flight toward the worker.",

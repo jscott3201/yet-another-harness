@@ -77,6 +77,9 @@ pub const MAX_MEDIA_TYPE_CHARS: usize = 128;
 /// Character bound on each half of a hello's SDK identity.
 pub const MAX_SDK_IDENTITY_CHARS: usize = 64;
 
+/// Character bound on a goodbye's reason.
+pub const MAX_GOODBYE_REASON_CHARS: usize = 256;
+
 /// The opening credit window an SDK should use when it has no better
 /// number — announced in the accept as `ceilings.initial_stream_credit`
 /// but advisory, not enforced: any opening grant in `1..=max_stream_credit`
@@ -98,6 +101,7 @@ pub const DEFAULT_WORKER_CALLS_IN_FLIGHT: u32 = 32;
 /// `max_capability_handles` default.
 pub const DEFAULT_LIVE_HANDLES: u32 = 16;
 
-/// Largest identifier the wire accepts for call and handle ids: the I-JSON
-/// safe-integer bound, so every SDK reads the same number.
+/// Largest integer any counted wire field may carry — call and handle
+/// ids, offer byte counts, drop counts: the I-JSON safe-integer bound, so
+/// every SDK reads the same number.
 pub const MAX_WIRE_ID: u64 = (1 << 53) - 1;

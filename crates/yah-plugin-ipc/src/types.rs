@@ -137,8 +137,10 @@ pub struct WireLimits {
     pub max_artifact_read_bytes: u64,
 }
 
-/// Count ceilings the session enforces by refusal — except
-/// `initial_stream_credit`, which is an announced default, not a law.
+/// Count ceilings the session enforces — the in-flight and live-handle
+/// ceilings by refusal, a credit value past `max_stream_credit` as a
+/// fatal frame, and `initial_stream_credit` not at all: it is an
+/// announced default, not a law.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema, TS)]
 #[serde(deny_unknown_fields)]
 pub struct Ceilings {

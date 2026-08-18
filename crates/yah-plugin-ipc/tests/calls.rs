@@ -259,6 +259,48 @@ fn an_outbound_integer_outside_the_ijson_range_is_refused() {
             "integer outside the I-JSON safe range"
         ))
     );
+    // Admissibility precedes size: a result that is both oversize and
+    // inadmissible must not be answered with the spill remedy, which
+    // cannot cure it.
+    assert_eq!(
+        session.reply_to_worker(
+            CallId(1),
+            Outcome::Ok {
+                result: json!({"pad": "x".repeat(MAX_INLINE_RESULT_BYTES), "ts": u64::MAX}),
+            },
+        ),
+        Err(AppError::InvalidField(
+            "integer outside the I-JSON safe range"
+        ))
+    );
+}
+
+#[test]
+fn outbound_bounds_precede_the_ceiling() {
+    let mut config = SessionConfig::default();
+    config.ceilings.host_calls_in_flight = 1;
+    let mut session = peer::negotiated_with(config);
+    session
+        .call_worker("guest.a", json!(null), None, false)
+        .expect("the slot fills");
+    // At the ceiling, a call that can never be admitted still names its
+    // real fault; only an admissible call hears the retry-shaped ceiling.
+    assert_eq!(
+        session.call_worker(&"m".repeat(129), json!(null), None, false),
+        Err(AppError::InvalidField(
+            "method name outside its length bound"
+        ))
+    );
+    assert_eq!(
+        session.call_worker("guest.b", json!(u64::MAX), None, false),
+        Err(AppError::InvalidField(
+            "integer outside the I-JSON safe range"
+        ))
+    );
+    assert_eq!(
+        session.call_worker("guest.b", json!(null), None, false),
+        Err(AppError::CallCeiling)
+    );
 }
 
 #[test]

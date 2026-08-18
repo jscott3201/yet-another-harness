@@ -10,7 +10,7 @@ The crate is sans-io: `frame` turns bytes into frames incrementally, and
 in it can block, sleep, spawn, or open a socket. The process driver that
 supplies the transport, the spawned child, the bootstrap file descriptor, and
 the kill path is not implemented; neither is any worker-side SDK.
-One hundred seven deterministic fixtures in `crates/yah-plugin-ipc/tests/`
+One hundred eleven deterministic fixtures in `crates/yah-plugin-ipc/tests/`
 drive the host side of every rule below with a scripted byte-level peer.
 
 ## Framing and strict JSON
@@ -27,7 +27,9 @@ there is no resync path.
 Frame JSON is strict, mirroring the kernel protocol's rules:
 
 - A duplicate member name is refused, not last-wins resolved.
-- An integer outside the I-JSON safe range (±2^53−1) is refused, not rounded.
+- An integer outside the I-JSON safe range (±2^53−1) is refused, not
+  rounded — including a literal too wide for a 64-bit lane, caught on the
+  raw token before the parser can round it to a float.
 - Unknown members and unknown enum values are refused. Enums are closed
   within a negotiated version: evolution happens at the version gate in the
   handshake, never by per-member leniency.
@@ -75,7 +77,7 @@ in force, and every byte bound and count ceiling the session will enforce —
 announced, not negotiable; a worker that cannot live with a ceiling says
 goodbye. One announced number is advisory rather than law:
 `initial_stream_credit` is the opening window an SDK should grant when it
-has no better one, and any opening grant up to `max_stream_credit` is
+has no better one, and any opening grant in `1..=max_stream_credit` is
 legal. A version mismatch is refused with the host's supported list, so the
 worker fails with a diagnostic instead of a bare close. A required feature
 the host does not know fails closed. A hello whose own fields fail
@@ -154,13 +156,16 @@ those arrive inside a call the session can answer. A fatal fault poisons
 the session: framing violations, strict-JSON and field-bound violations, id
 reuse, credit overdraw, handle desyncs, an oversize inline result or
 stream item — the sender had the spill path or the byte bound and violated
-it instead — and the stream-order family: data before open, a sequence
-gap, a second open, a drop count going backwards, a zero-byte spilled
-offer. A kind can sit on both sides of the split: `invalid-frame` and
-`unknown-handle` are fatal at frame admission and refusable inside a
-served read, `payload-too-large` is refusable on a call payload and fatal
-on a result or stream item, and `resource-exhausted` is refusable at a
-ceiling and fatal on a credit overdraw. On a fatal fault the host says goodbye
+it instead — and the stream-order family: data before open or after the
+last item, an open on a call that did not ask to stream, a sequence gap, a
+second open, a credit value of zero or past the ceiling at open or at
+widening, a drop count going backwards, a zero-byte spilled offer, a
+spilled offer reusing a handle id. A kind can sit on both sides of the
+split: `invalid-frame` and `unknown-handle` are fatal at frame admission
+and refusable inside a served read, `payload-too-large` is refusable on a
+call payload and fatal on a result or stream item, and
+`resource-exhausted` is refusable at a ceiling and fatal on a credit
+overdraw. On a fatal fault the host says goodbye
 naming the kind and nothing else, settles in-flight work, and ignores every
 later input.
 
@@ -175,6 +180,13 @@ option the protocol offers. The producing side keeps the bytes and replies
 `spilled` with an `ArtifactOffer`: a handle, the byte count, a media type,
 and a BLAKE3 digest, so the reader can refuse before the first pull and
 verify after the last.
+
+On the sending side, a spilled reply must name an offer minted while
+serving that same call — any other call's failing terminal could reclaim
+it behind the reader's back — and the offer must describe the held
+artifact exactly: size, media type, digest. On the receiving side, an
+offer's handle id must be fresh: handle ids are never reused, so a repeat
+is the same correlation break a duplicate call id is.
 
 The consumer pull-reads through ordinary calls to `artifact.read`, served
 by the session itself. The request payload is `{"handle", "offset",
@@ -204,7 +216,10 @@ Releasing a handle not held, releasing twice, and releasing with the wrong
 kind are all fatal — the same desync the Wasm lane traps as a double
 dispose. A released id is never minted again, which closes the release/reuse
 race. The mechanism is symmetric: the host releases a worker-held handle
-with the same `release` frame and reads the worker's `release-ack`. An ack
+with the same `release` frame and reads the worker's `release-ack` — and
+only a handle the worker actually offered; the session refuses its own
+application a release for any other id, which would arm a desync against
+a worker that did nothing wrong. An ack
 for a release the host never sent is fatal, and so is an ack naming a kind
 the release did not; an acked id is spent, so the host refuses its own
 application a second release of it. The paths a release frame never

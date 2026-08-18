@@ -214,15 +214,20 @@ pub enum AppError {
     /// An outbound payload over its frame class's byte bound. The session
     /// refuses to queue a frame the other side is contracted to kill.
     PayloadTooLarge { bytes: usize },
-    /// An outbound field outside the bound the generated schemas publish —
-    /// the same admission line the session holds inbound frames to, named
-    /// with the same string.
+    /// An outbound value the session refuses to put on the wire. Where an
+    /// inbound admission twin exists (field bounds, the I-JSON integer
+    /// rule) the string matches it; the offer-identity rules are
+    /// outbound-only, guarding what frame admission cannot see.
     InvalidField(&'static str),
     /// A release for that worker-held handle is already on the wire.
     ReleasePending,
     /// The worker already acknowledged releasing that handle; its id is
     /// spent.
     AlreadyReleased,
+    /// The worker never offered that handle, so there is nothing to
+    /// release — a release frame for it would arm a desync against an
+    /// innocent worker.
+    UnknownWorkerHandle,
     /// A stream item with no credit left, a credit grant over the ceiling,
     /// a second stream open, or an item after the last one.
     StreamViolation(&'static str),
@@ -268,6 +273,10 @@ pub struct HostSession {
     /// Worker-held handle ids the worker confirmed released; spent forever,
     /// so a second release for one is the application's bug to hear about.
     retired_worker_handles: BTreeSet<HandleId>,
+    /// Every handle id the worker has ever offered. Membership gates the
+    /// host's own releases, and a repeat offer is the id-reuse desync the
+    /// never-reuse law promises against.
+    offered_worker_handles: BTreeSet<HandleId>,
     outbox: Vec<HostMessage>,
     events: Vec<SessionEvent>,
 }
@@ -291,6 +300,7 @@ impl HostSession {
             live_handle_count: 0,
             pending_worker_releases: BTreeMap::new(),
             retired_worker_handles: BTreeSet::new(),
+            offered_worker_handles: BTreeSet::new(),
             outbox: Vec::new(),
             events: Vec::new(),
         }
@@ -594,7 +604,7 @@ fn validate_bounds(message: &WorkerMessage) -> Result<(), &'static str> {
             }
         }
         WorkerMessage::Goodbye(goodbye) => {
-            if goodbye.reason.chars().count() > 256 {
+            if goodbye.reason.chars().count() > crate::MAX_GOODBYE_REASON_CHARS {
                 return Err("goodbye reason outside its length bound");
             }
         }

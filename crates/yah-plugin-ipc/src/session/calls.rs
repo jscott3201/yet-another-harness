@@ -111,17 +111,29 @@ impl HostSession {
         };
         match &mut outcome {
             Outcome::Ok { result } => {
-                let bytes = serde_json::to_vec(result).map(|b| b.len()).unwrap_or(0);
-                if bytes > MAX_INLINE_RESULT_BYTES {
-                    return Err(AppError::SpillRequired { bytes });
-                }
+                // Admissibility before size, as inbound: a result that can
+                // never go out must not be answered with the spill remedy.
                 if !super::value_within_ijson(result) {
                     return Err(AppError::InvalidField(
                         "integer outside the I-JSON safe range",
                     ));
                 }
+                let bytes = serde_json::to_vec(result).map(|b| b.len()).unwrap_or(0);
+                if bytes > MAX_INLINE_RESULT_BYTES {
+                    return Err(AppError::SpillRequired { bytes });
+                }
             }
-            Outcome::Spilled { artifact } => self.validate_outbound_offer(artifact)?,
+            Outcome::Spilled { artifact } => {
+                self.validate_outbound_offer(artifact)?;
+                // The offer must ride the call it was minted for: any
+                // other call's err or cancelled terminal could reclaim it
+                // behind the worker's back after the offer went out.
+                if !state.minted.contains(&artifact.handle) {
+                    return Err(AppError::InvalidField(
+                        "spilled offer minted for a different call",
+                    ));
+                }
+            }
             Outcome::Err { error } => {
                 error.message = super::clip_detail(&error.message);
             }
@@ -251,15 +263,13 @@ impl HostSession {
                 );
                 return;
             }
-            // A worker handle id is spent once the host's release for it
-            // went out or was acked; offering it again is the same
-            // id-reuse desync a double release is.
-            if self.retired_worker_handles.contains(&artifact.handle)
-                || self.pending_worker_releases.contains_key(&artifact.handle)
-            {
+            // Worker handle ids are never reused, live or spent: each
+            // offer mints a fresh id, so a repeat is the same correlation
+            // break a duplicate call id is.
+            if !self.offered_worker_handles.insert(artifact.handle) {
                 self.fatal(
                     WireErrorKind::UnknownHandle,
-                    "spilled offer reuses a spent worker handle",
+                    "spilled offer reuses a worker handle id",
                 );
                 return;
             }
@@ -355,13 +365,14 @@ impl HostSession {
                 "digest is not 64 lowercase hex characters",
             ));
         }
-        let held = self
-            .handles
-            .get(&artifact.handle)
-            .and_then(|entry| entry.artifact.as_ref());
-        let Some(held) = held else {
+        let Some(entry) = self.handles.get(&artifact.handle) else {
             return Err(AppError::InvalidField(
                 "spilled offer for a handle the session does not hold",
+            ));
+        };
+        let Some(held) = entry.artifact.as_ref() else {
+            return Err(AppError::InvalidField(
+                "spilled offer names a capability handle",
             ));
         };
         if held.bytes.len() as u64 != artifact.bytes

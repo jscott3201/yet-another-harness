@@ -363,27 +363,79 @@ fn a_hand_built_spilled_reply_passes_the_same_admission() {
             "spilled offer for a handle the session does not hold"
         ))
     );
-    let offer = session
-        .offer_artifact(CallId(1), vec![7; 4], "text/plain")
-        .expect("a real offer is minted");
-    let mismatched = ArtifactOffer {
-        bytes: offer.bytes + 1,
-        ..offer.clone()
-    };
+    // A capability handle is held, but it names no bytes to read.
+    let capability = session
+        .mint_capability_handle(CallId(1))
+        .expect("grant is minted");
     assert_eq!(
         session.reply_to_worker(
             CallId(1),
             Outcome::Spilled {
-                artifact: mismatched
+                artifact: ArtifactOffer {
+                    handle: capability,
+                    bytes: 4,
+                    media_type: "text/plain".to_owned(),
+                    digest_blake3: "ab".repeat(32),
+                }
             }
         ),
         Err(AppError::InvalidField(
-            "spilled offer does not match the held artifact"
+            "spilled offer names a capability handle"
         ))
     );
+    // Every claim the offer makes must match the held artifact — the
+    // digest is the field the offer exists to carry.
+    let offer = session
+        .offer_artifact(CallId(1), vec![7; 4], "text/plain")
+        .expect("a real offer is minted");
+    for mismatched in [
+        ArtifactOffer {
+            bytes: offer.bytes + 1,
+            ..offer.clone()
+        },
+        ArtifactOffer {
+            digest_blake3: "cd".repeat(32),
+            ..offer.clone()
+        },
+        ArtifactOffer {
+            media_type: "application/octet-stream".to_owned(),
+            ..offer.clone()
+        },
+    ] {
+        assert_eq!(
+            session.reply_to_worker(
+                CallId(1),
+                Outcome::Spilled {
+                    artifact: mismatched
+                }
+            ),
+            Err(AppError::InvalidField(
+                "spilled offer does not match the held artifact"
+            ))
+        );
+    }
     session
         .reply_to_worker(CallId(1), Outcome::Spilled { artifact: offer })
         .expect("the exact offer goes out");
+}
+
+#[test]
+fn a_spilled_offer_must_ride_the_call_it_was_minted_for() {
+    let mut session = peer::negotiated();
+    session.feed(&wire(&call(1, "tool.big", json!(null))));
+    session.feed(&wire(&call(2, "tool.big", json!(null))));
+    session.drain_events();
+    let offer = session
+        .offer_artifact(CallId(1), vec![9; 8], "text/plain")
+        .expect("offer minted for call 1");
+    // Answered on call 2, the offer would outlive call 1's err terminal,
+    // which reclaims it behind the worker's back.
+    assert_eq!(
+        session.reply_to_worker(CallId(2), Outcome::Spilled { artifact: offer }),
+        Err(AppError::InvalidField(
+            "spilled offer minted for a different call"
+        ))
+    );
 }
 
 #[test]

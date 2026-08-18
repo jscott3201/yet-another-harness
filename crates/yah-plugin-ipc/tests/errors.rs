@@ -12,6 +12,7 @@ mod peer;
 use peer::{assert_fatal, call, sole_fatal, wire, wire_raw};
 use serde_json::json;
 use yah_plugin_ipc::MAX_CALL_PAYLOAD_BYTES;
+use yah_plugin_ipc::session::SessionEvent;
 use yah_plugin_ipc::types::*;
 
 #[test]
@@ -45,6 +46,41 @@ fn an_integer_outside_the_ijson_safe_range_is_fatal() {
         detail.contains("I-JSON safe range"),
         "the strict layer, not the typed decode, must refuse this: {detail}"
     );
+}
+
+#[test]
+fn an_integer_literal_too_wide_for_sixty_four_bits_is_still_refused() {
+    // serde's own parser would round these to floats before any range
+    // check could see them — CPython's decoder would keep the exact value
+    // JavaScript loses — so the raw-token scan must catch what the
+    // visitor cannot.
+    for payload in ["99999999999999999999", "-99999999999999999999"] {
+        let mut session = peer::negotiated();
+        session.feed(&wire_raw(&format!(
+            r#"{{"frame":"call","call_id":1,"method":"m","deadline_ms":null,"stream":false,"payload":{{"a":{payload}}}}}"#
+        )));
+        let (kind, detail) = sole_fatal(&mut session);
+        assert_eq!(kind, WireErrorKind::InvalidFrame);
+        assert!(
+            detail.contains("I-JSON safe range"),
+            "the strict layer must refuse the raw token: {detail}"
+        );
+    }
+    // The scan reads tokens, not digits: the same digits inside a string,
+    // and genuinely floating-point numbers, pass untouched.
+    let mut session = peer::negotiated();
+    for (id, payload) in [(1, r#""99999999999999999999""#), (2, "1e300"), (3, "-2.5")] {
+        session.feed(&wire_raw(&format!(
+            r#"{{"frame":"call","call_id":{id},"method":"m","deadline_ms":null,"stream":false,"payload":{{"a":{payload}}}}}"#
+        )));
+    }
+    let delivered = session
+        .drain_events()
+        .iter()
+        .filter(|event| matches!(event, SessionEvent::CallDelivered { .. }))
+        .count();
+    assert_eq!(delivered, 3, "strings and floats are not integer literals");
+    assert!(!session.is_closed());
 }
 
 #[test]

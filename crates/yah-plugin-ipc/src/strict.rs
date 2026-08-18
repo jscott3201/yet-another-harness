@@ -46,12 +46,72 @@ pub(crate) const SAFE_MIN: i64 = -((1 << 53) - 1);
 /// happens after this admission, so an attacker never reaches a typed
 /// deserializer with bytes these rules refuse.
 pub fn parse(bytes: &[u8]) -> Result<Value, StrictJsonError> {
+    refuse_overflowing_integers(bytes)?;
     let mut deserializer = serde_json::Deserializer::from_slice(bytes);
     let value = StrictValue::deserialize(&mut deserializer).map_err(classify)?;
     deserializer
         .end()
         .map_err(|error| StrictJsonError::Syntax(error.to_string()))?;
     Ok(value.0)
+}
+
+/// An integer literal wider than 64 bits never reaches the visitor:
+/// serde's parser rounds it to `f64` first, and a rounded integer admitted
+/// as a float is exactly the divergence this module refuses (CPython's
+/// decoder would keep the exact value JavaScript's loses). Only overflow
+/// is caught here, on the raw token; in-range literals stay the visitor's
+/// range check.
+fn refuse_overflowing_integers(bytes: &[u8]) -> Result<(), StrictJsonError> {
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'"' => {
+                // Skip the string body; an escape hides quotes, not tokens.
+                i += 1;
+                while i < bytes.len() {
+                    match bytes[i] {
+                        b'\\' => i += 2,
+                        b'"' => {
+                            i += 1;
+                            break;
+                        }
+                        _ => i += 1,
+                    }
+                }
+            }
+            b'-' | b'0'..=b'9' => {
+                let start = i;
+                if bytes[i] == b'-' {
+                    i += 1;
+                }
+                while i < bytes.len() && bytes[i].is_ascii_digit() {
+                    i += 1;
+                }
+                if i < bytes.len() && matches!(bytes[i], b'.' | b'e' | b'E') {
+                    // A float token; consume it whole so its digits are not
+                    // rescanned as a fresh integer. Malformed tails are the
+                    // parser's syntax error to raise.
+                    while i < bytes.len()
+                        && matches!(bytes[i], b'.' | b'e' | b'E' | b'+' | b'-' | b'0'..=b'9')
+                    {
+                        i += 1;
+                    }
+                    continue;
+                }
+                let token = std::str::from_utf8(&bytes[start..i]).unwrap_or("");
+                let fits = if let Some(digits) = token.strip_prefix('-') {
+                    digits.is_empty() || token.parse::<i64>().is_ok()
+                } else {
+                    token.parse::<u64>().is_ok()
+                };
+                if !fits {
+                    return Err(StrictJsonError::UnsafeInteger(token.to_owned()));
+                }
+            }
+            _ => i += 1,
+        }
+    }
+    Ok(())
 }
 
 /// A duplicate-name or unsafe-integer refusal is raised inside serde as a
