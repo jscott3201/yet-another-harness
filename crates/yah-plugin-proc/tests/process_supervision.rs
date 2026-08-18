@@ -441,3 +441,187 @@ async fn a_dead_worker_is_seen_even_when_a_descendant_holds_its_channel() {
     stop_active(activation, &rig.registry, rig.epoch).await;
     process_gone(helper_pid).await;
 }
+
+#[tokio::test]
+async fn deactivation_reclaims_everything_even_at_a_generous_grace() {
+    let revision = lifecycle_revision("slowgrace", '7');
+    // A grace past the point where the exit path's two windows exceed the
+    // old single-grace join bound: the worst case a real composition can
+    // configure, against the worst worker — deaf, jammed, holding a
+    // descendant. Both processes must still die, and the full exit path
+    // (not the abort fallback) must be what runs.
+    let (driver, observer) = ProcessPluginDriver::scripted_with_limits(
+        revision.id().clone(),
+        DriverKind::NodeProcess,
+        fixtures::worker_program(),
+        vec![ProcActivationPlan::worker("deaf-with-helper")],
+        ProcLimits {
+            kill_grace_ms: 2_200,
+            ..ProcLimits::default()
+        },
+    );
+    let mut rig = Rig::new("proc.slowgrace", &revision);
+    let mut activation =
+        HostPluginActivation::prepare(&mut rig.slot, rig.epoch, &rig.broker, &rig.grants, driver)
+            .expect("preparation is inert and succeeds");
+    let id = activation.id().clone();
+    let _handle = activation.activate(&rig.registry).await.expect("starts");
+    let pid = observer.worker_pid(&id).expect("a live worker has a pid");
+    let helper_pid = reported_helper_pid(&observer, &id).await;
+
+    // Jam the socket so the goodbye flush burns its whole window.
+    let call = observer
+        .begin_call(&id, "tool.flood", json!("x".repeat(200 * 1024)), Some(50))
+        .await
+        .expect("the call opens");
+    match settled_within(call).await {
+        CallEnd::Lost { error, .. } => assert_eq!(error, WireErrorKind::DeadlineExceeded),
+        other => panic!("expected the deadline, got {other:?}"),
+    }
+    let began = std::time::Instant::now();
+    stop_active(activation, &rig.registry, rig.epoch).await;
+    // The floor proves the pump's own exit ran to its sweep instead of
+    // being aborted at the old single-grace bound (which sits below it).
+    assert!(
+        began.elapsed() >= std::time::Duration::from_millis(4_400),
+        "the exit path ran both grace windows: {:?}",
+        began.elapsed()
+    );
+    process_gone(pid).await;
+    process_gone(helper_pid).await;
+}
+
+#[tokio::test]
+async fn an_abandoned_worker_that_left_its_group_is_still_reclaimed() {
+    let revision = lifecycle_revision("nogroup", '8');
+    let (driver, observer) = ProcessPluginDriver::scripted_with_limits(
+        revision.id().clone(),
+        DriverKind::NodeProcess,
+        fixtures::worker_program(),
+        vec![ProcActivationPlan::worker("leave-group")],
+        ProcLimits {
+            kill_grace_ms: 100,
+            ..ProcLimits::default()
+        },
+    );
+    let mut rig = Rig::new("proc.nogroup", &revision);
+    let mut activation = HostPluginActivation::prepare(
+        &mut rig.slot,
+        rig.epoch,
+        &rig.broker,
+        &rig.grants,
+        std::sync::Arc::clone(&driver),
+    )
+    .expect("preparation is inert and succeeds");
+    let id = activation.id().clone();
+    let handle = activation.activate(&rig.registry).await.expect("starts");
+    // The worker provably left the group the bootstrap made it lead, so
+    // the group sweep signals an empty group and only the direct leader
+    // kill reclaims anything.
+    rig::diagnostics_show(&observer, &id, "left-group:ok").await;
+    let pid = observer.worker_pid(&id).expect("a live worker has a pid");
+
+    drop(handle);
+    drop(activation);
+    drop(rig);
+    process_gone(pid).await;
+}
+
+#[tokio::test]
+async fn a_zero_tick_interval_is_clamped_not_a_panic() {
+    let revision = lifecycle_revision("zerotick", '9');
+    // A zero interval would panic tokio's timer inside the pump task,
+    // failing every activation with a spurious handshake error; the clamp
+    // to the clock's floor is what makes this succeed.
+    let (driver, observer) = ProcessPluginDriver::scripted_with_limits(
+        revision.id().clone(),
+        DriverKind::NodeProcess,
+        fixtures::worker_program(),
+        vec![ProcActivationPlan::ready()],
+        ProcLimits {
+            tick_interval_ms: 0,
+            handshake_deadline_ms: 1_000,
+            ..ProcLimits::default()
+        },
+    );
+    let mut rig = Rig::new("proc.zerotick", &revision);
+    let mut activation =
+        HostPluginActivation::prepare(&mut rig.slot, rig.epoch, &rig.broker, &rig.grants, driver)
+            .expect("preparation is inert and succeeds");
+    let id = activation.id().clone();
+    let _handle = activation.activate(&rig.registry).await.expect("starts");
+    let call = observer
+        .begin_call(&id, "tool.echo", json!("ticking"), None)
+        .await
+        .expect("the call opens");
+    assert!(matches!(
+        settled_within(call).await,
+        CallEnd::Settled(Outcome::Ok { .. })
+    ));
+    stop_active(activation, &rig.registry, rig.epoch).await;
+}
+
+/// Only Linux surfaces a peer's read-shutdown to writers (macOS accepts
+/// the writes outright, measured), so this pin runs where CI does.
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn a_worker_that_stops_reading_without_goodbye_is_reported_not_healthy() {
+    let revision = lifecycle_revision("halfdead", '0');
+    let (driver, observer) = ProcessPluginDriver::scripted_with_limits(
+        revision.id().clone(),
+        DriverKind::NodeProcess,
+        fixtures::worker_program(),
+        vec![ProcActivationPlan::worker("read-shut-linger")],
+        ProcLimits {
+            kill_grace_ms: 100,
+            ..ProcLimits::default()
+        },
+    );
+    let mut rig = Rig::new("proc.halfdead", &revision);
+    let mut activation =
+        HostPluginActivation::prepare(&mut rig.slot, rig.epoch, &rig.broker, &rig.grants, driver)
+            .expect("preparation is inert and succeeds");
+    let id = activation.id().clone();
+    let handle = activation.activate(&rig.registry).await.expect("starts");
+
+    // One call the worker reads before shutting its read half, then a
+    // flood whose write failure is what kills the outbound direction.
+    let _held = observer
+        .begin_call(&id, "tool.hold", json!(null), None)
+        .await
+        .expect("the call opens");
+    let _jam = observer
+        .begin_call(&id, "tool.flood", json!("x".repeat(200 * 1024)), None)
+        .await
+        .expect("the call opens");
+    // No goodbye, no end-of-file, no exit: health is the only signal, and
+    // it must name the half-death rather than report Healthy forever.
+    let health = health_becomes(&handle, "unhealthy", |health| {
+        matches!(health, PluginHealth::Unhealthy { .. })
+    })
+    .await;
+    let PluginHealth::Unhealthy { summary } = health else {
+        unreachable!()
+    };
+    assert!(
+        summary.contains("stopped reading"),
+        "health names the half-death: {summary}"
+    );
+    // A call opened after the outbound death provably never reached the
+    // worker: it settles immediately, cancelled, without reconciliation.
+    let late = observer
+        .begin_call(&id, "tool.late", json!(null), None)
+        .await
+        .expect("the session still admits the call");
+    match settled_within(late).await {
+        CallEnd::Lost { error, reconcile } => {
+            assert_eq!(error, WireErrorKind::Cancelled);
+            assert!(
+                !reconcile,
+                "an untransmitted call demands no reconciliation"
+            );
+        }
+        other => panic!("expected the never-delivered settlement, got {other:?}"),
+    }
+    stop_active(activation, &rig.registry, rig.epoch).await;
+}

@@ -14,6 +14,13 @@
 //! - `deaf`: complete the handshake, then never touch the channel again —
 //!   the worker that ignores back-pressure, goodbyes, and end-of-input
 //!   alike, so only `SIGKILL` ends it.
+//! - `deaf-with-helper`: deaf, plus a sleeping helper (pid on stdout)
+//!   spawned first — the worst-case deactivation: every grace window
+//!   spent, a descendant still owed to the group sweep.
+//! - `leave-group`: move into the host's process group, then go deaf —
+//!   reclaimable only by a direct kill of this pid.
+//! - `read-shut-linger`: after one call, shut the read half and never
+//!   speak again — no goodbye, no end-of-file, no exit.
 //! - `spawn-helper`: complete the handshake, spawn a sleeping helper that
 //!   inherits the channel fd (printing its pid to stdout), and exit — the
 //!   death only the process, not the socket, can reveal.
@@ -125,6 +132,61 @@ fn run(mode: &str, wire: &mut Wire) -> i32 {
             // Not even an EOF read: this worker's only exit is the kill.
             loop {
                 std::thread::sleep(std::time::Duration::from_secs(3600));
+            }
+        }
+        "deaf-with-helper" => {
+            if !wire.handshake() {
+                return 70;
+            }
+            // Deaf AND holding a descendant: the shape that spends the
+            // whole deactivation budget — the goodbye flush, the reap
+            // grace — and still owes the group sweep a helper.
+            match std::process::Command::new("/bin/sleep").arg("30").spawn() {
+                Ok(helper) => {
+                    println!("helper:{}", helper.id());
+                    let _ = std::io::stdout().flush();
+                }
+                Err(error) => {
+                    eprintln!("helper did not spawn: {error}");
+                    return 70;
+                }
+            }
+            loop {
+                std::thread::sleep(std::time::Duration::from_secs(3600));
+            }
+        }
+        "leave-group" => {
+            if !wire.handshake() {
+                return 70;
+            }
+            // Move out of the group the bootstrap made this process lead,
+            // then go deaf: the group sweep now signals an empty group,
+            // and only a direct kill of this pid reclaims anything.
+            let joined = unsafe { libc::setpgid(0, libc::getpgid(libc::getppid())) == 0 };
+            println!("left-group:{}", if joined { "ok" } else { "err" });
+            let _ = std::io::stdout().flush();
+            loop {
+                std::thread::sleep(std::time::Duration::from_secs(3600));
+            }
+        }
+        "read-shut-linger" => {
+            if !wire.handshake() {
+                return 70;
+            }
+            // Shut the read half after one call and never speak again: no
+            // goodbye, no end-of-file, no exit — the half-death only
+            // health can report and only deactivation can end.
+            loop {
+                match wire.next_frame() {
+                    Some(HostMessage::Call(_)) => {
+                        let _ = wire.channel.shutdown(std::net::Shutdown::Read);
+                        loop {
+                            std::thread::sleep(std::time::Duration::from_secs(3600));
+                        }
+                    }
+                    Some(HostMessage::Goodbye(_)) | None => return 0,
+                    Some(_) => {}
+                }
             }
         }
         "spawn-helper" => {

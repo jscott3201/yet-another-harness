@@ -115,10 +115,12 @@ pub(crate) fn spawn_worker(command: &WorkerCommand) -> io::Result<SpawnedWorker>
     // opens after this point are born close-on-exec and need no visit.
     let fd_ceiling = fd_table_ceiling();
     // SAFETY: the closure runs between fork and exec in a multi-threaded
-    // process, so it may only make async-signal-safe calls. It does:
-    // `setpgid`, `dup2`, and (in the sweep) `fcntl` and the `close_range`
-    // syscall are all raw syscalls, and the ceiling was precomputed in
-    // the parent because directory scans and `sysconf` are not safe here.
+    // process, so it may only make async-signal-safe calls. Every call it
+    // makes is one: `setpgid`, `dup2`, and — in the sweep — `fcntl` and
+    // the `close_range` syscall are raw syscalls, and
+    // `io::Error::last_os_error` only reads errno. The ceiling is
+    // precomputed in the parent because directory scans and `sysconf` are
+    // not safe here.
     unsafe {
         spawn.pre_exec(move || {
             // Group leadership first: the kill path signals the group, so a

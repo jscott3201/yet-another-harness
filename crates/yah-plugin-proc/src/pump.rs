@@ -19,7 +19,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::sync::{
     Arc, Mutex,
-    atomic::{AtomicU8, Ordering},
+    atomic::{AtomicBool, AtomicU8, Ordering},
 };
 use std::time::Duration;
 
@@ -85,6 +85,11 @@ pub(crate) struct PumpShared {
     diagnostics_cap: usize,
     /// The worker's pid, held so tests can prove the process is gone.
     worker_pid: i32,
+    /// The outbound direction died (the worker shut its read half) while
+    /// the session stayed open for a goodbye. A separate fact from the
+    /// close: health must name it, but it must not steal the close
+    /// summary a later goodbye wins under the first-cause rule.
+    output_closed: AtomicBool,
 }
 
 #[derive(Default)]
@@ -102,11 +107,21 @@ impl PumpShared {
             diagnostics: Mutex::new(Diagnostics::default()),
             diagnostics_cap: limits.diagnostics_cap_bytes,
             worker_pid,
+            output_closed: AtomicBool::new(false),
         }
     }
 
     pub fn worker_pid(&self) -> i32 {
         self.worker_pid
+    }
+
+    pub fn output_closed(&self) -> bool {
+        self.output_closed.load(Ordering::Acquire)
+    }
+
+    fn set_output_closed(&self) {
+        self.output_closed.store(true, Ordering::Release);
+        self.changed.notify_waiters();
     }
 
     pub fn is_negotiated(&self) -> bool {
@@ -289,10 +304,13 @@ impl Pump {
                     if ready.is_err() || !self.write_ready() {
                         // Not an end of input: what the peer already sent —
                         // its goodbye above all — still decides how this
-                        // session closes. Input ends by goodbye,
-                        // end-of-file, the child's exit, or the clock.
+                        // session closes. But a session that can deliver
+                        // nothing is not healthy, and only deactivation
+                        // ends one whose peer also stays silent, so the
+                        // half-death is published for health to name.
                         self.output_open = false;
                         self.outbuf.clear();
+                        self.shared.set_output_closed();
                     }
                 }
                 _ = ticker.tick() => {
@@ -443,8 +461,21 @@ impl Pump {
         if !self.output_open {
             // Undeliverable: the peer shut its read half. Dropping these is
             // not silence — the peer cannot observe anything else — and it
-            // keeps a dead write side from tripping the cap.
-            self.session.drain_outbox();
+            // keeps a dead write side from tripping the cap. A call whose
+            // frame dies here provably never reached the worker, so its
+            // waiter settles now, cancelled without reconciliation, rather
+            // than waiting for the session's end to claim — wrongly — that
+            // the worker may have acted on it.
+            for message in self.session.drain_outbox() {
+                if let HostMessage::Call(call) = message
+                    && let Some(waiter) = self.pending.remove(&call.call_id)
+                {
+                    let _ = waiter.send(CallEnd::Lost {
+                        error: WireErrorKind::Cancelled,
+                        reconcile: false,
+                    });
+                }
+            }
             return true;
         }
         for message in self.session.drain_outbox() {

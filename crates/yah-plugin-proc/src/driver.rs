@@ -326,6 +326,11 @@ impl ActivationCore {
             let mut task = handle.task;
             let bound = Duration::from_millis(2 * self.limits.kill_grace_ms + 2_000);
             if tokio::time::timeout(bound, &mut task).await.is_err() {
+                // Deliberately redundant with the pump's own reap: with the
+                // bound covering the exit path's worst case, this fires
+                // only for a pump stuck beyond its own bounds — a state no
+                // test can honestly construct — and then the sweep must
+                // come from somewhere the abort cannot cancel.
                 let pgid = handle.shared.worker_pid();
                 if pgid > 0 {
                     // SAFETY: kill(2) with a negative pid signals the
@@ -384,6 +389,14 @@ impl PreparedDriverActivation for PreparedProcActivation {
                 .close_summary()
                 .unwrap_or_else(|| "worker session ended".to_owned());
             return Ok(PluginHealth::unhealthy(summary));
+        }
+        if shared.output_closed() {
+            // The session stays open for the worker's goodbye, but nothing
+            // can be delivered to it; only deactivation ends this state if
+            // the worker also stays silent, and health is the signal.
+            return Ok(PluginHealth::unhealthy(
+                "worker stopped reading its channel",
+            ));
         }
         if shared.is_negotiated() {
             Ok(PluginHealth::Healthy)
