@@ -42,6 +42,23 @@ use std::collections::{BTreeMap, BTreeSet};
 pub struct SessionConfig {
     pub features: Vec<String>,
     pub ceilings: Ceilings,
+    /// Total retired correlation entries (spent call ids and handle ids,
+    /// offered worker handle ids, reclaimed handle ids) the session may
+    /// hold. `None` — the crate default — is the documented status quo:
+    /// no-reuse memory grows for the session's lifetime, and bounding it
+    /// is the supervising driver's job. A budget bounds that memory
+    /// without a wire change: at the budget, new admissions are refused
+    /// (worker calls with a non-retryable `resource-exhausted`, host
+    /// applications with [`AppError::SessionRetired`]) and no new id is
+    /// spent, while every already-admitted call, terminal, release, and
+    /// ack completes exactly as before. Retirements from admitted work
+    /// may pass the budget; the worst-case overshoot is
+    /// `worker_calls_in_flight + 2*host_calls_in_flight + 2*live_handles`
+    /// entries (an admitted call retires one id; a spilled terminal
+    /// retires the call id and the offered handle; a released or
+    /// reclaimed handle and each acked worker release retire one), so the
+    /// bound stays strict.
+    pub retired_operation_budget: Option<u64>,
 }
 
 impl Default for SessionConfig {
@@ -55,6 +72,7 @@ impl Default for SessionConfig {
                 initial_stream_credit: INITIAL_STREAM_CREDIT,
                 max_stream_credit: MAX_STREAM_CREDIT,
             },
+            retired_operation_budget: None,
         }
     }
 }
@@ -233,6 +251,13 @@ pub enum AppError {
     StreamViolation(&'static str),
     /// A reply already went out for that call.
     AlreadySettled,
+    /// The session's retired-operation budget is exhausted: this session
+    /// has remembered every id it will remember, and this new admission —
+    /// a host call, a handle mint, an offer, a release — would spend one
+    /// more. Not retryable on this session; the driver's remedy is to
+    /// finish in-flight work and retire the activation. Never a wire
+    /// fault: the worker did nothing wrong.
+    SessionRetired,
 }
 
 /// The host side of one worker connection.
@@ -322,6 +347,47 @@ impl HostSession {
     /// active: after teardown a zero is unconditional and proves nothing.
     pub fn live_handles(&self) -> u32 {
         self.live_handle_count
+    }
+
+    /// Calls currently in flight: `(host-initiated, worker-initiated)`.
+    /// Each is bounded by its negotiated ceiling; this is the observation
+    /// half of that law.
+    pub fn in_flight_calls(&self) -> (u32, u32) {
+        (self.host_calls.len() as u32, self.worker_calls.len() as u32)
+    }
+
+    /// Worker-held handles awaiting a release ack. Bounded by the
+    /// `live_handles` ceiling.
+    pub fn pending_releases(&self) -> u32 {
+        self.pending_worker_releases.len() as u32
+    }
+
+    /// Total correlation entries the session will remember forever:
+    /// spent call ids (both directions), spent handle ids (released,
+    /// reclaimed, and worker-acked), and every worker-offered handle id.
+    /// These collections never shrink while the session lives — the
+    /// no-reuse law — so this count is the memory the session has spent
+    /// on correlation, and [`SessionConfig::retired_operation_budget`]
+    /// bounds it. That budget is an enforceable cardinality bound that
+    /// upper-bounds the correlation state a session can hold; it is not
+    /// a byte-exact account of allocator behavior, which node sizes and
+    /// spare capacity keep outside the session's sight.
+    pub fn retired_operations(&self) -> u64 {
+        (self.retired_worker_calls.len()
+            + self.retired_host_calls.len()
+            + self.retired_handles.len()
+            + self.reclaimed_handles.len()
+            + self.retired_worker_handles.len()
+            + self.offered_worker_handles.len()) as u64
+    }
+
+    /// Whether a new admission would push correlation memory past the
+    /// configured budget. Admissions check this; retirements from
+    /// already-admitted work never do.
+    pub(super) fn budget_full(&self) -> bool {
+        self.config
+            .retired_operation_budget
+            .is_some_and(|budget| self.retired_operations() >= budget)
     }
 
     pub fn is_closed(&self) -> bool {
@@ -457,8 +523,14 @@ impl HostSession {
         }
         self.reclaim_all_handles();
         // Acks that will never come: worker-held handles die with the
-        // worker, so pending releases are void, not still owed.
+        // worker, so pending releases are void, not still owed. The
+        // reclaimed table dies with the session too — after close, no
+        // frame is read, so no racing release can arrive to consult it.
+        // Worker calls in flight die with their answers; keeping them in
+        // the map would leave the in-flight gauge lying after close.
         self.pending_worker_releases.clear();
+        self.reclaimed_handles.clear();
+        self.worker_calls.clear();
         self.phase = Phase::Closed;
     }
 
@@ -473,6 +545,8 @@ impl HostSession {
         }
         self.reclaim_all_handles();
         self.pending_worker_releases.clear();
+        self.reclaimed_handles.clear();
+        self.worker_calls.clear();
         if self.phase == Phase::Active {
             self.outbox.push(HostMessage::Goodbye(Goodbye {
                 reason: bounded_reason(kind),

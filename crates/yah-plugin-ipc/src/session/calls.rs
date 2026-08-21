@@ -26,6 +26,15 @@ impl HostSession {
             self.fatal(WireErrorKind::DuplicateCall, "worker call id reused");
             return;
         }
+        // The correlation budget precedes every other admission rule:
+        // at the budget no new id may be spent, so even a call that
+        // would otherwise be refused with its id spent is refused
+        // without spending. The refusal is not retryable — there is no
+        // fresh id later in this session.
+        if self.budget_full() {
+            self.refuse_worker_call_unspent(call_id);
+            return;
+        }
         let payload_bytes = serde_json::to_vec(&call.payload)
             .map(|bytes| bytes.len())
             .unwrap_or(usize::MAX);
@@ -72,13 +81,29 @@ impl HostSession {
     /// id: the id is spent even though the call never ran.
     pub(super) fn refuse_worker_call(&mut self, call_id: CallId, kind: WireErrorKind) {
         self.retired_worker_calls.insert(call_id);
+        self.push_call_refusal(
+            call_id,
+            kind,
+            matches!(kind, WireErrorKind::ResourceExhausted),
+        );
+    }
+
+    /// Refuse a worker call at the correlation budget. The one refusal
+    /// that does not spend its id — spending it is exactly what the
+    /// budget forbids — and the one that is never retryable: the session
+    /// has no fresh id left to offer.
+    pub(super) fn refuse_worker_call_unspent(&mut self, call_id: CallId) {
+        self.push_call_refusal(call_id, WireErrorKind::ResourceExhausted, false);
+    }
+
+    fn push_call_refusal(&mut self, call_id: CallId, kind: WireErrorKind, retryable: bool) {
         self.outbox.push(HostMessage::Reply(Reply {
             call_id,
             outcome: Outcome::Err {
                 error: WireError {
                     kind,
                     message: super::kind_name(kind).to_owned(),
-                    retryable: matches!(kind, WireErrorKind::ResourceExhausted),
+                    retryable,
                     reconcile_required: false,
                 },
             },
@@ -187,6 +212,12 @@ impl HostSession {
                 bytes: payload_bytes,
             });
         }
+        // The correlation budget gates new host admissions after bounds:
+        // a call that can never be admitted must not consume the
+        // in-flight ceiling's retry-shaped error either.
+        if self.budget_full() {
+            return Err(AppError::SessionRetired);
+        }
         if self.host_calls.len() as u32 >= self.config.ceilings.host_calls_in_flight {
             return Err(AppError::CallCeiling);
         }
@@ -243,17 +274,25 @@ impl HostSession {
             if self.retired_host_calls.contains(&call_id) {
                 // Tolerated, but an offer inside it still spends its
                 // handle id: the worker minted the id whether or not the
-                // settled call could hear about it.
-                if let Outcome::Spilled { artifact } = &reply.outcome
-                    && self
-                        .offered_worker_handles
-                        .insert(artifact.handle, HandleKind::Artifact)
-                        .is_some()
-                {
-                    self.fatal(
-                        WireErrorKind::UnknownHandle,
-                        "spilled offer reuses a worker handle id",
-                    );
+                // settled call could hear about it. At the correlation
+                // budget the spend is refused instead — this is the one
+                // worker-input path that mints new correlation entries
+                // per frame, so leaving it ungated would make the budget
+                // unbounded (one settled call id could carry unlimited
+                // late offers). The race stays tolerated either way; at
+                // the budget the offer is simply not remembered.
+                if let Outcome::Spilled { artifact } = &reply.outcome {
+                    if self.offered_worker_handles.contains_key(&artifact.handle) {
+                        self.fatal(
+                            WireErrorKind::UnknownHandle,
+                            "spilled offer reuses a worker handle id",
+                        );
+                        return;
+                    }
+                    if !self.budget_full() {
+                        self.offered_worker_handles
+                            .insert(artifact.handle, HandleKind::Artifact);
+                    }
                 }
                 return;
             }

@@ -92,15 +92,18 @@ fn json_class(bytes: &[u8]) -> &'static str {
 #[test]
 fn every_seed_classifies_exactly_as_its_name_declares() {
     let dir = corpus_dir();
-    let mut names: Vec<String> = fs::read_dir(&dir)
+    // The session-trace corpus lives beside the seeds and has its own
+    // replay test; the byte-seed inventory sees files only.
+    let seed_paths: Vec<std::path::PathBuf> = fs::read_dir(&dir)
         .expect("the corpus directory is checked in")
-        .map(|entry| {
-            entry
-                .expect("readable entry")
-                .file_name()
-                .to_string_lossy()
-                .into_owned()
+        .filter_map(|entry| {
+            let path = entry.expect("readable entry").path();
+            (!path.is_dir()).then_some(path)
         })
+        .collect();
+    let mut names: Vec<String> = seed_paths
+        .iter()
+        .map(|path| path.file_name().unwrap().to_string_lossy().into_owned())
         .collect();
     names.sort();
     assert!(
@@ -143,13 +146,17 @@ fn no_two_seeds_carry_the_same_bytes() {
     let dir = corpus_dir();
     let mut contents: Vec<(String, Vec<u8>)> = fs::read_dir(&dir)
         .expect("the corpus directory is checked in")
-        .map(|entry| {
+        .filter_map(|entry| {
             let path = entry.expect("readable entry").path();
-            let bytes = fs::read(&path).expect("seed is readable");
-            (
-                path.file_name().unwrap().to_string_lossy().into_owned(),
-                bytes,
-            )
+            if path.is_dir() {
+                None
+            } else {
+                let bytes = fs::read(&path).expect("seed is readable");
+                Some((
+                    path.file_name().unwrap().to_string_lossy().into_owned(),
+                    bytes,
+                ))
+            }
         })
         .collect();
     contents.sort_by(|a, b| a.1.cmp(&b.1));

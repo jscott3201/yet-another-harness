@@ -75,6 +75,25 @@ pub struct ProcLimits {
     /// under what the session itself admits would accuse a conformant
     /// worker of not draining a frame it was never given.
     pub outbound_buffer_cap_bytes: usize,
+    /// Slots in the pump's command channel — the queue of call and cancel
+    /// requests the driver hands the pump. Bounded on purpose: a caller
+    /// flood must hit an observable rejection, not an unbounded backlog.
+    /// The default matches the session's default host in-flight ceiling,
+    /// so the channel never rejects a call the session would have
+    /// admitted; a value below one is clamped to one at start. Shutdown
+    /// does not ride this channel at all — it has a dedicated
+    /// always-deliverable signal, so deactivation cannot be dropped
+    /// behind a command flood.
+    pub command_channel_capacity: usize,
+    /// Retired correlation entries the worker session may remember before
+    /// it stops making and taking new ones (see
+    /// [`yah_plugin_ipc::session::SessionConfig::retired_operation_budget`]).
+    /// `Some` by default: the driver is the supervisor the protocol docs
+    /// name as the bounding authority, and a long-lived hostile worker
+    /// must not grow host correlation memory without a ceiling. The
+    /// overshoot past the budget is bounded by the session's negotiated
+    /// in-flight and live-handle ceilings.
+    pub retired_operation_budget: Option<u64>,
 }
 
 impl Default for ProcLimits {
@@ -85,6 +104,8 @@ impl Default for ProcLimits {
             tick_interval_ms: 10,
             diagnostics_cap_bytes: 64 * 1024,
             outbound_buffer_cap_bytes: 8 * 1024 * 1024,
+            command_channel_capacity: 16,
+            retired_operation_budget: Some(1_000_000),
         }
     }
 }

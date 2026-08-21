@@ -40,7 +40,7 @@ use yah_plugin_ipc::types::{CallId, CancelTarget};
 
 use crate::ProcLimits;
 use crate::bootstrap::{WorkerCommand, spawn_worker};
-use crate::pump::{self, CallEnd, DiagnosticStream, PumpCommand, PumpShared};
+use crate::pump::{self, CallEnd, DiagnosticStream, PumpCommand, PumpGauges, PumpShared};
 
 type ObservationMap = HashMap<PluginActivationId, Arc<ActivationObservation>>;
 
@@ -269,7 +269,11 @@ impl ActivationCore {
         let worker = spawn_worker(&self.command).map_err(|error| {
             DriverActivationError::failed(format!("worker did not spawn: {error}"))
         })?;
-        let handle = pump::start(worker, SessionConfig::default(), self.limits);
+        let config = SessionConfig {
+            retired_operation_budget: self.limits.retired_operation_budget,
+            ..SessionConfig::default()
+        };
+        let handle = pump::start(worker, config, self.limits);
         let shared = Arc::clone(&handle.shared);
         self.observation.attach(&handle);
         {
@@ -312,9 +316,10 @@ impl ActivationCore {
     async fn shutdown(&self) {
         let taken = self.live.lock().await.take();
         if let Some(handle) = taken {
-            let _ = handle.commands.send(PumpCommand::Shutdown {
-                reason: "deactivated".to_owned(),
-            });
+            // The watch signal has no queue: deactivation cannot be
+            // dropped behind a command flood, and a pump that already
+            // ended simply never reads it.
+            let _ = handle.shutdown.send(Some("deactivated".to_owned()));
             // The pump's exit path spends the grace twice — the goodbye
             // flush and the reap window — plus its bounded drains, so the
             // join bound must cover both windows or it would abort the
@@ -457,7 +462,7 @@ enum ObservationLink {
 #[derive(Clone)]
 struct ActivationLink {
     shared: Arc<PumpShared>,
-    commands: mpsc::WeakUnboundedSender<PumpCommand>,
+    commands: mpsc::WeakSender<PumpCommand>,
 }
 
 impl ActivationObservation {
@@ -593,6 +598,17 @@ impl ProcObserver {
         )
     }
 
+    /// Read-only memory gauges for a live activation: outbound buffer
+    /// bytes versus allocated capacity, pending call waiters, and the
+    /// command channel's free and total slots. `None` once the
+    /// activation's pump has ended — the gauges are the pump's, and they
+    /// do not outlive it.
+    pub fn gauges(&self, id: &PluginActivationId) -> Option<PumpGauges> {
+        let link = self.observation(id)?.link()?;
+        let available = link.commands.upgrade().map(|sender| sender.capacity());
+        Some(link.shared.gauges(available))
+    }
+
     /// Start a host call toward the worker; settle it via [`PendingCall`].
     pub async fn begin_call(
         &self,
@@ -612,14 +628,23 @@ impl ProcObserver {
         let (opened_sender, opened) = oneshot::channel();
         let (settled_sender, settled) = oneshot::channel();
         commands
-            .send(PumpCommand::Call {
+            .try_send(PumpCommand::Call {
                 method: method.to_owned(),
                 payload,
                 deadline_ms,
                 opened: opened_sender,
                 settled: settled_sender,
             })
-            .map_err(|_| "the worker pump has ended".to_owned())?;
+            .map_err(|error| match error {
+                mpsc::error::TrySendError::Full(_) => {
+                    // Pre-admission rejection: the pump never saw this
+                    // call, so no id was minted, no frame queued, and no
+                    // waiter exists to settle. Observable back-pressure,
+                    // never a silent queue.
+                    "the pump command channel is at capacity; the call was not admitted".to_owned()
+                }
+                mpsc::error::TrySendError::Closed(_) => "the worker pump has ended".to_owned(),
+            })?;
         let call_id = opened
             .await
             .map_err(|_| "the worker pump has ended".to_owned())?
@@ -644,12 +669,18 @@ impl ProcObserver {
             .ok_or_else(|| "the worker pump has ended".to_owned())?;
         let (done_sender, done) = oneshot::channel();
         commands
-            .send(PumpCommand::Cancel {
+            .try_send(PumpCommand::Cancel {
                 call_id,
                 target,
                 done: done_sender,
             })
-            .map_err(|_| "the worker pump has ended".to_owned())?;
+            .map_err(|error| match error {
+                mpsc::error::TrySendError::Full(_) => {
+                    "the pump command channel is at capacity; the cancel was not admitted"
+                        .to_owned()
+                }
+                mpsc::error::TrySendError::Closed(_) => "the worker pump has ended".to_owned(),
+            })?;
         done.await
             .map_err(|_| "the worker pump has ended".to_owned())?
             .map_err(|error| format!("the session refused the cancel: {error:?}"))

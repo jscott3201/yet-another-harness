@@ -30,6 +30,9 @@ impl HostSession {
         if !self.worker_calls.contains_key(&minted_for) {
             return Err(AppError::UnknownCall);
         }
+        if self.budget_full() {
+            return Err(AppError::SessionRetired);
+        }
         let handle = self.insert_handle(HandleKind::Capability, None)?;
         self.worker_calls
             .get_mut(&minted_for)
@@ -67,6 +70,9 @@ impl HostSession {
             return Err(AppError::InvalidField(
                 "media type outside its length bound",
             ));
+        }
+        if self.budget_full() {
+            return Err(AppError::SessionRetired);
         }
         let offer_bytes = bytes.len() as u64;
         let digest = hex(blake3::hash(&bytes).as_bytes());
@@ -251,6 +257,12 @@ impl HostSession {
         }
         if self.pending_worker_releases.contains_key(&handle) {
             return Err(AppError::ReleasePending);
+        }
+        // A release asks the worker to retire an id on its side; at the
+        // correlation budget the session stops asking for new
+        // retirements, exactly as it stops making them.
+        if self.budget_full() {
+            return Err(AppError::SessionRetired);
         }
         // Pending acks are handle-shaped state; the ceiling that bounds
         // live handles bounds them too, so a worker that withholds acks
