@@ -388,6 +388,12 @@ impl ModelSession {
             self.refuse_worker_call(id, "resource-exhausted", false, false);
             return;
         }
+        // A served read clears the same admission bar as any other call:
+        // the worker in-flight ceiling precedes the dispatch.
+        if self.worker_calls.len() as u32 >= WORKER_CALLS_MAX {
+            self.refuse_worker_call(id, "resource-exhausted", true, true);
+            return;
+        }
         let Some(entry) = self.handles.iter().find(|entry| entry.id == handle) else {
             self.refuse_worker_call(id, "unknown-handle", false, true);
             return;

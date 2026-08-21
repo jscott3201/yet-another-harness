@@ -167,13 +167,20 @@ fn generate(rng: &mut Rng) -> (Option<u64>, Vec<Action>) {
                     dropped: rng.below(4),
                 }
             }
-            11 => {
-                let id = 1 + rng.below(6);
-                Action::Credit {
-                    id,
-                    additional: rng.below(6) as u32,
+            11 => match rng.below(3) {
+                0 => Action::ArtifactRead {
+                    id: 1 + rng.below(6),
+                    handle: 1 + rng.below(if next_handle > 1 { next_handle } else { 2 }),
+                    ok_range: rng.below(2) == 0,
+                },
+                _ => {
+                    let id = 1 + rng.below(6);
+                    Action::Credit {
+                        id,
+                        additional: rng.below(6) as u32,
+                    }
                 }
-            }
+            },
             12 => {
                 if offered.is_empty() {
                     Action::Tick { now_ms: now }
