@@ -86,7 +86,9 @@ pub struct PumpGauges {
     /// Encoded frames awaiting a worker that is not draining, in bytes.
     pub outbound_buffer_bytes: usize,
     /// What that buffer is allocated for — the high-water it has reached
-    /// this connection. Zero only before the first frame.
+    /// this connection. Zero before the first frame and after the
+    /// outbound direction dies, where the undeliverable buffer is
+    /// discarded outright.
     pub outbound_buffer_capacity: usize,
     /// Host calls with a waiter parked on the pump.
     pub pending_calls: usize,

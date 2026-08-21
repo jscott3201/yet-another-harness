@@ -274,17 +274,25 @@ impl HostSession {
             if self.retired_host_calls.contains(&call_id) {
                 // Tolerated, but an offer inside it still spends its
                 // handle id: the worker minted the id whether or not the
-                // settled call could hear about it.
-                if let Outcome::Spilled { artifact } = &reply.outcome
-                    && self
-                        .offered_worker_handles
-                        .insert(artifact.handle, HandleKind::Artifact)
-                        .is_some()
-                {
-                    self.fatal(
-                        WireErrorKind::UnknownHandle,
-                        "spilled offer reuses a worker handle id",
-                    );
+                // settled call could hear about it. At the correlation
+                // budget the spend is refused instead — this is the one
+                // worker-input path that mints new correlation entries
+                // per frame, so leaving it ungated would make the budget
+                // unbounded (one settled call id could carry unlimited
+                // late offers). The race stays tolerated either way; at
+                // the budget the offer is simply not remembered.
+                if let Outcome::Spilled { artifact } = &reply.outcome {
+                    if self.offered_worker_handles.contains_key(&artifact.handle) {
+                        self.fatal(
+                            WireErrorKind::UnknownHandle,
+                            "spilled offer reuses a worker handle id",
+                        );
+                        return;
+                    }
+                    if !self.budget_full() {
+                        self.offered_worker_handles
+                            .insert(artifact.handle, HandleKind::Artifact);
+                    }
                 }
                 return;
             }

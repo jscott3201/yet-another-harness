@@ -138,8 +138,11 @@ its retired call ids, handle ids, and worker-offered ids reach the bound
 (worker calls with a non-retryable `resource-exhausted`, host
 applications with a session-retired error) without spending another id,
 while every already-admitted call, terminal, release, and ack completes
-exactly as before. Retirements from admitted work may pass the budget;
-the overshoot is bounded by the negotiated in-flight and live-handle
+exactly as before. Late spilled offers riding a settled call — the one
+worker-input path that would mint a new remembered id per frame — stop
+spending at the budget: the race stays tolerated, the offer is simply
+not remembered. Retirements from admitted work may pass the budget; the
+overshoot is bounded by the negotiated in-flight and live-handle
 ceilings, so the bound stays strict. The default is unbounded — bounding
 it is the supervising driver's job, and the process driver sets a budget
 by default. A deadline the worker

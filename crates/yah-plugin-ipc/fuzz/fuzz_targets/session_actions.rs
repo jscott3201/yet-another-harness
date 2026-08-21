@@ -63,7 +63,7 @@ libfuzzer_sys::fuzz_target!(|data: &[u8]| {
 
     // Each action consumes two bytes: an opcode and a packed operand.
     for chunk in data[1..].chunks_exact(2).take(MAX_ACTIONS) {
-        let opcode = chunk[0] % 12;
+        let opcode = chunk[0] % 14;
         let operand = u64::from(chunk[1]) % MAX_ID + 1;
         match opcode {
             0..=2 => {
@@ -135,6 +135,28 @@ libfuzzer_sys::fuzz_target!(|data: &[u8]| {
                     CallId(operand),
                     Outcome::Ok { result: serde_json::json!(null) },
                 );
+            }
+            11 => {
+                tracer.note(format!("host-call {operand}"));
+                let _ = session.call_worker("m", serde_json::json!(null), None, false);
+            }
+            12 => {
+                // Late spilled replies against possibly-retired host
+                // calls: the one worker-input path that mints new
+                // correlation entries per frame — the exact path the
+                // budget must gate.
+                tracer.note(format!("late-offer {operand}"));
+                feed(&mut session, &WorkerMessage::Reply(Reply {
+                    call_id: CallId(operand),
+                    outcome: Outcome::Spilled {
+                        artifact: ArtifactOffer {
+                            handle: HandleId(operand),
+                            bytes: 10,
+                            media_type: "text/plain".into(),
+                            digest_blake3: "a".repeat(64),
+                        },
+                    },
+                }));
             }
             _ => {
                 tracer.note(format!("mint {operand}"));

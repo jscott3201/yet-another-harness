@@ -410,7 +410,9 @@ impl ModelSession {
         if self.host_call(id).is_none() {
             if self.retired_host_calls.contains(&id) {
                 // Tolerated race; a spilled offer inside it still spends
-                // its handle id, and a repeat offer is the reuse fault.
+                // its handle id — unless the correlation budget is full,
+                // where the spend is refused and the race simply stays
+                // tolerated. A repeat offer is the reuse fault either way.
                 if let WOutcome::Spilled { handle, .. } = outcome {
                     if self
                         .offered_worker_handles
@@ -420,7 +422,9 @@ impl ModelSession {
                         self.fatal("unknown-handle");
                         return;
                     }
-                    self.offered_worker_handles.push((*handle, Kind::Artifact));
+                    if !self.budget_full() {
+                        self.offered_worker_handles.push((*handle, Kind::Artifact));
+                    }
                 }
                 return;
             }

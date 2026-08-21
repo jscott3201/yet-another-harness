@@ -585,3 +585,92 @@ fn named_cases_match_the_model() {
         ],
     );
 }
+
+#[test]
+fn named_budget_cases_match_the_model() {
+    // Late spilled offers riding a settled host call are the one
+    // worker-input path that mints a new correlation entry per frame:
+    // below the budget each spends its fresh handle id; at the budget
+    // the spend is refused, the race stays tolerated, and the offer's
+    // handle is not remembered — so a second late offer naming the same
+    // fresh handle is also tolerated, while a repeat of a REMEMBERED
+    // handle is still the reuse fault.
+    case(
+        "late_offers_stop_spending_at_the_budget",
+        Some(3),
+        vec![
+            Action::Hello,
+            Action::HostCall { deadline_ms: None },
+            Action::WorkerReply {
+                id: 1,
+                outcome: WOutcome::Ok,
+            },
+            // Retired operations: 1 (the settled host call). Two late
+            // offers spend ids 2 and 3, reaching the budget.
+            Action::WorkerReply {
+                id: 1,
+                outcome: WOutcome::Spilled {
+                    handle: 2,
+                    bytes: 10,
+                },
+            },
+            Action::WorkerReply {
+                id: 1,
+                outcome: WOutcome::Spilled {
+                    handle: 3,
+                    bytes: 10,
+                },
+            },
+            // At the budget: fresh handles are not remembered, and the
+            // same handle twice is equally tolerated.
+            Action::WorkerReply {
+                id: 1,
+                outcome: WOutcome::Spilled {
+                    handle: 4,
+                    bytes: 10,
+                },
+            },
+            Action::WorkerReply {
+                id: 1,
+                outcome: WOutcome::Spilled {
+                    handle: 4,
+                    bytes: 10,
+                },
+            },
+            // A repeat of a remembered handle is still the reuse fault.
+            Action::WorkerReply {
+                id: 1,
+                outcome: WOutcome::Spilled {
+                    handle: 2,
+                    bytes: 10,
+                },
+            },
+        ],
+    );
+    // The offer and release SessionRetired gates: at the budget the host
+    // application cannot mint new artifact memory or ask for new
+    // worker-side retirements.
+    case(
+        "host_admissions_stop_at_the_budget",
+        Some(1),
+        vec![
+            Action::Hello,
+            Action::WorkerCall {
+                id: 1,
+                stream: false,
+            },
+            Action::AnswerWorkerCall {
+                id: 1,
+                outcome: WOutcome::Ok,
+            },
+            // Retired operations: 1 — the budget is full.
+            Action::WorkerCall {
+                id: 2,
+                stream: false,
+            },
+            Action::OfferArtifact { id: 2, bytes: 8 },
+            Action::Mint { id: 2 },
+            Action::HostCall { deadline_ms: None },
+        ],
+    );
+}
