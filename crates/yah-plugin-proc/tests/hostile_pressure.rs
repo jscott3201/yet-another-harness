@@ -101,14 +101,12 @@ async fn a_command_flood_meets_bounded_admission_and_loses_no_admitted_call() {
             .expect("preparation is inert and succeeds");
     let _handle = activation.activate(&rig.registry).await.expect("starts");
     let id = activation.id().clone();
-    let capacity = observer
-        .gauges(&id)
-        .expect("live gauges")
-        .command_channel_capacity;
-
+    // No deadlines: an admitted call's slot never frees on its own, so
+    // the rejections below are deterministic rather than a race between
+    // the flood and the expiry clock.
     let mut calls = Vec::new();
     for _ in 0..64 {
-        calls.push(observer.begin_call(&id, "tool.flood", json!("x".repeat(64 * 1024)), Some(80)));
+        calls.push(observer.begin_call(&id, "tool.flood", json!("x".repeat(64 * 1024)), None));
     }
     let mut admitted = Vec::new();
     let mut rejected = 0usize;
@@ -126,44 +124,39 @@ async fn a_command_flood_meets_bounded_admission_and_loses_no_admitted_call() {
     }
     assert!(
         rejected > 0,
-        "a 64-call flood against a 16-slot channel must be rejected"
+        "a 64-call flood must be rejected: the deaf worker never frees a slot"
     );
     assert!(
-        admitted.len() <= capacity + 16,
-        "admissions are bounded by the channel plus the session's in-flight ceiling"
-    );
-    // Every admitted call settles exactly once — by deadline here, since
-    // the deaf worker never answers.
-    let admitted_count = admitted.len();
-    let mut settled = 0usize;
-    for call in admitted {
-        match settled_within(call).await {
-            CallEnd::Lost {
-                error: WireErrorKind::DeadlineExceeded,
-                reconcile: true,
-            } => {
-                settled += 1;
-            }
-            other => panic!("deadline settlement expected, got {other:?}"),
-        }
-    }
-    assert_eq!(
-        settled, admitted_count,
-        "no admitted call is lost or doubled"
+        admitted.len() <= 16,
+        "admissions are bounded by the session's in-flight ceiling, got {}",
+        admitted.len()
     );
     // The channel drained back to its full capacity: rejection pressure
-    // left no residue.
+    // left no residue, and every admitted call holds its waiter while
+    // the activation is live.
     let gauges = observer.gauges(&id).expect("live gauges");
     assert_eq!(
         gauges.command_channel_available,
         gauges.command_channel_capacity
     );
-    assert_eq!(
-        gauges.pending_calls, 0,
-        "waiters all settled while the activation is live"
-    );
+    assert_eq!(gauges.pending_calls, admitted.len());
+    // Deactivation settles every admitted call exactly once —
+    // outcome-unknown with reconciliation required, since the deaf
+    // worker may have acted on work whose outcome was never learned.
     stop_active(activation, &rig.registry, rig.epoch).await;
     assert!(observer.resource_state(&id) == Ok(ResourceState::Released));
+    let expected = gauges.pending_calls;
+    let mut settled = 0usize;
+    for call in admitted {
+        match tokio::time::timeout(std::time::Duration::from_secs(5), call.settled()).await {
+            Ok(Ok(CallEnd::Lost {
+                error: WireErrorKind::OutcomeUnknown,
+                reconcile: true,
+            })) => settled += 1,
+            other => panic!("outcome-unknown settlement expected, got {other:?}"),
+        }
+    }
+    assert_eq!(settled, expected, "no admitted call is lost or doubled");
 }
 
 /// Partial input at end-of-input: a worker that dies mid-prefix and one
