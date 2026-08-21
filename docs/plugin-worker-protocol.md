@@ -11,7 +11,7 @@ The crate is sans-io: `frame` turns bytes into frames incrementally, and
 in it can block, sleep, spawn, or open a socket. The real IO lives in the
 [process driver](#process-driver) (`crates/yah-plugin-proc`), which spawns
 the worker, owns the transport and the kill path, and authenticates the
-bootstrap; no worker-side SDK exists yet. One hundred forty-eight
+bootstrap; no worker-side SDK exists yet. One hundred forty-nine
 deterministic tests in `crates/yah-plugin-ipc/tests/` drive the host side
 of every rule below with a scripted byte-level peer — one hundred thirteen
 session fixtures plus the byte-boundary property suite, the shared fuzz
