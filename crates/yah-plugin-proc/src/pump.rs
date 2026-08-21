@@ -338,6 +338,10 @@ impl Pump {
                         // Mint first, insert only on success: the gauge
                         // and the table cannot diverge on the insertion
                         // path because both happen inside this one arm.
+                        // The table is absent only when no dispatcher
+                        // was built, and only the dispatcher sends this
+                        // command — so the skip below is unreachable by
+                        // construction.
                         let minted = self.session.mint_capability_handle(minted_for);
                         if let Ok(handle) = &minted
                             && let Some(table) = &self.capability_table
