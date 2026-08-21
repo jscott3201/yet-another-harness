@@ -35,11 +35,13 @@ libfuzzer_sys::fuzz_target!(|data: &[u8]| {
     match decoder.next_frame() {
         Err(first) => {
             // Terminal: the suffix is never delivered, the error repeats
-            // exactly, and the poison retains nothing at all.
+            // exactly, and the poison releases every retained byte and
+            // the allocation behind them.
             for _ in 0..3 {
                 assert_eq!(decoder.next_frame(), Err(first.clone()));
             }
             assert_eq!(decoder.buffered_len(), 0, "poison must retain nothing");
+            assert_eq!(decoder.buffered_capacity(), 0, "poison must release nothing less than the whole allocation");
         }
         Ok(None) => assert!(!violated, "a poison never becomes pending"),
         Ok(Some(_)) => {}

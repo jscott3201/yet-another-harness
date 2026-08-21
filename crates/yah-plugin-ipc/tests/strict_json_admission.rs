@@ -180,6 +180,37 @@ fn nesting_past_the_parser_limit_is_a_refusal_not_a_crash() {
 }
 
 #[test]
+fn float_literals_parse_to_the_bit_patterns_node_and_cpython_produce() {
+    // An independent IEEE-754 oracle, not serde grading its own homework:
+    // each expected value is the raw f64 bit pattern that Node 26.7.0's
+    // `JSON.parse` and CPython 3.14.7's `json.loads` produce for the
+    // literal, derived from both runtimes on 2026-08-20 and cross-checked
+    // to agree before being pinned here. Correct rounding is defined by
+    // IEEE-754, so the patterns are runtime facts, not implementation
+    // choices. This pins the boundary literals; proving equivalence across
+    // whole corpora of real traffic is the process-SDK conformance work
+    // (M4-PR07/M4-PR10), not this test.
+    for (literal, bits) in [
+        ("2.5e-30", 0x39c9_5a5e_fea6_b347_u64),
+        ("2.5e-10", 0x3df1_2e0b_e826_d695),
+        ("1e300", 0x7e37_e43c_8800_759c),
+        ("0.1", 0x3fb9_9999_9999_999a),
+        ("5e-324", 0x0000_0000_0000_0001),
+        ("1.7976931348623157e308", 0x7fef_ffff_ffff_ffff),
+        ("1e-300", 0x01a5_6e1f_c2f8_f359),
+        ("3.14159e-5", 0x3f00_7892_1ac6_c11f),
+    ] {
+        let value = classify(literal).expect("admitted");
+        let parsed = value.as_f64().expect("a float literal");
+        assert_eq!(
+            parsed.to_bits(),
+            bits,
+            "{literal} must read as the double Node and CPython produce"
+        );
+    }
+}
+
+#[test]
 fn float_literals_round_trip_through_their_own_serialization() {
     // Found by the M4-01 fuzzer: without serde_json's `float_roundtrip`
     // feature the parser can land one ULP off the correctly rounded
@@ -202,10 +233,6 @@ fn float_literals_round_trip_through_their_own_serialization() {
             "{text} did not survive its own serialization"
         );
     }
-    // The exact minimized finding.
-    let parsed = classify("2.5e-30").expect("admitted");
-    let expected = serde_json::from_str::<serde_json::Value>("2.5e-30").expect("a plain parse");
-    assert_eq!(parsed, expected);
 }
 
 #[test]

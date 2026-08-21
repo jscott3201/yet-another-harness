@@ -38,12 +38,21 @@ enum Outcome {
 }
 
 /// Feed `stream` to a fresh decoder in the given chunks, draining after
-/// every feed.
+/// every feed. Retained memory is asserted at every observation point:
+/// the allocation grows only with delivered bytes, never with a declared
+/// size, and stays within twice the largest buffered length (Vec's
+/// amortized growth) plus slack for one feed.
 fn run(chunks: &[&[u8]]) -> Outcome {
     let mut decoder = FrameDecoder::new();
     let mut frames = Vec::new();
     for chunk in chunks {
         decoder.feed(chunk);
+        assert!(
+            decoder.buffered_capacity() <= 2 * (4 + MAX_FRAME_BYTES + chunk.len()),
+            "decoder allocated for {} capacity bytes after a {}-byte feed",
+            decoder.buffered_capacity(),
+            chunk.len()
+        );
         loop {
             match decoder.next_frame() {
                 Ok(Some(frame)) => {
@@ -54,7 +63,14 @@ fn run(chunks: &[&[u8]]) -> Outcome {
                     frames.push(frame);
                 }
                 Ok(None) => break,
-                Err(error) => return Outcome::Poisoned(error),
+                Err(error) => {
+                    assert_eq!(
+                        decoder.buffered_capacity(),
+                        0,
+                        "poison must release the allocation"
+                    );
+                    return Outcome::Poisoned(error);
+                }
             }
         }
         assert!(
@@ -344,4 +360,109 @@ fn an_empty_feed_changes_nothing() {
     decoder.feed(&stream[2..]);
     assert_eq!(decoder.next_frame().unwrap().unwrap(), stream[4..].to_vec());
     assert_eq!(decoder.finish(), EndOfInput::Clean);
+}
+
+// Retained memory: what the decoder allocates for is a function of bytes
+// actually delivered, never of a declared size; a live decoder keeps its
+// high-water allocation for reuse; a poisoned decoder releases it.
+
+#[test]
+fn a_declared_size_allocates_nothing_beyond_the_delivered_prefix() {
+    // The worst lie a prefix can tell: four bytes declaring 4 GiB. The
+    // refusal is made from the prefix alone, and the allocation released.
+    for prefix in [0_u32.to_be_bytes(), u32::MAX.to_be_bytes()] {
+        let mut decoder = FrameDecoder::new();
+        decoder.feed(&prefix);
+        assert!(decoder.next_frame().is_err());
+        assert_eq!(decoder.buffered_len(), 0);
+        assert_eq!(
+            decoder.buffered_capacity(),
+            0,
+            "a declared size must not have allocated"
+        );
+    }
+}
+
+#[test]
+fn capacity_grows_gradually_with_delivered_bytes_through_a_maximal_frame() {
+    // Bytewise delivery of a maximal legal frame: the allocation tracks
+    // what arrived (amortized doubling, so at most twice what arrived),
+    // never the declared size, and ends able to hold the frame.
+    let payload = vec![b'x'; MAX_FRAME_BYTES];
+    let stream = encode(&payload);
+    let mut decoder = FrameDecoder::new();
+    for (i, byte) in stream.iter().enumerate() {
+        decoder.feed(std::slice::from_ref(byte));
+        assert!(
+            decoder.buffered_capacity() <= 2 * (i + 1) + 8,
+            "capacity {} after {} delivered bytes",
+            decoder.buffered_capacity(),
+            i + 1
+        );
+    }
+    assert!(decoder.buffered_capacity() >= 4 + MAX_FRAME_BYTES);
+    assert_eq!(decoder.next_frame().unwrap().unwrap(), payload);
+}
+
+#[test]
+fn draining_keeps_the_high_water_allocation_and_reuse_does_not_grow_it() {
+    // Capacity immediately before and after a drain: the frame's memory is
+    // kept for the next frame, and a small successor does not grow it.
+    let payload = vec![b'x'; MAX_FRAME_BYTES];
+    let stream = encode(&payload);
+    let mut decoder = FrameDecoder::new();
+    decoder.feed(&stream);
+    let high_water = decoder.buffered_capacity();
+    assert!(high_water >= 4 + MAX_FRAME_BYTES);
+    assert_eq!(decoder.next_frame().unwrap().unwrap(), payload);
+    assert_eq!(decoder.buffered_len(), 0);
+    assert_eq!(
+        decoder.buffered_capacity(),
+        high_water,
+        "draining a frame keeps its allocation for reuse"
+    );
+    // A small frame rides in the space the big one made.
+    let small = second_legal_frame();
+    decoder.feed(&small);
+    assert_eq!(decoder.next_frame().unwrap().unwrap(), small[4..].to_vec());
+    assert_eq!(
+        decoder.buffered_capacity(),
+        high_water,
+        "a small successor must not grow the allocation"
+    );
+}
+
+#[test]
+fn poison_releases_the_retained_allocation() {
+    // A maximal frame arrives and is drained; then one violating prefix
+    // ends the connection. Whatever was retained before is released.
+    let payload = vec![b'x'; MAX_FRAME_BYTES];
+    let mut decoder = FrameDecoder::new();
+    decoder.feed(&encode(&payload));
+    decoder.next_frame().unwrap().unwrap();
+    assert!(decoder.buffered_capacity() >= 4 + MAX_FRAME_BYTES);
+    decoder.feed(&0_u32.to_be_bytes());
+    assert!(decoder.next_frame().is_err());
+    assert_eq!(decoder.buffered_len(), 0);
+    assert_eq!(
+        decoder.buffered_capacity(),
+        0,
+        "poison must release the allocation, not clear the bytes"
+    );
+}
+
+#[test]
+fn a_coalesced_burst_is_bounded_by_what_actually_arrived() {
+    // One feed: a maximal frame and junk behind it. The allocation is
+    // bounded by the burst, not by anything declared, and the junk is
+    // retained at zero cost growth while it waits.
+    let payload = vec![b'x'; MAX_FRAME_BYTES];
+    let mut stream = encode(&payload);
+    stream.extend_from_slice(b"trailing junk");
+    let mut decoder = FrameDecoder::new();
+    decoder.feed(&stream);
+    assert!(decoder.buffered_capacity() <= stream.len());
+    assert_eq!(decoder.next_frame().unwrap().unwrap(), payload);
+    assert_eq!(decoder.buffered_len(), stream.len() - 4 - MAX_FRAME_BYTES);
+    assert_eq!(decoder.buffered_capacity(), stream.len());
 }

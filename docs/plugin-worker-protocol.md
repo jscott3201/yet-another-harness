@@ -30,6 +30,11 @@ or oversize declaration poisons the connection. Framing carries no resync
 marker on purpose: after one violation, later bytes are unattributable, so
 there is no resync path.
 
+Retained memory is bounded the same way: the buffer's allocation grows
+only with bytes actually delivered, never with a declared size, a live
+decoder keeps its high-water allocation for reuse across frames, and a
+poison releases the allocation outright.
+
 Frame JSON is strict, mirroring the kernel protocol's rules:
 
 - A duplicate member name is refused, not last-wins resolved.
@@ -38,10 +43,12 @@ Frame JSON is strict, mirroring the kernel protocol's rules:
   raw token before the parser can round it to a float.
 - Float literals parse correctly rounded (`serde_json`'s
   `float_roundtrip`), so an admitted frame re-serialized and re-read means
-  the same thing, and a float literal reads as the same double
-  JavaScript's `JSON.parse` and CPython's `json` produce. The fuzzer found
-  the one-ULP divergence the default parser could produce; the feature is
-  workspace-wide so every crate parses floats identically.
+  the same thing. The fuzzer found the one-ULP instability the default
+  parser could produce; the feature is workspace-wide so every crate
+  parses floats identically, and the boundary literals are pinned to the
+  exact f64 bit patterns Node's `JSON.parse` and CPython's `json` produce.
+  Proving float agreement across whole worker corpora is the process-SDK
+  conformance work, not this pin.
 - Unknown members and unknown enum values are refused. Enums are closed
   within a negotiated version: evolution happens at the version gate in the
   handshake, never by per-member leniency.

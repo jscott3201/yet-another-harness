@@ -63,8 +63,10 @@ pub enum StreamClass {
 
 /// Feed `chunks` through a fresh decoder, draining after each feed, and
 /// assert the invariants that must hold no matter what arrived: no
-/// oversized or empty delivered frame, and retained state within the
-/// documented bound at every observation point.
+/// oversized or empty delivered frame; retained bytes within the
+/// documented bound; the allocation growing only with delivered bytes
+/// (amortized doubling, so at most twice the largest buffered length
+/// plus one feed's slack); and poison releasing the allocation.
 pub fn decode_all(chunks: &[&[u8]]) -> StreamClass {
     use yah_plugin_ipc::frame::{EndOfInput, FrameDecoder};
     use yah_plugin_ipc::MAX_FRAME_BYTES;
@@ -73,6 +75,12 @@ pub fn decode_all(chunks: &[&[u8]]) -> StreamClass {
     let mut frames = Vec::new();
     for chunk in chunks {
         decoder.feed(chunk);
+        assert!(
+            decoder.buffered_capacity() <= 2 * (4 + MAX_FRAME_BYTES + chunk.len()),
+            "decoder allocated for {} capacity bytes after a {}-byte feed",
+            decoder.buffered_capacity(),
+            chunk.len()
+        );
         loop {
             match decoder.next_frame() {
                 Ok(Some(frame)) => {
@@ -84,7 +92,14 @@ pub fn decode_all(chunks: &[&[u8]]) -> StreamClass {
                     frames.push(frame);
                 }
                 Ok(None) => break,
-                Err(error) => return StreamClass::Poisoned(error),
+                Err(error) => {
+                    assert_eq!(
+                        decoder.buffered_capacity(),
+                        0,
+                        "poison must release the allocation"
+                    );
+                    return StreamClass::Poisoned(error);
+                }
             }
         }
         assert!(
