@@ -63,7 +63,7 @@ libfuzzer_sys::fuzz_target!(|data: &[u8]| {
 
     // Each action consumes two bytes: an opcode and a packed operand.
     for chunk in data[1..].chunks_exact(2).take(MAX_ACTIONS) {
-        let opcode = chunk[0] % 14;
+        let opcode = chunk[0] % 15;
         let operand = u64::from(chunk[1]) % MAX_ID + 1;
         match opcode {
             0..=2 => {
@@ -156,6 +156,20 @@ libfuzzer_sys::fuzz_target!(|data: &[u8]| {
                             digest_blake3: "a".repeat(64),
                         },
                     },
+                }));
+            }
+            13 => {
+                // A served read against whatever handles exist: the
+                // ceiling, budget, and handle gates all precede it.
+                tracer.note(format!("read {operand}"));
+                feed(&mut session, &WorkerMessage::Call(Call {
+                    call_id: CallId(operand),
+                    method: "artifact.read".into(),
+                    deadline_ms: None,
+                    stream: false,
+                    payload: serde_json::json!({
+                        "handle": operand, "offset": 0, "len": operand % 4
+                    }),
                 }));
             }
             _ => {

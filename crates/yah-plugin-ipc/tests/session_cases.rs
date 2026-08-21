@@ -414,18 +414,21 @@ fn named_cases_match_the_model() {
                 stream: false,
             },
             Action::OfferArtifact { id: 1, bytes: 8 },
+            // Unknown handle: refused with its id spent.
             Action::ArtifactRead {
                 id: 2,
                 handle: 9,
                 ok_range: true,
             },
+            // Wrong kind and zero length: refused per-call.
             Action::ArtifactRead {
-                id: 2,
+                id: 3,
                 handle: 1,
                 ok_range: false,
             },
+            // A well-formed read of the held artifact: admitted.
             Action::ArtifactRead {
-                id: 2,
+                id: 4,
                 handle: 1,
                 ok_range: true,
             },
