@@ -65,7 +65,7 @@ scopes, the plugin boundary, sandbox tiers, recovery — lives in
 ## What works today
 
 Everything below is enforced by the workspace test suite and the from-scratch
-local gate (465 tests at last count), except the storage gate, which is a
+local gate (631 tests at last count), except the storage gate, which is a
 recorded one-off run with its own report. Example guests are built from
 source at gate time; no binary is committed.
 

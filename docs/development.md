@@ -92,6 +92,63 @@ partitions would add overhead. Revisit Nextest archive plus `slice:m/n`
 partitioning when test execution, rather than compilation, takes several
 minutes.
 
+## Fuzzing the Worker Protocol Boundary
+
+The byte-facing half of the worker protocol — the incremental frame decoder
+and strict JSON admission in `crates/yah-plugin-ipc` — has an isolated
+cargo-fuzz package at `crates/yah-plugin-ipc/fuzz/`. The package is its own
+Cargo workspace: nightly Rust, libFuzzer, and every fuzz-only dependency
+stay out of the repository workspace, the production crates, and the normal
+developer loop. Nothing in the stable gate needs any of them.
+
+Tooling, pinned by what the recorded evidence ran:
+
+- `rustup toolchain install nightly-2026-08-15` — the fuzz toolchain. The
+  stable gate never uses it.
+- `cargo install cargo-fuzz --locked --version 0.13.2`
+- `libfuzzer-sys 0.4`, from the fuzz package's own lockfile.
+
+Three targets, each independently runnable:
+
+```bash
+cd crates/yah-plugin-ipc/fuzz
+# A: the incremental frame decoder under arbitrary bytes and chunkings
+rustup run nightly-2026-08-15 cargo fuzz run incremental_decode \
+  fuzz/corpus/incremental_decode ../tests/corpus -- -max_len=65536 -max_total_time=30
+# B: strict JSON admission under arbitrary bytes
+rustup run nightly-2026-08-15 cargo fuzz run strict_json_admission \
+  fuzz/corpus/strict_json_admission ../tests/corpus -- -max_len=65536 -max_total_time=30
+# C: admitted-frame round trip (well-typed frames, arbitrary chunkings)
+rustup run nightly-2026-08-15 cargo fuzz run frame_round_trip \
+  fuzz/corpus/frame_round_trip ../tests/corpus -- -max_len=65536 -max_total_time=30
+```
+
+The second directory argument is the shared seed corpus,
+`crates/yah-plugin-ipc/tests/corpus/`, read-only to the fuzzer; new inputs
+land in the gitignored `fuzz/corpus/<target>/`. A longer local campaign is
+the same command with `-max_total_time=600` or `-runs=10000000`.
+
+`cargo fuzz` builds with AddressSanitizer by default, and the recorded
+evidence ran with it. Keep that default; a sanitizer run needs the nightly
+toolchain named above and nothing else.
+
+Corpus discipline: every seed in `tests/corpus/` carries a class prefix
+(`frame-clean-`, `frame-poison-too-large-`, `json-duplicate-`, …) that the
+stable `corpus_inventory` test verifies against the current implementation,
+so a behavior change that reclassifies a seed fails the normal gate, and
+two seeds with identical bytes fail the duplicate check. Promotion
+workflow: when a fuzz campaign finds a crash or a semantic divergence,
+minimize it (`cargo fuzz tmin <target> <artifact>`), add the minimized
+input to `tests/corpus/` under the class its correct classification gives
+it, fix or narrow the claim, and add the ordinary deterministic regression
+test. A retained fuzz artifact is never the only proof of a fix.
+
+The stable gate is deterministic and does not run the fuzzer. A short
+smoke campaign exercises the boundary and has already caught one real
+defect (a one-ULP float-parsing divergence, fixed by enabling
+`float_roundtrip`); it does not come close to proving parser correctness,
+and no documentation claims otherwise.
+
 ## Example Guests
 
 Two example plugins implement the same `yah:plugin@0.1.0` world, one in Rust

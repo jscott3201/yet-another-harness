@@ -6,10 +6,17 @@
 //! lets [`FrameDecoder`] refuse an oversize frame from its four prefix
 //! bytes, without waiting for the payload. `feed` does append whatever
 //! chunk the transport handed it, so the exposure before the refusal is one
-//! transport read — the poison then discards the buffer and every later
-//! feed is ignored. The decoder is incremental and sans-io:
+//! transport read — the poison then releases the buffer's allocation and
+//! every later feed is ignored. The decoder is incremental and sans-io:
 //! feed it whatever chunks the transport produced — a frame split across
 //! reads is ordinary, not an error — and drain complete frames out.
+//!
+//! Retained memory is bounded and observable. Between drains the buffer
+//! never holds more than one maximal frame plus one prefix, and its
+//! allocation grows only with bytes actually delivered — never with a
+//! declared size. A live decoder keeps its high-water allocation for
+//! reuse across frames; a poisoned decoder drops it. [`FrameDecoder ::
+//! buffered_capacity`] makes both facts assertable.
 //!
 //! End-of-input is classified, not ignored: a transport that closes mid
 //! prefix or mid payload is a truncated frame, which the session settles as
@@ -115,6 +122,31 @@ impl FrameDecoder {
         Ok(Some(frame))
     }
 
+    /// How many undelivered bytes are currently retained.
+    ///
+    /// Read-only observability for the documented bound: between drains the
+    /// decoder never retains more than one maximal frame plus one prefix
+    /// (`4 + [`MAX_FRAME_BYTES`]`), and a poisoned decoder retains nothing.
+    /// Tests and the fuzz harness assert that bound through this method;
+    /// production behavior is untouched.
+    pub fn buffered_len(&self) -> usize {
+        self.buffer.len()
+    }
+
+    /// How much memory the retained buffer is allocated for.
+    ///
+    /// The retention contract, observable through this method and
+    /// [`Self::buffered_len`]: the allocation grows only with bytes actually
+    /// delivered — a declared size never allocates — and grows amortized,
+    /// so it is at most twice the largest number of bytes ever buffered.
+    /// A live decoder keeps that high-water allocation for reuse across
+    /// frames; a poisoned decoder drops it entirely, so
+    /// `buffered_capacity` is zero after a violation no matter what
+    /// arrived before it.
+    pub fn buffered_capacity(&self) -> usize {
+        self.buffer.capacity()
+    }
+
     /// Classify end-of-input against whatever is still buffered. Call after
     /// draining [`Self::next_frame`] to exhaustion.
     pub fn finish(&self) -> EndOfInput {
@@ -139,7 +171,9 @@ impl FrameDecoder {
     }
 
     fn poison(&mut self, error: FrameStreamError) -> FrameStreamError {
-        self.buffer.clear();
+        // Replace, don't clear: clear would keep the allocation alive for a
+        // connection that is over. A poisoned decoder releases its memory.
+        self.buffer = Vec::new();
         self.poisoned = Some(error.clone());
         error
     }

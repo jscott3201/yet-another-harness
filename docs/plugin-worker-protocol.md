@@ -11,9 +11,13 @@ The crate is sans-io: `frame` turns bytes into frames incrementally, and
 in it can block, sleep, spawn, or open a socket. The real IO lives in the
 [process driver](#process-driver) (`crates/yah-plugin-proc`), which spawns
 the worker, owns the transport and the kill path, and authenticates the
-bootstrap; no worker-side SDK exists yet. One hundred thirteen
-deterministic fixtures in `crates/yah-plugin-ipc/tests/` drive the host
-side of every rule below with a scripted byte-level peer.
+bootstrap; no worker-side SDK exists yet. One hundred thirty-nine
+deterministic tests in `crates/yah-plugin-ipc/tests/` drive the host side
+of every rule below with a scripted byte-level peer — one hundred thirteen
+session fixtures plus a byte-boundary property suite and the shared fuzz
+corpus — and three cargo-fuzz targets
+([development](development.md#fuzzing-the-worker-protocol-boundary)) attack
+the same boundary under arbitrary bytes and chunkings.
 
 ## Framing and strict JSON
 
@@ -26,12 +30,25 @@ or oversize declaration poisons the connection. Framing carries no resync
 marker on purpose: after one violation, later bytes are unattributable, so
 there is no resync path.
 
+Retained memory is bounded the same way: the buffer's allocation grows
+only with bytes actually delivered, never with a declared size, a live
+decoder keeps its high-water allocation for reuse across frames, and a
+poison releases the allocation outright.
+
 Frame JSON is strict, mirroring the kernel protocol's rules:
 
 - A duplicate member name is refused, not last-wins resolved.
 - An integer outside the I-JSON safe range (±2^53−1) is refused, not
   rounded — including a literal too wide for a 64-bit lane, caught on the
   raw token before the parser can round it to a float.
+- Float literals parse correctly rounded (`serde_json`'s
+  `float_roundtrip`), so an admitted frame re-serialized and re-read means
+  the same thing. The fuzzer found the one-ULP instability the default
+  parser could produce; the feature is workspace-wide so every crate
+  parses floats identically, and the boundary literals are pinned to the
+  exact f64 bit patterns Node's `JSON.parse` and CPython's `json` produce.
+  Proving float agreement across whole worker corpora is the process-SDK
+  conformance work, not this pin.
 - Unknown members and unknown enum values are refused. Enums are closed
   within a negotiated version: evolution happens at the version gate in the
   handshake, never by per-member leniency.
