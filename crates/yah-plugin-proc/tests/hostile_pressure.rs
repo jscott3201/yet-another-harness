@@ -84,7 +84,8 @@ async fn an_inbound_call_flood_dies_at_the_ceiling_without_wedging_the_pump() {
 /// bounded command channel rejects what it cannot hold (observable, with
 /// nothing admitted behind the rejection), the session's in-flight
 /// ceiling refuses the rest, every admitted call still settles exactly
-/// once by deadline, and the channel drains back to its full capacity.
+/// once at deactivation, and the channel drains back to its full
+/// capacity.
 #[tokio::test]
 async fn a_command_flood_meets_bounded_admission_and_loses_no_admitted_call() {
     let revision = lifecycle_revision("cmdflood", 'b');
@@ -366,4 +367,256 @@ async fn the_command_channel_reports_its_configured_bound() {
     );
     stop_active(activation, &rig.registry, rig.epoch).await;
     assert!(observer.gauges(&id).is_none(), "gauges end with the pump");
+}
+
+/// The queue itself, not just the session ceiling: submissions are polled
+/// one at a time without ever yielding to the runtime, so the pump — a
+/// task on this same current-thread runtime — cannot drain between them.
+/// Every channel slot fills through the production submission function
+/// and the next submission executes the pre-admission `try_send`
+/// rejection — the queue's `Full` branch, distinct from a session
+/// refusal. Deactivation then ends the activation within a named bound
+/// regardless of the backlog, and every submission resolves exactly
+/// once: whatever the pump dequeued first is admitted work settled as
+/// outcome-unknown, and whatever it never dequeued ends observably with
+/// the pump — no lost waiter either way.
+#[tokio::test]
+async fn a_saturated_command_queue_rejects_pre_admission_and_deactivation_resolves_every_submission()
+ {
+    use std::future::Future;
+    use std::task::{Context, Poll, Waker};
+
+    let revision = lifecycle_revision("queuesat", 'c');
+    let (driver, observer) = ProcessPluginDriver::scripted_with_limits(
+        revision.id().clone(),
+        DriverKind::NodeProcess,
+        fixtures::worker_program(),
+        vec![ProcActivationPlan::worker("deaf")],
+        pressure_limits(),
+    );
+    let mut rig = Rig::new("proc.queuesat", &revision);
+    let mut activation =
+        HostPluginActivation::prepare(&mut rig.slot, rig.epoch, &rig.broker, &rig.grants, driver)
+            .expect("preparation is inert and succeeds");
+    let _handle = activation.activate(&rig.registry).await.expect("starts");
+    let id = activation.id().clone();
+    let capacity = observer
+        .gauges(&id)
+        .expect("live gauges")
+        .command_channel_capacity;
+
+    // Single-poll each submission: `begin_call`'s first poll runs its
+    // synchronous head — link lookup through `try_send` — and parks on
+    // the `opened` oneshot. Polling with a no-op waker never yields, so
+    // the pump cannot interleave and the queue genuinely fills.
+    let waker = Waker::noop();
+    let mut cx = Context::from_waker(waker);
+    let mut submissions: Vec<_> = (0..=capacity)
+        .map(|_| {
+            Some(Box::pin(observer.begin_call(
+                &id,
+                "tool.queue",
+                json!("q"),
+                None,
+            )))
+        })
+        .collect();
+    let mut queued = 0usize;
+    let mut queue_rejected = Vec::new();
+    for slot in submissions.iter_mut() {
+        let submission = slot.as_mut().expect("filled below");
+        match submission.as_mut().poll(&mut cx) {
+            Poll::Pending => queued += 1,
+            Poll::Ready(result) => {
+                // Completed futures are consumed here: polling one twice
+                // is a bug, and the resolution phase must only see the
+                // still-pending queue.
+                let _ = slot.take();
+                match result {
+                    Err(message) => queue_rejected.push(message),
+                    Ok(_) => {
+                        panic!("a queued-slot submission cannot open before any pump tick")
+                    }
+                }
+            }
+        }
+    }
+    assert_eq!(queued, capacity, "every slot fills before the rejection");
+    assert_eq!(
+        queue_rejected,
+        vec!["the pump command channel is at capacity; the call was not admitted".to_owned()],
+        "the one-past submission is the queue's Full branch, not a session refusal"
+    );
+    // Nothing was dequeued: no id minted, no session admission, no
+    // waiter in the pending table.
+    let gauges = observer.gauges(&id).expect("live gauges");
+    assert_eq!(gauges.command_channel_available, 0);
+    assert_eq!(gauges.pending_calls, 0);
+
+    // Deactivation with the backlog in place: the watch signal
+    // preempts at the pump's next loop-top — it must never wait out an
+    // unbounded drain — and the whole activation ends within a named
+    // bound.
+    tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        stop_active(activation, &rig.registry, rig.epoch),
+    )
+    .await
+    .expect("deactivation does not wait behind a full command queue");
+
+    // Every submission resolves exactly once, and no waiter is lost:
+    // dequeued-before-shutdown submissions were admitted and settle as
+    // outcome-unknown with reconciliation required; the rest ended with
+    // the pump, their `opened` oneshots gone — observable, never
+    // silent.
+    let mut admitted = Vec::new();
+    let mut ended_with_pump = 0usize;
+    for slot in submissions.iter_mut().flatten() {
+        let resolved = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                if let Poll::Ready(result) = slot.as_mut().poll(&mut cx) {
+                    return result;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("no queued submission is left hanging");
+        match resolved {
+            Ok(pending) => admitted.push(pending),
+            Err(message) => {
+                assert_eq!(
+                    message, "the worker pump has ended",
+                    "an undelivered call ends observably"
+                );
+                ended_with_pump += 1;
+            }
+        }
+    }
+    assert_eq!(
+        admitted.len() + ended_with_pump + queue_rejected.len(),
+        capacity + 1,
+        "every submission is accounted for exactly once"
+    );
+    for pending in admitted {
+        let settled = tokio::time::timeout(std::time::Duration::from_secs(5), pending.settled())
+            .await
+            .expect("admitted work settles despite the backlog");
+        assert!(
+            matches!(
+                settled,
+                Ok(CallEnd::Lost {
+                    error: WireErrorKind::OutcomeUnknown,
+                    reconcile: true
+                })
+            ),
+            "outcome-unknown settlement expected, got {settled:?}"
+        );
+    }
+    assert!(
+        observer.gauges(&id).is_none(),
+        "gauges do not outlive the pump"
+    );
+    assert!(observer.resource_state(&id) == Ok(ResourceState::Released));
+}
+
+/// A worker that hoards every frame, then drains and echoes, then shuts
+/// its read half while staying alive: the host's outbound buffer grows
+/// to a real high-water allocation, is observed still allocated after it
+/// empties (occupancy is not allocation), and is observed released —
+/// capacity zero, truthfully — once the read half's EPIPE half-closes
+/// the output direction. A worker that never reads cannot reach the
+/// drain, and a worker that dies takes its gauges with it, so the
+/// hoard-drain-shut script is the one that can pin the policy live.
+///
+/// Linux-only because the drain needs the kernel to wake a full
+/// socketpair's writer as the peer reads — Linux epoll does, macOS
+/// kqueue does not, so there the drain would stall by platform
+/// semantics rather than by any property of this driver. The canonical
+/// Linux lane runs this in hosted CI and in the pinned-image stress.
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn a_half_closed_output_releases_its_buffer_and_reports_zero_capacity() {
+    let revision = lifecycle_revision("halfclose", 'd');
+    let (driver, observer) = ProcessPluginDriver::scripted_with_limits(
+        revision.id().clone(),
+        DriverKind::NodeProcess,
+        fixtures::worker_program(),
+        vec![ProcActivationPlan::worker("hoard-drain-shut:400:300:30000")],
+        pressure_limits(),
+    );
+    let mut rig = Rig::new("proc.halfclose", &revision);
+    let mut activation =
+        HostPluginActivation::prepare(&mut rig.slot, rig.epoch, &rig.broker, &rig.grants, driver)
+            .expect("preparation is inert and succeeds");
+    let _handle = activation.activate(&rig.registry).await.expect("starts");
+    let id = activation.id().clone();
+    // Sixteen near-maximal calls (~4 MiB of frames, well past what the
+    // channel absorbs, well under the outbound cap that would reclaim
+    // the session) land while the worker is hoarding. Sixteen, not
+    // more: nothing settles during the hoard, so the session's 16-call
+    // in-flight ceiling is the whole allowance.
+    for _ in 0..16 {
+        observer
+            .begin_call(&id, "tool.hoard", json!("x".repeat(250_000)), None)
+            .await
+            .expect("the pump admits while its buffer grows");
+    }
+    // The worker drains and echoes: occupancy falls to zero, but the
+    // allocation must still be there — a live pump keeps its high-water
+    // buffer for reuse, and the gauge must not pretend otherwise.
+    let mut high_water = 0usize;
+    let mut drained = false;
+    for _ in 0..500 {
+        if let Some(gauges) = observer.gauges(&id) {
+            high_water = high_water.max(gauges.outbound_buffer_capacity);
+            if gauges.outbound_buffer_bytes == 0 && high_water > 1024 * 1024 {
+                assert_eq!(
+                    gauges.outbound_buffer_capacity, high_water,
+                    "an emptied buffer stays allocated while the pump is live"
+                );
+                drained = true;
+                break;
+            }
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    assert!(drained, "the hoard must drain (high water {high_water})");
+    // The worker's idle clock is running; give it past the idle bound so
+    // the read half is certainly shut, then write one more frame: the
+    // failing write half-closes the output direction, and the zero the
+    // gauge reports from then on must be the truth about retained
+    // memory — the buffer released, not merely cleared.
+    tokio::time::sleep(std::time::Duration::from_millis(1_000)).await;
+    let probe_a = observer
+        .begin_call(&id, "tool.probe", json!("a"), None)
+        .await
+        .expect("the probe is admitted");
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    let probe_b = observer
+        .begin_call(&id, "tool.probe", json!("b"), None)
+        .await
+        .expect("the second probe is admitted");
+    let mut released = false;
+    for _ in 0..500 {
+        if let Some(gauges) = observer.gauges(&id) {
+            if gauges.outbound_buffer_capacity == 0 {
+                assert_eq!(gauges.outbound_buffer_bytes, 0);
+                released = true;
+                break;
+            }
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    assert!(released, "the half-close must release the grown buffer");
+    // The lingering worker holds the session open; deactivation ends it,
+    // and both probes resolve — no lost waiter, whichever path each took.
+    stop_active(activation, &rig.registry, rig.epoch).await;
+    for pending in [probe_a, probe_b] {
+        let settled = tokio::time::timeout(std::time::Duration::from_secs(5), pending.settled())
+            .await
+            .expect("every probe settles");
+        assert!(settled.is_ok(), "a probe settles exactly once: {settled:?}");
+    }
+    assert!(observer.resource_state(&id) == Ok(ResourceState::Released));
 }

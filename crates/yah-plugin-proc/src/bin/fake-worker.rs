@@ -46,6 +46,11 @@
 //!   flood that must die at the in-flight ceiling, not in host memory.
 //! - `diag-then-die`: handshake, print a last line to stdout, exit —
 //!   diagnostics written immediately before death.
+//! - `hoard-drain-shut:<hoard_ms>:<idle_ms>:<linger_ms>`: read nothing
+//!   for hoard_ms — the host's writes pile up in its outbound buffer —
+//!   then echo everything until the channel is idle, then shut the read
+//!   half and linger: the half-closed output whose buffer the host must
+//!   actually release, observed while the worker is still alive.
 //! - `chaos`: handshake, print a diagnostic line, flood 300 calls, go
 //!   deaf — every pressure at once.
 //!
@@ -393,6 +398,39 @@ fn run(mode: &str, wire: &mut Wire) -> i32 {
             loop {
                 std::thread::sleep(std::time::Duration::from_secs(3600));
             }
+        }
+        m if m.starts_with("hoard-drain-shut") => {
+            if !wire.handshake() {
+                return 70;
+            }
+            // `hoard-drain-shut:<hoard_ms>:<idle_ms>:<linger_ms>`: read
+            // nothing for hoard_ms — the host's writes pile up in its
+            // outbound buffer — then echo every frame until the channel
+            // goes quiet for idle_ms, shut the read half, and linger.
+            // The host's buffer is empty and its socket buffer drained
+            // when the read half dies, so its next write fails into a
+            // half-close that must release what the hoard allocated.
+            let mut delays = m.split(':').skip(1);
+            let hoard: u64 = delays.next().and_then(|v| v.parse().ok()).unwrap_or(400);
+            let idle: u64 = delays.next().and_then(|v| v.parse().ok()).unwrap_or(300);
+            let linger: u64 = delays.next().and_then(|v| v.parse().ok()).unwrap_or(30_000);
+            std::thread::sleep(std::time::Duration::from_millis(hoard));
+            let _ = wire
+                .channel
+                .set_read_timeout(Some(std::time::Duration::from_millis(idle)));
+            // Ack small: an echoed 250-KiB payload would exceed the
+            // host's inline-result bound and fault the session.
+            while let Some(HostMessage::Call(call)) = wire.next_frame() {
+                wire.send(&WorkerMessage::Reply(Reply {
+                    call_id: call.call_id,
+                    outcome: Outcome::Ok {
+                        result: serde_json::json!({ "acked": call.call_id.0 }),
+                    },
+                }));
+            }
+            let _ = wire.channel.shutdown(std::net::Shutdown::Read);
+            std::thread::sleep(std::time::Duration::from_millis(linger));
+            0
         }
         other => {
             eprintln!("unknown fake-worker mode {other:?}");

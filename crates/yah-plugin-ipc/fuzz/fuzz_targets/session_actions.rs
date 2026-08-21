@@ -9,8 +9,9 @@
 //! budget's documented overshoot.
 //!
 //! Bounds: at most 64 actions per input, ids below 64, payloads tiny.
-//! On any assertion failure the decoded action trace prints to stderr,
-//! so the libFuzzer artifact plus that trace replays exactly.
+//! The decoded action trace is kept in memory for debugging but is not
+//! printed on failure; a crash is replayed from the libFuzzer artifact
+//! alone.
 
 #![no_main]
 

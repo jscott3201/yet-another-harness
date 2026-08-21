@@ -368,9 +368,10 @@ impl HostSession {
     /// These collections never shrink while the session lives — the
     /// no-reuse law — so this count is the memory the session has spent
     /// on correlation, and [`SessionConfig::retired_operation_budget`]
-    /// bounds it. B-tree entries are fixed-size nodes with no exposed
-    /// spare capacity, so this logical count *is* the allocation bound,
-    /// not merely occupancy.
+    /// bounds it. That budget is an enforceable cardinality bound that
+    /// upper-bounds the correlation state a session can hold; it is not
+    /// a byte-exact account of allocator behavior, which node sizes and
+    /// spare capacity keep outside the session's sight.
     pub fn retired_operations(&self) -> u64 {
         (self.retired_worker_calls.len()
             + self.retired_host_calls.len()

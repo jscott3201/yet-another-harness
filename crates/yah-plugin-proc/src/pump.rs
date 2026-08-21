@@ -370,6 +370,21 @@ impl Pump {
                 // what remains is the shared exit path below.
                 break;
             }
+            // Deterministic shutdown priority: the watch signal is checked
+            // before every select round, so a queued command flood can
+            // never out-race deactivation the way an unbiased arm order
+            // could. A dropped sender reads as shutdown — the same
+            // contract as the arm below.
+            if !self.shutdown_seen && self.shutdown.has_changed().unwrap_or(true) {
+                self.shutdown_seen = true;
+                let reason = self
+                    .shutdown
+                    .borrow()
+                    .clone()
+                    .unwrap_or_else(|| "deactivated".to_owned());
+                self.begin_goodbye(&reason);
+                break;
+            }
             tokio::select! {
                 ready = self.worker.channel.readable(), if input_open => {
                     if ready.is_err() || !self.read_ready(&mut wire_buf) {
@@ -378,6 +393,9 @@ impl Pump {
                     }
                 }
                 ready = self.worker.channel.writable(), if self.output_open && !self.outbuf.is_empty() => {
+                    if std::env::var("PUMP_DEBUG").is_ok() {
+                        eprintln!("arm: writable ok={}", ready.is_ok());
+                    }
                     if ready.is_err() || !self.write_ready() {
                         // Not an end of input: what the peer already sent —
                         // its goodbye above all — still decides how this
@@ -386,7 +404,11 @@ impl Pump {
                         // ends one whose peer also stays silent, so the
                         // half-death is published for health to name.
                         self.output_open = false;
-                        self.outbuf.clear();
+                        // Release, not clear: `clear()` keeps the
+                        // allocation, and the zero this reports next must
+                        // be the truth about retained memory, not merely
+                        // about occupancy.
+                        self.outbuf = Vec::new();
                         self.shared.record_outbound(0, 0);
                         self.shared.set_output_closed();
                     }
@@ -665,6 +687,12 @@ impl Pump {
     /// settlements that follow can claim it — and queue its frame.
     fn begin_goodbye(&mut self, reason: &str) {
         self.shared.set_closed(format!("host goodbye: {reason}"));
+        // A goodbye the peer cannot read is not queued: appending to a
+        // dead output direction would repopulate the buffer the
+        // half-close released and report occupancy nothing can drain.
+        if !self.output_open {
+            return;
+        }
         let goodbye = HostMessage::Goodbye(Goodbye {
             reason: reason.to_owned(),
         });
