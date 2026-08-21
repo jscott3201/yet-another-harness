@@ -1,0 +1,42 @@
+[package]
+name = "yah-plugin-ipc-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+# This package is deliberately outside the repository workspace: the empty
+# `[workspace]` table below makes it its own workspace root, so nightly
+# Rust, libFuzzer, and every fuzz-only dependency stay out of the normal
+# build, the stable gate, and every production crate. See
+# `docs/development.md` for the pinned toolchain and invocation commands.
+
+[dependencies]
+libfuzzer-sys = "0.4"
+serde_json = "1"
+yah-plugin-ipc = { path = ".." }
+
+[[bin]]
+name = "incremental_decode"
+path = "fuzz_targets/incremental_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "strict_json_admission"
+path = "fuzz_targets/strict_json_admission.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "frame_round_trip"
+path = "fuzz_targets/frame_round_trip.rs"
+test = false
+doc = false
+bench = false
+
+[workspace]

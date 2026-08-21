@@ -11,9 +11,13 @@ The crate is sans-io: `frame` turns bytes into frames incrementally, and
 in it can block, sleep, spawn, or open a socket. The real IO lives in the
 [process driver](#process-driver) (`crates/yah-plugin-proc`), which spawns
 the worker, owns the transport and the kill path, and authenticates the
-bootstrap; no worker-side SDK exists yet. One hundred thirteen
-deterministic fixtures in `crates/yah-plugin-ipc/tests/` drive the host
-side of every rule below with a scripted byte-level peer.
+bootstrap; no worker-side SDK exists yet. One hundred thirty-nine
+deterministic tests in `crates/yah-plugin-ipc/tests/` drive the host side
+of every rule below with a scripted byte-level peer — one hundred thirteen
+session fixtures plus a byte-boundary property suite and the shared fuzz
+corpus — and three cargo-fuzz targets
+([development](development.md#fuzzing-the-worker-protocol-boundary)) attack
+the same boundary under arbitrary bytes and chunkings.
 
 ## Framing and strict JSON
 
@@ -32,6 +36,12 @@ Frame JSON is strict, mirroring the kernel protocol's rules:
 - An integer outside the I-JSON safe range (±2^53−1) is refused, not
   rounded — including a literal too wide for a 64-bit lane, caught on the
   raw token before the parser can round it to a float.
+- Float literals parse correctly rounded (`serde_json`'s
+  `float_roundtrip`), so an admitted frame re-serialized and re-read means
+  the same thing, and a float literal reads as the same double
+  JavaScript's `JSON.parse` and CPython's `json` produce. The fuzzer found
+  the one-ULP divergence the default parser could produce; the feature is
+  workspace-wide so every crate parses floats identically.
 - Unknown members and unknown enum values are refused. Enums are closed
   within a negotiated version: evolution happens at the version gate in the
   handshake, never by per-member leniency.

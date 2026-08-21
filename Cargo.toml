@@ -59,7 +59,13 @@ selene-core = { package = "selene-db-core", git = "https://github.com/jscott3201
 selene-graph = { package = "selene-db-graph", git = "https://github.com/jscott3201/selene-db.git", rev = "9a61de124ffa2b471461d83e6e51c5856c81f791" }
 selene-persist = { package = "selene-db-persist", git = "https://github.com/jscott3201/selene-db.git", rev = "9a61de124ffa2b471461d83e6e51c5856c81f791" }
 serde = { version = "1", features = ["derive"] }
-serde_json = { version = "1", features = ["raw_value"] }
+# `float_roundtrip` makes float parsing correctly rounded, so a literal
+# like 2.5e-30 reads as the same double JavaScript's JSON.parse and
+# CPython's json module produce — and re-serializing and re-reading an
+# admitted value is stable. Without it serde_json's fast parser can land
+# one ULP off, which is exactly the two-decoders-disagree class the worker
+# protocol's strict admission exists to prevent (found by M4-01 fuzzing).
+serde_json = { version = "1", features = ["raw_value", "float_roundtrip"] }
 rand = "0.9"
 rand_chacha = "0.9"
 blake3 = "1"

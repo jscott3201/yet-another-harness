@@ -115,6 +115,17 @@ impl FrameDecoder {
         Ok(Some(frame))
     }
 
+    /// How many undelivered bytes are currently retained.
+    ///
+    /// Read-only observability for the documented bound: between drains the
+    /// decoder never retains more than one maximal frame plus one prefix
+    /// (`4 + [`MAX_FRAME_BYTES`]`), and a poisoned decoder retains nothing.
+    /// Tests and the fuzz harness assert that bound through this method;
+    /// production behavior is untouched.
+    pub fn buffered_len(&self) -> usize {
+        self.buffer.len()
+    }
+
     /// Classify end-of-input against whatever is still buffered. Call after
     /// draining [`Self::next_frame`] to exhaustion.
     pub fn finish(&self) -> EndOfInput {
