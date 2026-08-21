@@ -599,12 +599,12 @@ async fn a_half_closed_output_releases_its_buffer_and_reports_zero_capacity() {
         .expect("the second probe is admitted");
     let mut released = false;
     for _ in 0..500 {
-        if let Some(gauges) = observer.gauges(&id) {
-            if gauges.outbound_buffer_capacity == 0 {
-                assert_eq!(gauges.outbound_buffer_bytes, 0);
-                released = true;
-                break;
-            }
+        if let Some(gauges) = observer.gauges(&id)
+            && gauges.outbound_buffer_capacity == 0
+        {
+            assert_eq!(gauges.outbound_buffer_bytes, 0);
+            released = true;
+            break;
         }
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
     }
