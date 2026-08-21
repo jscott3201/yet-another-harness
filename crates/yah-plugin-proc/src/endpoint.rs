@@ -583,7 +583,7 @@ fn base16_decode(hex: &str) -> Result<Vec<u8>, EndpointError> {
     // Byte-slicing a &str panics on a non-boundary index, and length
     // parity says nothing about encoding — validate the digits as ASCII
     // before any slicing.
-    if !hex.is_ascii() || hex.len() % 2 != 0 {
+    if !hex.is_ascii() || !hex.len().is_multiple_of(2) {
         return Err(EndpointError::Refused(Refusal::InvalidField(
             "hex must be ASCII with even length",
         )));
