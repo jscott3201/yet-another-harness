@@ -157,7 +157,6 @@ struct Pump {
     /// The dispatcher's capability table, shared so the pump can retire
     /// entries the session has reclaimed — the session names the ids in
     /// its events, the table drops them in the same breath.
-    #[allow(dead_code)]
     capability_table: Option<Arc<crate::dispatch::CapabilityTable>>,
     /// Encoded frames awaiting the socket. Progress on it is a `select!`
     /// arm, so transport back-pressure never stalls the rest of the pump.

@@ -140,10 +140,18 @@ impl Dispatcher {
     /// task, so no cycle exists — and an admitted worker call owes a
     /// terminal, so silently dropping one under load would be exactly
     /// the lost-terminal shape the bounded lane exists to prevent.
-    async fn commands(&self) -> Option<mpsc::Sender<PumpCommand>> {
+    async fn commands<T>(
+        &self,
+        make: impl FnOnce(oneshot::Sender<Result<T, AppError>>) -> PumpCommand,
+    ) -> Option<Result<T, AppError>> {
         let sender = self.commands.upgrade()?;
-        sender.reserve().await.ok()?;
-        Some(sender)
+        // Reserve an owned permit and send through it: the slot is held
+        // from reservation to delivery, so no competing sender can slip
+        // in and strand a terminal behind a Full rejection.
+        let permit = sender.reserve_owned().await.ok()?;
+        let (done_sender, done) = oneshot::channel();
+        permit.send(make(done_sender));
+        done.await.ok()
     }
 
     /// Apply one outcome to the session through the pump's command
@@ -158,7 +166,13 @@ impl Dispatcher {
                 .filter(|bytes| bytes.len() > yah_plugin_ipc::MAX_INLINE_RESULT_BYTES),
             _ => None,
         };
-        let applied = self.send_reply(call_id, outcome).await;
+        let applied = self
+            .commands(|done| PumpCommand::Reply {
+                call_id,
+                outcome,
+                done,
+            })
+            .await;
         if !matches!(applied, Some(Err(AppError::SpillRequired { .. }))) {
             return;
         }
@@ -166,42 +180,14 @@ impl Dispatcher {
         // protocol demands — the session mints the offer and pins the
         // bytes host-side, and the call still ends with its one terminal.
         if let Some(bytes) = spillable {
-            let _ = self.spill_reply(call_id, bytes).await;
+            let _ = self
+                .commands(|done| PumpCommand::SpillReply {
+                    call_id,
+                    bytes,
+                    done,
+                })
+                .await;
         }
-    }
-
-    async fn send_reply(&self, call_id: CallId, outcome: Outcome) -> Option<Result<(), AppError>> {
-        let commands = self.commands().await?;
-        let (done_sender, done) = oneshot::channel();
-        if commands
-            .try_send(PumpCommand::Reply {
-                call_id,
-                outcome,
-                done: done_sender,
-            })
-            .is_err()
-        {
-            return None;
-        }
-        // Application waits for the pump to have applied the reply; the
-        // wire delivery itself stays the session's exactly-once law.
-        done.await.ok()
-    }
-
-    async fn spill_reply(&self, call_id: CallId, bytes: Vec<u8>) -> Option<Result<(), AppError>> {
-        let commands = self.commands().await?;
-        let (done_sender, done) = oneshot::channel();
-        if commands
-            .try_send(PumpCommand::SpillReply {
-                call_id,
-                bytes,
-                done: done_sender,
-            })
-            .is_err()
-        {
-            return None;
-        }
-        done.await.ok()
     }
 
     /// Mint a wire handle for a freshly acquired capability. The table
@@ -209,27 +195,20 @@ impl Dispatcher {
     /// session's live-handle gauge and this table cannot diverge on the
     /// insertion path.
     async fn mint(&self, call_id: CallId) -> Option<Result<HandleId, AppError>> {
-        let commands = self.commands().await?;
-        let (done_sender, done) = oneshot::channel();
-        commands
-            .try_send(PumpCommand::MintHandle {
+        self.commands(
+            |done: oneshot::Sender<Result<HandleId, AppError>>| PumpCommand::MintHandle {
                 minted_for: call_id,
-                done: done_sender,
-            })
-            .ok()?;
-        done.await.ok()
+                done,
+            },
+        )
+        .await
     }
 
     async fn release(&self, handle: HandleId) -> Option<Result<(), AppError>> {
-        let commands = self.commands().await?;
-        let (done_sender, done) = oneshot::channel();
-        commands
-            .try_send(PumpCommand::RetireWorkerCapability {
-                handle,
-                done: done_sender,
-            })
-            .ok()?;
-        done.await.ok()
+        self.commands(|done: oneshot::Sender<Result<(), AppError>>| {
+            PumpCommand::RetireWorkerCapability { handle, done }
+        })
+        .await
     }
 
     async fn run(self, mut receiver: mpsc::Receiver<DispatchRequest>) {
