@@ -62,8 +62,9 @@
 //!   double release — printing each refusal kind to stdout, then serve
 //!   echo calls until goodbye.
 //! - `stream-items:<count>`: handshake, then on the first stream call
-//!   open the stream with credit 4, send `count` lossless items, and
-//!   answer the call ok — the worker-to-host item flow.
+//!   open the stream with credit 4, send `count` lossless items (waiting
+//!   for credit frames as the window demands), and answer the call ok —
+//!   a stream cancel stops production and answers at once.
 //! - `capability-flood:<n>`: handshake, acquire the text capability,
 //!   then fire `n` invokes back to back without reading replies, printing
 //!   each reply's disposition as it arrives — the concurrent load that
@@ -84,6 +85,9 @@ use yah_plugin_ipc::PROTOCOL_VERSION;
 use yah_plugin_ipc::frame::{self, FrameDecoder};
 use yah_plugin_ipc::types::*;
 use yah_plugin_proc::WORKER_CHANNEL_FD;
+
+#[path = "fake-worker/scripts.rs"]
+mod scripts;
 
 fn main() {
     let mode = std::env::args().nth(1).unwrap_or_default();
@@ -452,389 +456,33 @@ fn run(mode: &str, wire: &mut Wire) -> i32 {
             0
         }
         m if m.starts_with("capability-cycle:") => {
-            if !wire.handshake() {
-                return 70;
-            }
             let capability = m.split(':').nth(1).unwrap_or("text.upper").to_owned();
-            // Acquire: the host mints a wire handle for the granted
-            // capability.
-            wire.send(&WorkerMessage::Call(Call {
-                call_id: CallId(1),
-                method: "capability.acquire".to_owned(),
-                deadline_ms: None,
-                stream: false,
-                payload: serde_json::json!({ "capability": capability }),
-            }));
-            let handle = match wire.next_frame() {
-                Some(HostMessage::Reply(Reply {
-                    call_id: CallId(1),
-                    outcome: Outcome::Ok { result },
-                })) => result["handle"].as_u64(),
-                other => {
-                    println!("cap:acquire:unexpected:{other:?}");
-                    let _ = std::io::stdout().flush();
-                    return 70;
-                }
-            };
-            let Some(handle) = handle else {
-                println!("cap:acquire:no-handle");
-                let _ = std::io::stdout().flush();
-                return 70;
-            };
-            println!("cap:acquired:{handle}");
-            let _ = std::io::stdout().flush();
-            // Invoke through the same handle: the provider's answer
-            // crosses as the call result.
-            wire.send(&WorkerMessage::Call(Call {
-                call_id: CallId(2),
-                method: "capability.invoke".to_owned(),
-                deadline_ms: None,
-                stream: false,
-                payload: serde_json::json!({ "handle": handle, "input": "hola" }),
-            }));
-            match wire.next_frame() {
-                Some(HostMessage::Reply(Reply {
-                    call_id: CallId(2),
-                    outcome: Outcome::Ok { result },
-                })) => println!("cap:invoked:{result}"),
-                other => println!("cap:invoke:unexpected:{other:?}"),
-            }
-            let _ = std::io::stdout().flush();
-            // Release: the id is spent; a second release must be refused.
-            wire.send(&WorkerMessage::Call(Call {
-                call_id: CallId(3),
-                method: "capability.release".to_owned(),
-                deadline_ms: None,
-                stream: false,
-                payload: serde_json::json!({ "handle": handle }),
-            }));
-            match wire.next_frame() {
-                Some(HostMessage::Reply(Reply {
-                    call_id: CallId(3),
-                    outcome: Outcome::Ok { .. },
-                })) => println!("cap:released:{handle}"),
-                other => println!("cap:release:unexpected:{other:?}"),
-            }
-            let _ = std::io::stdout().flush();
-            serve_conformant(wire)
+            scripts::capability_cycle(wire, &capability)
         }
-        "capability-hostile" => {
-            if !wire.handshake() {
-                return 70;
-            }
-            // An unknown method: refused, never echoed.
-            wire.send(&WorkerMessage::Call(Call {
-                call_id: CallId(1),
-                method: "host.demand.secrets".to_owned(),
-                deadline_ms: None,
-                stream: false,
-                payload: serde_json::json!(null),
-            }));
-            if let Some(HostMessage::Reply(Reply {
-                call_id: CallId(1),
-                outcome: Outcome::Err { error },
-            })) = wire.next_frame()
-            {
-                println!(
-                    "hostile:method:{:?}:echoed={}",
-                    error.kind,
-                    error.message.contains("host.demand")
-                );
-            }
-            let _ = std::io::stdout().flush();
-            // A forged handle: the same bounded refusal an unknown id
-            // gets.
-            wire.send(&WorkerMessage::Call(Call {
-                call_id: CallId(2),
-                method: "capability.invoke".to_owned(),
-                deadline_ms: None,
-                stream: false,
-                payload: serde_json::json!({ "handle": 4_000_000, "input": "x" }),
-            }));
-            if let Some(HostMessage::Reply(Reply {
-                call_id: CallId(2),
-                outcome: Outcome::Err { error },
-            })) = wire.next_frame()
-            {
-                println!("hostile:forged:{:?}", error.kind);
-            }
-            let _ = std::io::stdout().flush();
-            // A malformed capability id: refused before any broker work.
-            wire.send(&WorkerMessage::Call(Call {
-                call_id: CallId(3),
-                method: "capability.acquire".to_owned(),
-                deadline_ms: None,
-                stream: false,
-                payload: serde_json::json!({ "capability": "" }),
-            }));
-            if let Some(HostMessage::Reply(Reply {
-                call_id: CallId(3),
-                outcome: Outcome::Err { error },
-            })) = wire.next_frame()
-            {
-                println!("hostile:malformed:{:?}", error.kind);
-            }
-            let _ = std::io::stdout().flush();
-            // A double release: the first spends the id, the second is a
-            // fault-shaped refusal.
-            wire.send(&WorkerMessage::Call(Call {
-                call_id: CallId(4),
-                method: "capability.acquire".to_owned(),
-                deadline_ms: None,
-                stream: false,
-                payload: serde_json::json!({ "capability": "test.text-upper/v1" }),
-            }));
-            let handle = match wire.next_frame() {
-                Some(HostMessage::Reply(Reply {
-                    call_id: CallId(4),
-                    outcome: Outcome::Ok { result },
-                })) => result["handle"].as_u64(),
-                _ => None,
-            };
-            if let Some(handle) = handle {
-                for call_id in [5u64, 6] {
-                    wire.send(&WorkerMessage::Call(Call {
-                        call_id: CallId(call_id),
-                        method: "capability.release".to_owned(),
-                        deadline_ms: None,
-                        stream: false,
-                        payload: serde_json::json!({ "handle": handle }),
-                    }));
-                }
-                // Replies arrive in completion order; collect both,
-                // then report by call id.
-                let mut verdicts = std::collections::BTreeMap::new();
-                while verdicts.len() < 2 {
-                    match wire.next_frame() {
-                        Some(HostMessage::Reply(Reply {
-                            call_id: CallId(id),
-                            outcome,
-                        })) => {
-                            let verdict = match outcome {
-                                Outcome::Ok { .. } => "Ok",
-                                Outcome::Err { .. } => "Err",
-                                _ => "Other",
-                            };
-                            verdicts.insert(id, verdict);
-                        }
-                        Some(HostMessage::Goodbye(_)) | None => return 0,
-                        Some(_) => {}
-                    }
-                }
-                for (id, verdict) in &verdicts {
-                    println!("hostile:release{id}:{verdict}");
-                }
-            }
-            let _ = std::io::stdout().flush();
-            serve_conformant(wire)
-        }
+        "capability-hostile" => scripts::capability_hostile(wire),
         m if m.starts_with("stream-items:") => {
-            if !wire.handshake() {
-                return 70;
-            }
             let count: u64 = m
                 .split(':')
                 .nth(1)
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(4);
-            // Wait for the host's stream call, ack it with a credit
-            // window, then send the items.
-            let call_id = loop {
-                match wire.next_frame() {
-                    Some(HostMessage::Call(call)) if call.stream => break call.call_id,
-                    Some(HostMessage::Goodbye(_)) | None => return 0,
-                    Some(_) => {}
-                }
-            };
-            wire.send(&WorkerMessage::StreamOpen(StreamOpen {
-                call_id,
-                credit: 4,
-            }));
-            // A conformant producer spends its announced credit and waits
-            // for the host's Credit frames before sending past it.
-            let mut credit = 4u32;
-            for seq in 0..count {
-                while credit == 0 {
-                    match wire.next_frame() {
-                        Some(HostMessage::Credit(credit_frame))
-                            if credit_frame.call_id == call_id =>
-                        {
-                            credit += credit_frame.additional;
-                        }
-                        Some(HostMessage::Goodbye(_)) | None => return 0,
-                        Some(_) => {}
-                    }
-                }
-                credit -= 1;
-                wire.send(&WorkerMessage::StreamData(StreamData {
-                    call_id,
-                    seq,
-                    more: seq + 1 < count,
-                    class: StreamClass::Lossless,
-                    dropped: 0,
-                    payload: serde_json::json!({ "n": seq }),
-                }));
-            }
-            wire.send(&WorkerMessage::Reply(Reply {
-                call_id,
-                outcome: Outcome::Ok {
-                    result: serde_json::json!({ "streamed": count }),
-                },
-            }));
-            serve_conformant(wire)
+            scripts::stream_items(wire, count)
         }
         m if m.starts_with("capability-flood:") => {
-            if !wire.handshake() {
-                return 70;
-            }
             let count: u64 = m
                 .split(':')
                 .nth(1)
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(4);
-            wire.send(&WorkerMessage::Call(Call {
-                call_id: CallId(1),
-                method: "capability.acquire".to_owned(),
-                deadline_ms: None,
-                stream: false,
-                payload: serde_json::json!({ "capability": "test.text-upper/v1" }),
-            }));
-            let handle = match wire.next_frame() {
-                Some(HostMessage::Reply(Reply {
-                    call_id: CallId(1),
-                    outcome: Outcome::Ok { result },
-                })) => result["handle"].as_u64(),
-                _ => None,
-            };
-            let Some(handle) = handle else {
-                println!("flood:no-handle");
-                let _ = std::io::stdout().flush();
-                return 70;
-            };
-            // Fire every invoke before reading any reply: the dispatcher
-            // must bound what it cannot start.
-            for call_id in 2..=1 + count {
-                wire.send(&WorkerMessage::Call(Call {
-                    call_id: CallId(call_id),
-                    method: "capability.invoke".to_owned(),
-                    deadline_ms: None,
-                    stream: false,
-                    payload: serde_json::json!({ "handle": handle, "input": "x" }),
-                }));
-            }
-            // Replies arrive in completion order, not send order: each
-            // is reported the moment it lands, named by its call id.
-            let mut seen = 0usize;
-            while seen < count as usize {
-                match wire.next_frame() {
-                    Some(HostMessage::Reply(Reply {
-                        call_id: CallId(id),
-                        outcome,
-                    })) => {
-                        seen += 1;
-                        match outcome {
-                            Outcome::Ok { .. } => println!("flood:{id}:ok"),
-                            Outcome::Err { error } => {
-                                println!(
-                                    "flood:{id}:{:?}:retryable={}",
-                                    error.kind, error.retryable
-                                )
-                            }
-                            other => println!("flood:{id}:{other:?}"),
-                        }
-                        let _ = std::io::stdout().flush();
-                    }
-                    Some(HostMessage::Goodbye(_)) | None => return 0,
-                    Some(_) => {}
-                }
-            }
-            println!("flood:done");
-            let _ = std::io::stdout().flush();
-            serve_conformant(wire)
+            scripts::capability_flood(wire, count)
         }
         m if m.starts_with("spill:") => {
-            if !wire.handshake() {
-                return 70;
-            }
             let bytes: usize = m
                 .split(':')
                 .nth(1)
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(4096);
-            // The worker's own bytes, pattern-filled so corruption is
-            // detectable beyond the digest alone.
-            let payload: Vec<u8> = (0..bytes).map(|i| (i % 251) as u8).collect();
-            let digest = blake3::hash(&payload).to_hex().to_string();
-            // The first call gets the spilled offer; the worker keeps the
-            // bytes and serves pull reads behind the handle.
-            let handle = loop {
-                match wire.next_frame() {
-                    Some(HostMessage::Call(call)) => {
-                        wire.send(&WorkerMessage::Reply(Reply {
-                            call_id: call.call_id,
-                            outcome: Outcome::Spilled {
-                                artifact: ArtifactOffer {
-                                    handle: HandleId(7),
-                                    bytes: bytes as u64,
-                                    media_type: "application/octet-stream".to_owned(),
-                                    digest_blake3: digest.clone(),
-                                },
-                            },
-                        }));
-                        break HandleId(7);
-                    }
-                    Some(HostMessage::Goodbye(_)) | None => return 0,
-                    Some(_) => {}
-                }
-            };
-            // Serve pull reads until the host says goodbye.
-            loop {
-                match wire.next_frame() {
-                    Some(HostMessage::Call(call)) => {
-                        let read: Result<serde_json::Value, _> =
-                            serde_json::from_value(call.payload.clone());
-                        let chunk = read.ok().and_then(|value| {
-                            let offset = value["offset"].as_u64()? as usize;
-                            let len = value["len"].as_u64()? as usize;
-                            payload.get(offset..offset + len).map(|slice| {
-                                slice.iter().map(|b| format!("{b:02x}")).collect::<String>()
-                            })
-                        });
-                        match chunk {
-                            Some(hex) => wire.send(&WorkerMessage::Reply(Reply {
-                                call_id: call.call_id,
-                                outcome: Outcome::Ok {
-                                    result: serde_json::json!({
-                                        "bytes_hex": hex,
-                                        "media_type": "application/octet-stream",
-                                    }),
-                                },
-                            })),
-                            None => wire.send(&WorkerMessage::Reply(Reply {
-                                call_id: call.call_id,
-                                outcome: Outcome::Err {
-                                    error: WireError {
-                                        kind: WireErrorKind::InvalidRead,
-                                        message: "read outside the offered range".to_owned(),
-                                        retryable: false,
-                                        reconcile_required: false,
-                                    },
-                                },
-                            })),
-                        }
-                    }
-                    Some(HostMessage::Release(release)) if release.handle == handle => {
-                        // Acknowledge the explicit release the host owes a
-                        // spilled handle.
-                        wire.send(&WorkerMessage::ReleaseAck(ReleaseAck {
-                            handle: release.handle,
-                            kind: release.kind,
-                        }));
-                    }
-                    Some(HostMessage::Goodbye(_)) | None => return 0,
-                    Some(_) => {}
-                }
-            }
+            scripts::spill(wire, bytes)
         }
 
         other => {
