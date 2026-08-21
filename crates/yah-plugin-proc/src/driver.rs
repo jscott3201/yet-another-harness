@@ -227,7 +227,7 @@ impl ProcessPluginDriver {
                 Some(summary) => EndpointError::Closed { summary },
             });
         };
-        admission_gate(&link.shared, true)?;
+        admission_gate(&link.shared)?;
         Ok(activation_endpoint(
             id.clone(),
             link.commands.clone(),

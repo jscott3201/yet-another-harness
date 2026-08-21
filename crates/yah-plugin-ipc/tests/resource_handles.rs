@@ -176,7 +176,9 @@ fn a_failed_minting_call_reclaims_what_it_briefly_held() {
         .expect("err reply goes out");
     assert_eq!(
         session.drain_events(),
-        vec![SessionEvent::HandlesReclaimed { count: 1 }]
+        vec![SessionEvent::HandlesReclaimed {
+            handles: vec![HandleId(1)]
+        }]
     );
     assert_eq!(session.live_handles(), 0);
     assert!(
@@ -202,7 +204,9 @@ fn a_disconnect_reclaims_every_live_handle() {
     session.end_of_input();
     let events = session.drain_events();
     assert!(
-        events.contains(&SessionEvent::HandlesReclaimed { count: 1 }),
+        events.contains(&SessionEvent::HandlesReclaimed {
+            handles: vec![HandleId(1)]
+        }),
         "the release frames that will never come are the host's job: {events:?}"
     );
     assert_eq!(session.live_handles(), 0);

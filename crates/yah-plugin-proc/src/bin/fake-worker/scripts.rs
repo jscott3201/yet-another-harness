@@ -59,7 +59,7 @@ pub fn capability_cycle(wire: &mut Wire, capability: &str) -> i32 {
     std::io::Write::flush(&mut std::io::stdout()).ok();
     // Release: the id is spent; a second release must be refused.
     wire.send(&WorkerMessage::Call(Call {
-        call_id: CallId(3),
+        call_id: CallId(5),
         method: "capability.release".to_owned(),
         deadline_ms: None,
         stream: false,
@@ -67,7 +67,7 @@ pub fn capability_cycle(wire: &mut Wire, capability: &str) -> i32 {
     }));
     match wire.next_frame() {
         Some(HostMessage::Reply(Reply {
-            call_id: CallId(3),
+            call_id: CallId(5),
             outcome: Outcome::Ok { .. },
         })) => println!("cap:released:{handle}"),
         other => println!("cap:release:unexpected:{other:?}"),

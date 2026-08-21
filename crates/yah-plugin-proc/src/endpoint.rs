@@ -167,10 +167,21 @@ pub enum Availability {
 }
 
 /// One admitted host-to-worker call awaiting its single terminal.
-#[derive(Debug)]
 pub struct PendingCall {
     call_id: CallId,
     settled: oneshot::Receiver<crate::CallEnd>,
+    /// The activation's snapshot at admission time, so a waiter whose
+    /// pump died before settlement reports the retained first cause
+    /// rather than an anonymous closed.
+    shared: Arc<PumpShared>,
+}
+
+impl std::fmt::Debug for PendingCall {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PendingCall")
+            .field("call_id", &self.call_id)
+            .finish_non_exhaustive()
+    }
 }
 
 impl PendingCall {
@@ -180,10 +191,9 @@ impl PendingCall {
 
     /// Wait for the call's exactly-one terminal.
     pub async fn terminal(self) -> Result<CallTerminal, EndpointError> {
-        let end = self
-            .settled
-            .await
-            .map_err(|_| EndpointError::Closed { summary: None })?;
+        let end = self.settled.await.map_err(|_| EndpointError::Closed {
+            summary: self.shared.close_summary(),
+        })?;
         Ok(CallTerminal::from(end))
     }
 }
@@ -260,10 +270,7 @@ impl std::fmt::Debug for ActivationEndpoint {
 }
 
 /// Which admission gate refused, resolved against the shared snapshot.
-pub(crate) fn admission_gate(shared: &PumpShared, link_live: bool) -> Result<(), EndpointError> {
-    if !link_live {
-        return Err(EndpointError::NotStarted);
-    }
+pub(crate) fn admission_gate(shared: &PumpShared) -> Result<(), EndpointError> {
     if shared.is_closed() {
         return Err(EndpointError::Closed {
             summary: shared.close_summary(),
@@ -301,7 +308,7 @@ impl ActivationEndpoint {
     }
 
     fn link(&self) -> Result<mpsc::Sender<PumpCommand>, EndpointError> {
-        admission_gate(&self.shared, true)?;
+        admission_gate(&self.shared)?;
         self.commands
             .upgrade()
             .ok_or_else(|| EndpointError::Closed {
@@ -387,7 +394,11 @@ impl ActivationEndpoint {
             summary: self.shared.close_summary(),
         })?;
         let call_id = call_id.map_err(EndpointError::from)?;
-        Ok(PendingCall { call_id, settled })
+        Ok(PendingCall {
+            call_id,
+            settled,
+            shared: Arc::clone(&self.shared),
+        })
     }
 
     /// Ask the worker to stop a call, or to stop streaming it. Advisory:
@@ -410,7 +421,9 @@ impl ActivationEndpoint {
             });
         }
         done.await
-            .map_err(|_| EndpointError::Closed { summary: None })?
+            .map_err(|_| EndpointError::Closed {
+                summary: self.shared.close_summary(),
+            })?
             .map_err(EndpointError::from)
     }
 
@@ -434,7 +447,9 @@ impl ActivationEndpoint {
             });
         }
         done.await
-            .map_err(|_| EndpointError::Closed { summary: None })?
+            .map_err(|_| EndpointError::Closed {
+                summary: self.shared.close_summary(),
+            })?
             .map_err(EndpointError::from)
     }
 }

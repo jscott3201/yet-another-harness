@@ -58,7 +58,18 @@ impl CapabilityTable {
             .insert(handle, capability);
     }
 
-    fn remove(&self, handle: HandleId) -> Option<CapabilityHandle<dyn TextCapability>> {
+    fn get(&self, handle: HandleId) -> Option<CapabilityHandle<dyn TextCapability>> {
+        self.entries
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&handle)
+            .cloned()
+    }
+
+    /// Drop one entry: a release (or a reclamation the session named).
+    /// The removal is also the double-release guard — a second caller
+    /// finds nothing and is refused before anything reaches the session.
+    pub(crate) fn remove(&self, handle: HandleId) -> Option<CapabilityHandle<dyn TextCapability>> {
         self.entries
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -110,28 +121,36 @@ pub(crate) fn spawn(
     commands: mpsc::WeakSender<PumpCommand>,
     queue_capacity: usize,
     provider_concurrency: usize,
-) -> mpsc::Sender<DispatchRequest> {
+) -> (mpsc::Sender<DispatchRequest>, Arc<CapabilityTable>) {
     let (queue, receiver) = mpsc::channel(queue_capacity.max(1));
+    let table = Arc::new(CapabilityTable::default());
     let dispatcher = Dispatcher {
-        table: Arc::new(CapabilityTable::default()),
+        table: Arc::clone(&table),
         commands,
         context,
         providers: Arc::new(Semaphore::new(provider_concurrency.max(1))),
     };
     tokio::spawn(dispatcher.run(receiver));
-    queue
+    (queue, table)
 }
 
 impl Dispatcher {
-    fn commands(&self) -> Option<mpsc::Sender<PumpCommand>> {
-        self.commands.upgrade()
+    /// Upgrade the weak command link, waiting if the channel is at
+    /// capacity. Waiting is safe from here: the pump never waits on this
+    /// task, so no cycle exists — and an admitted worker call owes a
+    /// terminal, so silently dropping one under load would be exactly
+    /// the lost-terminal shape the bounded lane exists to prevent.
+    async fn commands(&self) -> Option<mpsc::Sender<PumpCommand>> {
+        let sender = self.commands.upgrade()?;
+        sender.reserve().await.ok()?;
+        Some(sender)
     }
 
     /// Apply one outcome to the session through the pump's command
     /// channel. Fails only when the activation is gone; a worker call
     /// whose session ended needs no answer.
     async fn reply(&self, call_id: CallId, outcome: Outcome) {
-        let Some(commands) = self.commands() else {
+        let Some(commands) = self.commands().await else {
             return;
         };
         let (done_sender, done) = oneshot::channel();
@@ -155,7 +174,7 @@ impl Dispatcher {
     /// session's live-handle gauge and this table cannot diverge on the
     /// insertion path.
     async fn mint(&self, call_id: CallId) -> Option<Result<HandleId, AppError>> {
-        let commands = self.commands()?;
+        let commands = self.commands().await?;
         let (done_sender, done) = oneshot::channel();
         commands
             .try_send(PumpCommand::MintHandle {
@@ -167,7 +186,7 @@ impl Dispatcher {
     }
 
     async fn release(&self, handle: HandleId) -> Option<Result<(), AppError>> {
-        let commands = self.commands()?;
+        let commands = self.commands().await?;
         let (done_sender, done) = oneshot::channel();
         commands
             .try_send(PumpCommand::RetireWorkerCapability {
@@ -267,12 +286,33 @@ impl Dispatcher {
                 true,
             );
         };
-        let Ok(wire_handle) = minted else {
-            return refusal(
-                WireErrorKind::ResourceExhausted,
-                "the activation's live-handle ceiling is exhausted",
-                false,
-            );
+        // Whole-set against the session's mint refusals, same discipline
+        // as the broker mapping: each kind names its own recovery.
+        let wire_handle = match minted {
+            Ok(handle) => handle,
+            Err(AppError::HandleCeiling) => {
+                return refusal(
+                    WireErrorKind::ResourceExhausted,
+                    "the activation's live-handle ceiling is exhausted",
+                    false,
+                );
+            }
+            Err(AppError::SessionRetired) => {
+                return refusal(
+                    WireErrorKind::ResourceExhausted,
+                    "the activation's correlation budget is spent; retire it",
+                    false,
+                );
+            }
+            // The call or the session ended under us; the terminal this
+            // refusal answers is about to be moot either way.
+            Err(_) => {
+                return refusal(
+                    WireErrorKind::ResourceExhausted,
+                    "the activation ended before the capability handle was minted",
+                    true,
+                );
+            }
         };
         self.table.insert(wire_handle, handle);
         Outcome::Ok {
@@ -289,9 +329,12 @@ impl Dispatcher {
         let Ok(invoke) = serde_json::from_value::<Invoke>(request.payload.clone()) else {
             return malformed("capability.invoke");
         };
-        // Exact removal first: a double invoke after release, a forged
-        // id, and a foreign id all land in the same bounded refusal.
-        let Some(capability) = self.table.remove(invoke.handle) else {
+        // Lookup by clone, never consumption: a handle stays invocable
+        // until its release — the Wasm lane's repeated-invoke semantics.
+        // A forged id, a foreign id, and a released id all land in the
+        // same bounded refusal, and every invoke still re-enters the
+        // handle's own revocation and admission gates below.
+        let Some(capability) = self.table.get(invoke.handle) else {
             return refusal(
                 WireErrorKind::UnknownHandle,
                 "no such capability handle is held by this activation",
@@ -338,9 +381,9 @@ impl Dispatcher {
                 "the capability provider is at its admission bound",
                 true,
             ),
-            // The handle gate's whole error set is matched above; the
-            // residue is the panic path. It is contained here: the host
-            // authors the failure, and no type, path, or backtrace
+            // The handle gate's whole error set is matched above, so the
+            // residue here is exactly the panic path — contained: the
+            // host authors the failure, and no type, path, or backtrace
             // crosses.
             Ok(Err(_)) | Err(_) => refusal(
                 WireErrorKind::Internal,

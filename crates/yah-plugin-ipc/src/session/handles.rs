@@ -231,15 +231,17 @@ impl HostSession {
     /// Reclaim specific handles without a release frame — the leak-safe
     /// path for a call that ended err or cancelled after minting.
     pub(super) fn reclaim_handles(&mut self, handles: &[HandleId]) {
-        let mut count = 0;
-        for handle in handles {
-            if self.handles.contains_key(handle) {
-                self.drop_handle(*handle, false);
-                count += 1;
-            }
+        let reclaimed: Vec<HandleId> = handles
+            .iter()
+            .filter(|handle| self.handles.contains_key(handle))
+            .copied()
+            .collect();
+        for handle in &reclaimed {
+            self.drop_handle(*handle, false);
         }
-        if count > 0 {
-            self.events.push(SessionEvent::HandlesReclaimed { count });
+        if !reclaimed.is_empty() {
+            self.events
+                .push(SessionEvent::HandlesReclaimed { handles: reclaimed });
         }
     }
 

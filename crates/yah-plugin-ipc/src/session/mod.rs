@@ -141,8 +141,11 @@ pub enum SessionEvent {
     /// worker-held handle; that handle's id is spent.
     WorkerHandleReleased { handle: HandleId, kind: HandleKind },
     /// The session reclaimed handles without a release frame: auto-release
-    /// on a failed minting call, goodbye, disconnect, or fatal fault.
-    HandlesReclaimed { count: u32 },
+    /// on a failed minting call, goodbye, disconnect, or fatal fault. The
+    /// ids are named so the embedding host can drop its own mirrors of
+    /// them in the same breath — a handle reclaimed here must not stay
+    /// invocable anywhere else.
+    HandlesReclaimed { handles: Vec<HandleId> },
     /// The worker said goodbye; in-flight work settles as cancelled.
     WorkerGoodbye { reason: String },
     /// A refusable protocol fault was answered on one call.

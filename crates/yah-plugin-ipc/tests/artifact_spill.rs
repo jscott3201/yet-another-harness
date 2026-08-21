@@ -486,7 +486,9 @@ fn a_disconnect_reclaims_an_offer_that_was_never_closed() {
     session.end_of_input();
     let events = session.drain_events();
     assert!(
-        events.contains(&SessionEvent::HandlesReclaimed { count: 1 }),
+        events.contains(&SessionEvent::HandlesReclaimed {
+            handles: vec![HandleId(1)]
+        }),
         "the close that never came is the host's job now: {events:?}"
     );
     assert_eq!(session.live_handles(), 0);

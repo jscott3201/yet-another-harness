@@ -109,6 +109,12 @@ pub(crate) fn start(
             limits.provider_concurrency,
         )
     });
+    // The capability table's second key-holder: when the session
+    // reclaims handles (an err or cancelled terminal, a goodbye, a
+    // disconnect, a fatal) or sees a wire release, the matching entries
+    // die here too — a reclaimed id must not stay invocable through the
+    // dispatcher.
+    let capability_table = dispatcher.as_ref().map(|(_, table)| Arc::clone(table));
     let pump = Pump {
         session: HostSession::new(config),
         worker,
@@ -118,7 +124,8 @@ pub(crate) fn start(
         shared: Arc::clone(&shared),
         pending: HashMap::new(),
         streams: HashMap::new(),
-        dispatcher,
+        dispatcher: dispatcher.map(|(queue, _)| queue),
+        capability_table,
         outbuf: Vec::new(),
         output_open: true,
         max_stream_credit,
@@ -147,6 +154,11 @@ struct Pump {
     /// The bounded lane admitted worker calls are routed into. `None`
     /// keeps the historical unknown-method auto-refusal.
     dispatcher: Option<mpsc::Sender<DispatchRequest>>,
+    /// The dispatcher's capability table, shared so the pump can retire
+    /// entries the session has reclaimed — the session names the ids in
+    /// its events, the table drops them in the same breath.
+    #[allow(dead_code)]
+    capability_table: Option<Arc<crate::dispatch::CapabilityTable>>,
     /// Encoded frames awaiting the socket. Progress on it is a `select!`
     /// arm, so transport back-pressure never stalls the rest of the pump.
     outbuf: Vec<u8>,
@@ -359,6 +371,18 @@ impl Pump {
         for event in self.session.drain_events() {
             match event {
                 SessionEvent::Negotiated { .. } => self.shared.set_active(),
+                SessionEvent::HandleReleased { handle, .. } => {
+                    if let Some(table) = &self.capability_table {
+                        table.remove(handle);
+                    }
+                }
+                SessionEvent::HandlesReclaimed { handles } => {
+                    if let Some(table) = &self.capability_table {
+                        for handle in handles {
+                            table.remove(handle);
+                        }
+                    }
+                }
                 SessionEvent::HostCallSettled { call_id, outcome } => {
                     self.streams.remove(&call_id);
                     if let Some(waiter) = self.pending.remove(&call_id) {
@@ -423,8 +447,13 @@ impl Pump {
                 SessionEvent::WorkerGoodbye { reason } => {
                     self.shared.set_closed(format!("worker goodbye: {reason}"));
                 }
-                // No stream or handle consumer exists yet; these become
-                // meaningful when a real application sits above the driver.
+                // WorkerHandleReleased names a worker-offered artifact —
+                // the dispatcher's table holds only host-minted
+                // capability handles, so there is nothing to retire.
+                // CancelRequested is advisory and stays with the
+                // dispatcher's documented interruption gap: a synchronous
+                // provider cannot be interrupted, and the session's
+                // exactly-once law settles the race.
                 _ => {}
             }
         }
