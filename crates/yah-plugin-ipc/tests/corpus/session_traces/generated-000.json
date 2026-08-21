@@ -1,0 +1,180 @@
+{
+  "actions": [
+    "Hello",
+    {
+      "Credit": {
+        "additional": 5,
+        "id": 2
+      }
+    },
+    {
+      "StreamData": {
+        "dropped": 1,
+        "id": 3,
+        "lossless": false,
+        "more": true,
+        "seq": 3
+      }
+    },
+    {
+      "StreamData": {
+        "dropped": 0,
+        "id": 6,
+        "lossless": false,
+        "more": true,
+        "seq": 2
+      }
+    },
+    {
+      "StreamOpen": {
+        "credit": 4,
+        "id": 4
+      }
+    },
+    "Eof",
+    {
+      "Release": {
+        "handle": 1,
+        "kind": "Capability"
+      }
+    },
+    {
+      "WorkerCall": {
+        "id": 1,
+        "stream": false
+      }
+    },
+    {
+      "Release": {
+        "handle": 1,
+        "kind": "Artifact"
+      }
+    },
+    {
+      "Release": {
+        "handle": 2,
+        "kind": "Artifact"
+      }
+    },
+    {
+      "ReleaseAck": {
+        "handle": 1,
+        "kind": "Artifact"
+      }
+    },
+    {
+      "StreamOpen": {
+        "credit": 1,
+        "id": 4
+      }
+    },
+    {
+      "Mint": {
+        "id": 1
+      }
+    },
+    {
+      "Credit": {
+        "additional": 4,
+        "id": 1
+      }
+    },
+    {
+      "Release": {
+        "handle": 1,
+        "kind": "Artifact"
+      }
+    },
+    "Eof",
+    {
+      "Credit": {
+        "additional": 2,
+        "id": 6
+      }
+    },
+    {
+      "StreamOpen": {
+        "credit": 5,
+        "id": 3
+      }
+    },
+    {
+      "ReleaseAck": {
+        "handle": 1,
+        "kind": "Capability"
+      }
+    },
+    {
+      "WorkerCall": {
+        "id": 2,
+        "stream": true
+      }
+    },
+    {
+      "WorkerCall": {
+        "id": 3,
+        "stream": false
+      }
+    },
+    {
+      "WorkerCall": {
+        "id": 4,
+        "stream": true
+      }
+    },
+    {
+      "WorkerCall": {
+        "id": 5,
+        "stream": false
+      }
+    },
+    {
+      "StreamData": {
+        "dropped": 2,
+        "id": 2,
+        "lossless": false,
+        "more": false,
+        "seq": 2
+      }
+    },
+    {
+      "StreamData": {
+        "dropped": 2,
+        "id": 2,
+        "lossless": true,
+        "more": true,
+        "seq": 3
+      }
+    },
+    "Eof",
+    {
+      "WorkerCall": {
+        "id": 6,
+        "stream": true
+      }
+    },
+    {
+      "WorkerReply": {
+        "id": 4,
+        "outcome": "Cancelled"
+      }
+    },
+    {
+      "Tick": {
+        "now_ms": 0
+      }
+    },
+    {
+      "WorkerReply": {
+        "id": 2,
+        "outcome": {
+          "Spilled": {
+            "bytes": 10,
+            "handle": 2
+          }
+        }
+      }
+    }
+  ],
+  "budget": null
+}

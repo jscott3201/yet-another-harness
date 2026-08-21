@@ -149,6 +149,50 @@ defect (a one-ULP float-parsing divergence, fixed by enabling
 `float_roundtrip`); it does not come close to proving parser correctness,
 and no documentation claims otherwise.
 
+## Session Model and Hostile-Process Pressure
+
+The worker session's state rules are pinned twice over in the normal
+stable gate. `crates/yah-plugin-ipc/tests/session_model.rs` compares a
+real `HostSession` against an independent reference model — authored from
+`docs/plugin-worker-protocol.md`, not from the session code — after every
+step of named boundary cases and 2,500 seeded generated traces (ten
+pinned seeds, 250 traces each, at most 41 actions per trace). A mismatch
+names the step and prints the full JSON trace; traces that once diverged
+are pinned under `tests/corpus/session_traces/` and replayed as ordinary
+regressions, no generator involved.
+
+The process lane's hostile-pressure suite,
+`crates/yah-plugin-proc/tests/hostile_pressure.rs`, drives the same
+guarantees through a real socketpair and a real child: floods, command
+back-pressure, partial input, trickled goodbyes, and deactivation under
+combined pressure. The suite is part of the crate's ordinary test run.
+
+Before merging a change to the session or pump, run the hostile-process
+suite thirty consecutive times in the pinned Linux container — zero
+flakes or leaked processes is the bar. The recorded evidence path copies
+the exact tree into a volume-backed container (this machine's Docker
+Desktop cannot stack a volume over a bind mount — a local virtiofs
+defect, verified against a pristine `main` — so the checkout is copied
+rather than mounted), runs the container under `--init` so reaped
+orphans are not mistaken for survivors, and executes the suite thirty
+times against the same build:
+
+```bash
+IMAGE=rust:1.97.1-bookworm@sha256:0e2bcaef56d041a486784e54104a81aebe0da44bd03019bd70bc0401e42e4a97
+docker volume create yah-stress-ws
+docker run -d --init --name yah-stress -v yah-stress-ws:/ws "$IMAGE" sleep infinity
+tar --exclude=./target --exclude=./.git --no-xattrs -cf - . | docker cp - yah-stress:/ws
+docker exec yah-stress sh -c 'cd /ws && bash scripts/install-nextest.sh'
+for i in $(seq 1 30); do
+  docker exec yah-stress sh -c 'cd /ws && cargo nextest run --locked -p yah-plugin-proc'
+done
+docker rm -f yah-stress && docker volume rm yah-stress-ws
+```
+
+Hosted CI still runs the canonical read-only lane on every push; the
+copy-in path trades mount strictness for the ability to run locally, on
+the same digest image, toolchain, and commands.
+
 ## Example Guests
 
 Two example plugins implement the same `yah:plugin@0.1.0` world, one in Rust

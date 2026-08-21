@@ -35,6 +35,19 @@
 //! - `bootstrap-report`: print the inherited environment variable names
 //!   and open file descriptors to stdout (the diagnostics lane), then
 //!   behave as `conformant`.
+//! - `half-prefix`: handshake, then write two bytes of a length prefix
+//!   and exit — the partial prefix only a bounded drain can classify.
+//! - `half-payload`: handshake, then write a legal prefix declaring 64
+//!   bytes, deliver ten, and exit — the partial payload at end-of-input.
+//! - `trickle-goodbye`: handshake, then send a goodbye one byte at a
+//!   time and exit — input that arrives slower than one read.
+//! - `flood`: handshake, then send 400 calls as fast as the wire takes
+//!   them without ever reading the refusals, then go deaf — the inbound
+//!   flood that must die at the in-flight ceiling, not in host memory.
+//! - `diag-then-die`: handshake, print a last line to stdout, exit —
+//!   diagnostics written immediately before death.
+//! - `chaos`: handshake, print a diagnostic line, flood 300 calls, go
+//!   deaf — every pressure at once.
 //!
 //! This is a test fixture, not a worker SDK: it implements exactly what its
 //! scripts need and nothing else.
@@ -298,6 +311,89 @@ fn run(mode: &str, wire: &mut Wire) -> i32 {
             serve_conformant(wire)
         }
         "conformant" => serve_conformant(wire),
+        "half-prefix" => {
+            if !wire.handshake() {
+                return 70;
+            }
+            // Two bytes of a four-byte prefix, then gone: end-of-input
+            // lands mid-prefix.
+            let _ = wire.write_raw(&[0, 0]);
+            70
+        }
+        "half-payload" => {
+            if !wire.handshake() {
+                return 70;
+            }
+            // A legal prefix declaring 64 bytes, ten delivered, then gone:
+            // end-of-input lands mid-frame.
+            let mut raw = 64u32.to_be_bytes().to_vec();
+            raw.extend_from_slice(b"[{\"partial\":");
+            let _ = wire.write_raw(&raw);
+            70
+        }
+        "trickle-goodbye" => {
+            if !wire.handshake() {
+                return 70;
+            }
+            // The goodbye, one byte per millisecond: slower than any
+            // single read, well inside the drain's wall-clock bound.
+            let bytes = serde_json::to_vec(&WorkerMessage::Goodbye(Goodbye {
+                reason: "trickled".to_owned(),
+            }))
+            .expect("goodbye serializes");
+            let framed = frame::encode(&bytes);
+            for byte in framed {
+                let _ = wire.write_raw(&[byte]);
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+            0
+        }
+        "flood" => {
+            if !wire.handshake() {
+                return 70;
+            }
+            for id in 1..=400u64 {
+                wire.send(&WorkerMessage::Call(Call {
+                    call_id: CallId(id),
+                    method: "flood".to_owned(),
+                    deadline_ms: None,
+                    stream: false,
+                    payload: serde_json::json!(null),
+                }));
+            }
+            println!("flooded:400");
+            let _ = std::io::stdout().flush();
+            loop {
+                std::thread::sleep(std::time::Duration::from_secs(3600));
+            }
+        }
+        "diag-then-die" => {
+            if !wire.handshake() {
+                return 70;
+            }
+            println!("last-words:retained");
+            let _ = std::io::stdout().flush();
+            70
+        }
+        "chaos" => {
+            if !wire.handshake() {
+                return 70;
+            }
+            println!("chaos:begin");
+            let _ = std::io::stdout().flush();
+            for id in 1..=300u64 {
+                wire.send(&WorkerMessage::Call(Call {
+                    call_id: CallId(id),
+                    method: "chaos".to_owned(),
+                    deadline_ms: None,
+                    stream: false,
+                    payload: serde_json::json!(null),
+                }));
+            }
+            loop {
+                std::thread::sleep(std::time::Duration::from_secs(3600));
+            }
+        }
         other => {
             eprintln!("unknown fake-worker mode {other:?}");
             64
@@ -362,6 +458,12 @@ impl Wire {
             // The host is gone; nothing useful remains to do.
             std::process::exit(0);
         }
+    }
+
+    /// Write raw bytes to the channel, ignoring failure — the partial
+    /// and trickled writes are the point.
+    fn write_raw(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.channel.write(bytes)
     }
 
     /// The next decoded host frame, or `None` once the channel is done.

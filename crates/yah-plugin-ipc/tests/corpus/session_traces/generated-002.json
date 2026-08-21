@@ -1,0 +1,135 @@
+{
+  "actions": [
+    "Hello",
+    {
+      "ReleaseAck": {
+        "handle": 2,
+        "kind": "Artifact"
+      }
+    },
+    {
+      "HostCall": {
+        "deadline_ms": null
+      }
+    },
+    {
+      "WorkerCall": {
+        "id": 1,
+        "stream": true
+      }
+    },
+    {
+      "WorkerCall": {
+        "id": 2,
+        "stream": false
+      }
+    },
+    {
+      "AnswerWorkerCall": {
+        "id": 1,
+        "outcome": "Ok"
+      }
+    },
+    {
+      "StreamData": {
+        "dropped": 3,
+        "id": 2,
+        "lossless": true,
+        "more": true,
+        "seq": 1
+      }
+    },
+    {
+      "Tick": {
+        "now_ms": 0
+      }
+    },
+    {
+      "StreamOpen": {
+        "credit": 1,
+        "id": 3
+      }
+    },
+    {
+      "Tick": {
+        "now_ms": 0
+      }
+    },
+    {
+      "WorkerCall": {
+        "id": 3,
+        "stream": false
+      }
+    },
+    {
+      "Tick": {
+        "now_ms": 0
+      }
+    },
+    {
+      "AnswerWorkerCall": {
+        "id": 2,
+        "outcome": "Ok"
+      }
+    },
+    {
+      "WorkerCall": {
+        "id": 4,
+        "stream": false
+      }
+    },
+    {
+      "StreamOpen": {
+        "credit": 3,
+        "id": 0
+      }
+    },
+    {
+      "WorkerCall": {
+        "id": 5,
+        "stream": true
+      }
+    },
+    {
+      "Release": {
+        "handle": 2,
+        "kind": "Artifact"
+      }
+    },
+    {
+      "StreamData": {
+        "dropped": 2,
+        "id": 1,
+        "lossless": false,
+        "more": false,
+        "seq": 2
+      }
+    },
+    {
+      "Mint": {
+        "id": 3
+      }
+    },
+    {
+      "StreamData": {
+        "dropped": 3,
+        "id": 2,
+        "lossless": true,
+        "more": true,
+        "seq": 2
+      }
+    },
+    {
+      "WorkerCall": {
+        "id": 6,
+        "stream": false
+      }
+    },
+    {
+      "HostCall": {
+        "deadline_ms": 17
+      }
+    }
+  ],
+  "budget": null
+}

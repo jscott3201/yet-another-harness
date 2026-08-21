@@ -11,13 +11,15 @@ The crate is sans-io: `frame` turns bytes into frames incrementally, and
 in it can block, sleep, spawn, or open a socket. The real IO lives in the
 [process driver](#process-driver) (`crates/yah-plugin-proc`), which spawns
 the worker, owns the transport and the kill path, and authenticates the
-bootstrap; no worker-side SDK exists yet. One hundred thirty-nine
+bootstrap; no worker-side SDK exists yet. One hundred forty-eight
 deterministic tests in `crates/yah-plugin-ipc/tests/` drive the host side
 of every rule below with a scripted byte-level peer — one hundred thirteen
-session fixtures plus a byte-boundary property suite and the shared fuzz
-corpus — and three cargo-fuzz targets
-([development](development.md#fuzzing-the-worker-protocol-boundary)) attack
-the same boundary under arbitrary bytes and chunkings.
+session fixtures plus the byte-boundary property suite, the shared fuzz
+corpus inventory, and a session reference model compared against
+production over thousands of generated traces — and four cargo-fuzz
+targets ([development](development.md#fuzzing-the-worker-protocol-boundary))
+attack the same boundary under arbitrary bytes, chunkings, and action
+traces.
 
 ## Framing and strict JSON
 
@@ -130,8 +132,17 @@ retryable — under a fresh id, since the refused one is spent), never by
 queueing: a queue here is unbounded memory a hostile worker controls. A
 refusal does retain one thing, the spent id. Ids are never reused, so
 every id the session has seen stays in a retired set for the session's
-lifetime; that is a few bytes per call, and bounding it is the supervising
-driver's job, by bounding how long a session lives. A deadline the worker
+lifetime — and that memory now carries an enforceable ceiling: a session
+configured with a retired-operation budget refuses new admissions once
+its retired call ids, handle ids, and worker-offered ids reach the bound
+(worker calls with a non-retryable `resource-exhausted`, host
+applications with a session-retired error) without spending another id,
+while every already-admitted call, terminal, release, and ack completes
+exactly as before. Retirements from admitted work may pass the budget;
+the overshoot is bounded by the negotiated in-flight and live-handle
+ceilings, so the bound stays strict. The default is unbounded — bounding
+it is the supervising driver's job, and the process driver sets a budget
+by default. A deadline the worker
 outlives is enforced by the host — a `cancel` goes out and the call
 settles as `deadline-exceeded` with reconciliation required, because the
 worker may have acted before the budget ran out. A late reply after that
@@ -311,7 +322,15 @@ worker that stops draining its socket stalls only its own bytes — and is
 cut off at the outbound buffer cap rather than buffered toward host
 memory exhaustion — never the clock or the shutdown; and an activation
 its composition abandons without deactivating reclaims its own worker
-once the last driver handle drops. Loss stays classified through every
+once the last driver handle drops. The driver's own command path into
+the pump is bounded the same way: call and cancel requests queue only up
+to a configured slot count, and a caller flood meets an observable
+rejection with nothing admitted behind it — an admitted call always
+keeps its exactly-one terminal — while deactivation rides a dedicated
+queue-free signal no flood can delay or drop. Read-only gauges report
+the outbound buffer's bytes and allocated high-water, the pending-call
+waiters, and the channel's free and total slots, so every bound is
+observable and not merely asserted. Loss stays classified through every
 exit: a goodbye the worker managed to send settles in-flight work
 cancelled without reconciliation even when a descendant keeps the socket
 open past its death, while a bare disconnect settles it outcome-unknown,
@@ -344,9 +363,11 @@ to a process the host did not spawn, and no current scenario does that.
 - Reconnect or resume. A session that faults or loses its transport is
   over; there is deliberately no resync path.
 - Retired-id forgetting. Ids are never reused, so the session remembers
-  every call and handle id it has seen, and that memory grows with call
-  count for the session's lifetime. The process driver bounds it by
-  bounding the session, not through any protocol mechanism.
+  every call and handle id it has seen. That memory is bounded only where
+  a retired-operation budget is configured — the process driver sets one
+  by default; a budget-less session still grows with call count for its
+  lifetime. The budget retires new admissions, it never forgets: no
+  protocol mechanism for forgetting exists.
 - Any binding from the capability broker to these handles. The wire encoding
   for a brokered resource exists; nothing yet mints one from a real grant.
 - Worker-side enforcement evidence. The fixtures drive the host session

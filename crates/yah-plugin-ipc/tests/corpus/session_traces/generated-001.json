@@ -1,0 +1,125 @@
+{
+  "actions": [
+    "Hello",
+    {
+      "WorkerCall": {
+        "id": 1,
+        "stream": false
+      }
+    },
+    {
+      "Release": {
+        "handle": 1,
+        "kind": "Artifact"
+      }
+    },
+    {
+      "WorkerCall": {
+        "id": 2,
+        "stream": true
+      }
+    },
+    {
+      "StreamData": {
+        "dropped": 2,
+        "id": 5,
+        "lossless": true,
+        "more": true,
+        "seq": 2
+      }
+    },
+    {
+      "WorkerReply": {
+        "id": 1,
+        "outcome": "Cancelled"
+      }
+    },
+    {
+      "StreamData": {
+        "dropped": 0,
+        "id": 3,
+        "lossless": true,
+        "more": true,
+        "seq": 0
+      }
+    },
+    {
+      "WorkerReply": {
+        "id": 1,
+        "outcome": "ErrUnknownCall"
+      }
+    },
+    {
+      "ReleaseAck": {
+        "handle": 2,
+        "kind": "Artifact"
+      }
+    },
+    {
+      "WorkerReply": {
+        "id": 1,
+        "outcome": {
+          "Spilled": {
+            "bytes": 10,
+            "handle": 1
+          }
+        }
+      }
+    },
+    {
+      "StreamData": {
+        "dropped": 2,
+        "id": 3,
+        "lossless": false,
+        "more": false,
+        "seq": 2
+      }
+    },
+    {
+      "StreamData": {
+        "dropped": 0,
+        "id": 5,
+        "lossless": true,
+        "more": false,
+        "seq": 1
+      }
+    },
+    {
+      "Release": {
+        "handle": 1,
+        "kind": "Capability"
+      }
+    },
+    {
+      "WorkerCall": {
+        "id": 3,
+        "stream": true
+      }
+    },
+    {
+      "Credit": {
+        "additional": 5,
+        "id": 3
+      }
+    },
+    {
+      "ReleaseAck": {
+        "handle": 1,
+        "kind": "Artifact"
+      }
+    },
+    {
+      "WorkerReply": {
+        "id": 1,
+        "outcome": "ErrUnknownCall"
+      }
+    },
+    {
+      "StreamOpen": {
+        "credit": 5,
+        "id": 4
+      }
+    }
+  ],
+  "budget": null
+}

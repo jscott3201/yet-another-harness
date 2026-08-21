@@ -19,12 +19,12 @@
 use std::collections::{HashMap, VecDeque};
 use std::sync::{
     Arc, Mutex,
-    atomic::{AtomicBool, AtomicU8, Ordering},
+    atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering},
 };
 use std::time::Duration;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::sync::{Notify, mpsc, oneshot};
+use tokio::sync::{Notify, mpsc, oneshot, watch};
 use yah_plugin_ipc::session::{AppError, HostSession, SessionEvent};
 use yah_plugin_ipc::types::*;
 use yah_plugin_ipc::{frame, session::SessionConfig};
@@ -64,14 +64,37 @@ pub(crate) enum PumpCommand {
         target: CancelTarget,
         done: oneshot::Sender<Result<(), AppError>>,
     },
-    Shutdown {
-        reason: String,
-    },
+    // Shutdown deliberately is not a command: commands queue, and a
+    // deactivation dropped behind a command flood would wait out an
+    // arbitrary backlog. It rides a watch signal instead — one value, no
+    // queue, always deliverable.
 }
 
 const PHASE_HANDSHAKE: u8 = 0;
 const PHASE_ACTIVE: u8 = 1;
 const PHASE_CLOSED: u8 = 2;
+
+/// A read-only memory snapshot of the pump's buffers and queues. Every
+/// field distinguishes logical occupancy from allocated capacity where the
+/// container exposes the difference: the outbound buffer's `capacity` is
+/// the high-water allocation a live pump keeps for reuse (a `Vec` never
+/// shrinks), while `bytes` is what a worker that stopped draining is
+/// actually costing. The command channel's numbers come from the channel
+/// itself; its capacity is the configured bound.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PumpGauges {
+    /// Encoded frames awaiting a worker that is not draining, in bytes.
+    pub outbound_buffer_bytes: usize,
+    /// What that buffer is allocated for — the high-water it has reached
+    /// this connection. Zero only before the first frame.
+    pub outbound_buffer_capacity: usize,
+    /// Host calls with a waiter parked on the pump.
+    pub pending_calls: usize,
+    /// Free slots in the bounded command channel right now.
+    pub command_channel_available: usize,
+    /// The channel's total configured slots.
+    pub command_channel_capacity: usize,
+}
 
 /// The pump's face toward the driver: nonblocking snapshots and a notifier.
 pub(crate) struct PumpShared {
@@ -90,6 +113,11 @@ pub(crate) struct PumpShared {
     /// close: health must name it, but it must not steal the close
     /// summary a later goodbye wins under the first-cause rule.
     output_closed: AtomicBool,
+    /// Memory gauges, updated by the pump task at every buffer change.
+    outbound_bytes: AtomicUsize,
+    outbound_capacity: AtomicUsize,
+    pending_calls: AtomicUsize,
+    command_channel_capacity: usize,
 }
 
 #[derive(Default)]
@@ -108,6 +136,10 @@ impl PumpShared {
             diagnostics_cap: limits.diagnostics_cap_bytes,
             worker_pid,
             output_closed: AtomicBool::new(false),
+            outbound_bytes: AtomicUsize::new(0),
+            outbound_capacity: AtomicUsize::new(0),
+            pending_calls: AtomicUsize::new(0),
+            command_channel_capacity: limits.command_channel_capacity,
         }
     }
 
@@ -198,6 +230,29 @@ impl PumpShared {
             buffer.pop_front();
         }
     }
+
+    fn record_outbound(&self, bytes: usize, capacity: usize) {
+        self.outbound_bytes.store(bytes, Ordering::Release);
+        self.outbound_capacity.store(capacity, Ordering::Release);
+    }
+
+    fn record_pending(&self, count: usize) {
+        self.pending_calls.store(count, Ordering::Release);
+    }
+
+    /// One consistent-enough snapshot of the memory gauges. The command
+    /// channel numbers arrive from the caller's sender handle, which is
+    /// the only place that can read the queue without keeping the channel
+    /// alive artificially.
+    pub fn gauges(&self, command_available: Option<usize>) -> PumpGauges {
+        PumpGauges {
+            outbound_buffer_bytes: self.outbound_bytes.load(Ordering::Acquire),
+            outbound_buffer_capacity: self.outbound_capacity.load(Ordering::Acquire),
+            pending_calls: self.pending_calls.load(Ordering::Acquire),
+            command_channel_available: command_available.unwrap_or(0),
+            command_channel_capacity: self.command_channel_capacity,
+        }
+    }
 }
 
 /// Which of the worker's two diagnostic pipes a tail is read from.
@@ -211,7 +266,14 @@ pub enum DiagnosticStream {
 }
 
 pub(crate) struct PumpHandle {
-    pub commands: mpsc::UnboundedSender<PumpCommand>,
+    /// Bounded: a caller flood hits [`mpsc::Sender::try_send`] rejection,
+    /// never an unbounded backlog. See [`ProcLimits::
+    /// command_channel_capacity`].
+    pub commands: mpsc::Sender<PumpCommand>,
+    /// Deactivation's signal. One value, no queue: a shutdown is never
+    /// dropped behind a command flood, and sending to a dead pump is a
+    /// harmless no-op.
+    pub shutdown: watch::Sender<Option<String>>,
     pub shared: Arc<PumpShared>,
     pub task: tokio::task::JoinHandle<()>,
 }
@@ -231,12 +293,18 @@ pub(crate) fn start(
     // A zero interval would panic tokio's timer; one millisecond is the
     // clock's floor.
     limits.tick_interval_ms = limits.tick_interval_ms.max(1);
+    // One slot is the floor for the same reason: a zero-capacity channel
+    // would reject everything, including calls the session would admit.
+    limits.command_channel_capacity = limits.command_channel_capacity.max(1);
     let shared = Arc::new(PumpShared::new(&limits, worker.pgid));
-    let (commands, receiver) = mpsc::unbounded_channel();
+    let (commands, receiver) = mpsc::channel(limits.command_channel_capacity);
+    let (shutdown, shutdown_rx) = watch::channel(None);
     let pump = Pump {
         session: HostSession::new(config),
         worker,
         commands: receiver,
+        shutdown: shutdown_rx,
+        shutdown_seen: false,
         shared: Arc::clone(&shared),
         pending: HashMap::new(),
         outbuf: Vec::new(),
@@ -246,6 +314,7 @@ pub(crate) fn start(
     let task = tokio::spawn(pump.run());
     PumpHandle {
         commands,
+        shutdown,
         shared,
         task,
     }
@@ -254,7 +323,9 @@ pub(crate) fn start(
 struct Pump {
     session: HostSession,
     worker: SpawnedWorker,
-    commands: mpsc::UnboundedReceiver<PumpCommand>,
+    commands: mpsc::Receiver<PumpCommand>,
+    shutdown: watch::Receiver<Option<String>>,
+    shutdown_seen: bool,
     shared: Arc<PumpShared>,
     pending: HashMap<CallId, oneshot::Sender<CallEnd>>,
     /// Encoded frames awaiting the socket. Progress on it is a `select!`
@@ -283,6 +354,10 @@ impl Pump {
 
         loop {
             self.apply_events();
+            // One gauge update per iteration covers every mutation of the
+            // pending table: admissions in the command arm and settlements
+            // in `apply_events` alike.
+            self.shared.record_pending(self.pending.len());
             if !self.queue_outbox() {
                 input_open = false;
                 self.end_input(&mut wire_buf).await;
@@ -310,6 +385,7 @@ impl Pump {
                         // half-death is published for health to name.
                         self.output_open = false;
                         self.outbuf.clear();
+                        self.shared.record_outbound(0, 0);
                         self.shared.set_output_closed();
                     }
                 }
@@ -337,6 +413,7 @@ impl Pump {
                         match self.session.call_worker(&method, payload, deadline_ms, false) {
                             Ok(call_id) => {
                                 self.pending.insert(call_id, settled);
+                                self.shared.record_pending(self.pending.len());
                                 let _ = opened.send(Ok(call_id));
                             }
                             Err(error) => {
@@ -347,10 +424,6 @@ impl Pump {
                     Some(PumpCommand::Cancel { call_id, target, done }) => {
                         let _ = done.send(self.session.cancel(call_id, target));
                     }
-                    Some(PumpCommand::Shutdown { reason }) => {
-                        self.begin_goodbye(&reason);
-                        break;
-                    }
                     // Every command sender is gone: the driver was dropped
                     // without deactivation. The kill path is the safety net.
                     None => {
@@ -358,6 +431,18 @@ impl Pump {
                         break;
                     }
                 },
+                // Deactivation. Not a command: the watch signal carries no
+                // queue, so a flood of calls cannot delay or drop it. The
+                // sender lives in the pump handle; a dropped sender (the
+                // driver gone without deactivating) ends the activation the
+                // same way the command channel's `None` does.
+                _changed = self.shutdown.changed(), if !self.shutdown_seen => {
+                    self.shutdown_seen = true;
+                    let reason =
+                        self.shutdown.borrow().clone().unwrap_or_else(|| "deactivated".to_owned());
+                    self.begin_goodbye(&reason);
+                    break;
+                }
             }
         }
 
@@ -480,7 +565,11 @@ impl Pump {
         }
         for message in self.session.drain_outbox() {
             match serde_json::to_vec(&message) {
-                Ok(bytes) => self.outbuf.extend_from_slice(&frame::encode(&bytes)),
+                Ok(bytes) => {
+                    self.outbuf.extend_from_slice(&frame::encode(&bytes));
+                    self.shared
+                        .record_outbound(self.outbuf.len(), self.outbuf.capacity());
+                }
                 Err(_) => {
                     self.shared
                         .set_closed("a host frame did not serialize".to_owned());
@@ -518,6 +607,8 @@ impl Pump {
             Ok(0) => false,
             Ok(count) => {
                 self.outbuf.drain(..count);
+                self.shared
+                    .record_outbound(self.outbuf.len(), self.outbuf.capacity());
                 true
             }
             Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => true,
@@ -577,6 +668,8 @@ impl Pump {
         });
         if let Ok(bytes) = serde_json::to_vec(&goodbye) {
             self.outbuf.extend_from_slice(&frame::encode(&bytes));
+            self.shared
+                .record_outbound(self.outbuf.len(), self.outbuf.capacity());
         }
     }
 
