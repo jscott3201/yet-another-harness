@@ -11,7 +11,7 @@ The crate is sans-io: `frame` turns bytes into frames incrementally, and
 in it can block, sleep, spawn, or open a socket. The real IO lives in the
 [process driver](#process-driver) (`crates/yah-plugin-proc`), which spawns
 the worker, owns the transport and the kill path, and authenticates the
-bootstrap; no worker-side SDK exists yet. One hundred forty-nine
+bootstrap; no worker-side SDK exists yet. One hundred fifty-one
 deterministic tests in `crates/yah-plugin-ipc/tests/` drive the host side
 of every rule below with a scripted byte-level peer — one hundred thirteen
 session fixtures plus the byte-boundary property suite, the shared fuzz
@@ -350,6 +350,60 @@ late answer, the handshake clock, the outbound cap, the forced kill
 path with its group sweep, spawn-failure reporting, and the
 bootstrap's environment and descriptor table end to end. The fake
 worker is a test fixture, not an SDK.
+
+### The activation endpoint
+
+Once a worker completes hello/accept, the driver publishes an
+`ActivationEndpoint` for that exact activation — the production invocation
+surface the test-facing observation hooks were holding open. Publication is
+gated on negotiation (there is no worker to talk to before it) and
+withdrawal precedes the goodbye: deactivation flips a shared closing flag
+before the queue-free shutdown signal moves, so no fresh call is admitted
+into a pump that is already saying goodbye, and after release the endpoint
+answers closed with the retained first-cause summary. Clones hold the pump's
+command channel only weakly, so an endpoint kept past its activation can
+never keep the worker alive — an abandoned activation still reaps itself —
+and every operation fails closed with typed errors: never-started,
+not-negotiated, closing, closed-with-cause, pre-admission capacity, session
+retirement, or a named protocol refusal. Byte bounds are checked before a
+command slot is occupied, so a bounded slot count never hides an unbounded
+body.
+
+Calls keep the protocol's exactly-once law as an enum: a worker terminal
+completes the call with whatever outcome the worker sent (a domain failure
+is data inside it), while deadline expiry, a goodbye, and a bare disconnect
+settle into distinct loss kinds that say whether reconciliation is owed.
+Stream calls deliver the worker's framed items through a channel bounded at
+the negotiated credit ceiling — a slow consumer throttles the worker through
+the credit window instead of growing host memory, and the host re-grants
+what the consumer drains each tick — while the terminal still lands exactly
+once. Dropping the item receiver mutes delivery and cancels the stream half;
+it never cancels the terminal.
+
+Worker-to-host calls are routed to a bounded application dispatcher built
+from the start permit's capability context. The pump never runs provider
+code: requests wait in a bounded queue whose overflow answers the worker a
+retryable resource-exhausted refusal before any provider runs, provider
+concurrency is a semaphore, request bodies are byte-bounded before they
+occupy a slot, and results return through the same bounded command channel
+so the session stays single-owner. The dispatcher serves the versioned
+capability family over an exact activation-local handle table: acquire
+resolves the grant through the same broker gates as the Wasm lane and mints
+a wire handle only after the session does, invoke re-enters the handle's own
+revocation and admission gates off-pump inside a bounded permit (a provider
+panic is contained into a host-authored failure — no type, path, or backtrace
+crosses), and release retires the id exactly once, with forged ids, unknown
+ids, and double releases landing in one indistinguishable bounded refusal.
+Worker text never echoes: refusals are host-authored static messages, with
+the one Wasm-lane exception that a provider's own refusal text is its
+caller-facing contract.
+
+A spilled result pull-reads through the endpoint behind its digest-carrying
+offer: size and digest are checked before the first pull, chunks are bounded
+at the protocol's per-read bound, the accumulated bytes are verified against
+the BLAKE3 claim (a claim to check, never provenance), and the handle is
+released explicitly — the one handle the host asks a worker to release,
+answered by the worker's acknowledgement.
 
 The pathname-socket lane with kernel-attested peer credentials
 (`getpeereid`, `SO_PEERCRED`) is deliberately absent: it exists to attach

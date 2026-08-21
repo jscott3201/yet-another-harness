@@ -15,11 +15,11 @@ mod fixtures;
 mod rig;
 
 use fixtures::lifecycle_revision;
-use rig::{Rig, diagnostics_show, health_becomes, scripted, settled_within, stop_active};
+use rig::{Rig, diagnostics_show, endpoint, health_becomes, scripted, settled_within, stop_active};
 use serde_json::json;
 use yah_plugin_host::{HostPluginActivation, PluginHealth};
-use yah_plugin_ipc::types::{CancelReason, CancelTarget, Outcome, WireErrorKind};
-use yah_plugin_proc::{CallEnd, ProcActivationPlan, WORKER_CHANNEL_FD};
+use yah_plugin_ipc::types::{CancelReason, CancelTarget, Outcome};
+use yah_plugin_proc::{CallTerminal, ProcActivationPlan, WORKER_CHANNEL_FD};
 
 #[tokio::test]
 async fn a_dead_worker_poisons_its_activation_and_a_fresh_one_serves() {
@@ -39,7 +39,7 @@ async fn a_dead_worker_poisons_its_activation_and_a_fresh_one_serves() {
         rig.epoch,
         &rig.broker,
         &rig.grants,
-        std::sync::Arc::clone(&driver),
+        rig::as_trait(&driver),
     )
     .expect("preparation is inert and succeeds");
     let crashed_id = crashed.id().clone();
@@ -64,7 +64,9 @@ async fn a_dead_worker_poisons_its_activation_and_a_fresh_one_serves() {
     stop_active(crashed, &rig.registry, rig.epoch).await;
     assert_eq!(observer.deactivation_calls(&crashed_id), 1);
 
-    // The fresh activation on the same driver is the restart.
+    // The fresh activation on the same driver is the restart. A clone
+    // survives the move into prepare, so the endpoint stays reachable.
+    let endpoint_driver = std::sync::Arc::clone(&driver);
     let mut rig = Rig::new("proc.restart.fresh", &revision);
     let mut fresh =
         HostPluginActivation::prepare(&mut rig.slot, rig.epoch, &rig.broker, &rig.grants, driver)
@@ -75,12 +77,14 @@ async fn a_dead_worker_poisons_its_activation_and_a_fresh_one_serves() {
         .await
         .expect("a fresh process serves after the crash");
     assert!(matches!(fresh_handle.health(), Ok(PluginHealth::Healthy)));
-    let call = observer
-        .begin_call(&fresh_id, "tool.echo", json!({"alive": true}), None)
+    let call = endpoint(&endpoint_driver, &fresh_id)
+        .call("tool.echo", json!({"alive": true}), None)
         .await
         .expect("the call opens");
     match settled_within(call).await {
-        CallEnd::Settled(Outcome::Ok { result }) => assert_eq!(result, json!({"alive": true})),
+        CallTerminal::Completed(Outcome::Ok { result }) => {
+            assert_eq!(result, json!({"alive": true}))
+        }
         other => panic!("expected the echo, got {other:?}"),
     }
     stop_active(fresh, &rig.registry, rig.epoch).await;
@@ -89,7 +93,9 @@ async fn a_dead_worker_poisons_its_activation_and_a_fresh_one_serves() {
 #[tokio::test]
 async fn a_disconnect_settles_in_flight_work_outcome_unknown() {
     let revision = lifecycle_revision("disconnect", '7');
-    let (driver, observer) = scripted(&revision, vec![ProcActivationPlan::worker("exit-mid-call")]);
+    let (driver, _observer) =
+        scripted(&revision, vec![ProcActivationPlan::worker("exit-mid-call")]);
+    let endpoint_driver = std::sync::Arc::clone(&driver);
     let mut rig = Rig::new("proc.disconnect", &revision);
     let mut activation =
         HostPluginActivation::prepare(&mut rig.slot, rig.epoch, &rig.broker, &rig.grants, driver)
@@ -97,16 +103,16 @@ async fn a_disconnect_settles_in_flight_work_outcome_unknown() {
     let id = activation.id().clone();
     let handle = activation.activate(&rig.registry).await.expect("starts");
 
-    let call = observer
-        .begin_call(&id, "tool.slow", json!(null), None)
+    let call = endpoint(&endpoint_driver, &id)
+        .call("tool.slow", json!(null), None)
         .await
         .expect("the call opens");
     // The worker exits on receiving the call, without answering: the one
     // outcome the host must not invent is success or failure.
     match settled_within(call).await {
-        CallEnd::Lost { error, reconcile } => {
-            assert_eq!(error, WireErrorKind::OutcomeUnknown);
-            assert!(reconcile, "a disconnect always requires reconciliation");
+        CallTerminal::LostOutcomeUnknown => {
+            // A disconnect always requires reconciliation; the terminal
+            // says so by being this variant and no other.
         }
         other => panic!("expected outcome-unknown, got {other:?}"),
     }
@@ -120,7 +126,8 @@ async fn a_disconnect_settles_in_flight_work_outcome_unknown() {
 #[tokio::test]
 async fn a_cancelled_call_still_terminates_with_the_cancelled_outcome() {
     let revision = lifecycle_revision("cancel", '8');
-    let (driver, observer) = scripted(&revision, vec![ProcActivationPlan::worker("cancel-ack")]);
+    let (driver, _observer) = scripted(&revision, vec![ProcActivationPlan::worker("cancel-ack")]);
+    let endpoint_driver = std::sync::Arc::clone(&driver);
     let mut rig = Rig::new("proc.cancel", &revision);
     let mut activation =
         HostPluginActivation::prepare(&mut rig.slot, rig.epoch, &rig.broker, &rig.grants, driver)
@@ -128,18 +135,19 @@ async fn a_cancelled_call_still_terminates_with_the_cancelled_outcome() {
     let id = activation.id().clone();
     let handle = activation.activate(&rig.registry).await.expect("starts");
 
-    let call = observer
-        .begin_call(&id, "tool.hold", json!(null), None)
+    let activation_endpoint = endpoint(&endpoint_driver, &id);
+    let call = activation_endpoint
+        .call("tool.hold", json!(null), None)
         .await
         .expect("the call opens");
-    observer
-        .cancel(&id, call.call_id(), CancelTarget::Call)
+    activation_endpoint
+        .cancel(call.call_id(), CancelTarget::Call)
         .await
         .expect("the cancel goes out");
     // The worker acknowledges by answering — silence would be
     // indistinguishable from a lost worker.
     match settled_within(call).await {
-        CallEnd::Settled(Outcome::Cancelled { reason }) => {
+        CallTerminal::Completed(Outcome::Cancelled { reason }) => {
             assert_eq!(reason, CancelReason::Requested);
         }
         other => panic!("expected the cancelled outcome, got {other:?}"),
@@ -152,6 +160,7 @@ async fn a_cancelled_call_still_terminates_with_the_cancelled_outcome() {
 async fn an_expired_deadline_settles_locally_and_tolerates_the_late_answer() {
     let revision = lifecycle_revision("deadline", '9');
     let (driver, observer) = scripted(&revision, vec![ProcActivationPlan::worker("cancel-ack")]);
+    let endpoint_driver = std::sync::Arc::clone(&driver);
     let mut rig = Rig::new("proc.deadline", &revision);
     let mut activation =
         HostPluginActivation::prepare(&mut rig.slot, rig.epoch, &rig.broker, &rig.grants, driver)
@@ -162,16 +171,16 @@ async fn an_expired_deadline_settles_locally_and_tolerates_the_late_answer() {
     // The worker holds the call until cancelled; the budget expires first,
     // the host enforces it, and the worker's cancelled answer arrives as
     // the tolerated late terminal.
-    let call = observer
-        .begin_call(&id, "tool.hold", json!(null), Some(50))
+    let activation_endpoint = endpoint(&endpoint_driver, &id);
+    let call = activation_endpoint
+        .call("tool.hold", json!(null), Some(50))
         .await
         .expect("the call opens");
     let expired_id = call.call_id();
     match settled_within(call).await {
-        CallEnd::Lost { error, reconcile } => {
-            assert_eq!(error, WireErrorKind::DeadlineExceeded);
-            assert!(reconcile, "the worker may have acted before the budget");
-        }
+        // The worker may have acted before the budget; the terminal says
+        // reconcile-first by being DeadlineExceeded and no other variant.
+        CallTerminal::DeadlineExceeded => {}
         other => panic!("expected deadline-exceeded, got {other:?}"),
     }
     // The late terminal is observed, not assumed: the worker only answers
@@ -181,16 +190,16 @@ async fn an_expired_deadline_settles_locally_and_tolerates_the_late_answer() {
     // ordered, so by the time the follow-up below settles, that late
     // answer was already fed to the session — and tolerated.
     diagnostics_show(&observer, &id, &format!("answered:{}", expired_id.0)).await;
-    let follow_up = observer
-        .begin_call(&id, "tool.hold", json!(null), None)
+    let follow_up = activation_endpoint
+        .call("tool.hold", json!(null), None)
         .await
         .expect("the session still serves after the late terminal");
-    observer
-        .cancel(&id, follow_up.call_id(), CancelTarget::Call)
+    activation_endpoint
+        .cancel(follow_up.call_id(), CancelTarget::Call)
         .await
         .expect("the cancel goes out");
     match settled_within(follow_up).await {
-        CallEnd::Settled(Outcome::Cancelled { reason }) => {
+        CallTerminal::Completed(Outcome::Cancelled { reason }) => {
             assert_eq!(reason, CancelReason::Requested);
         }
         other => panic!("expected the cancelled follow-up, got {other:?}"),
@@ -221,13 +230,14 @@ async fn the_bootstrap_leaks_nothing_and_diagnostics_stay_diagnostics() {
         "the ambient hazard sits inside the worker's probe range: {ambient}"
     );
 
+    let endpoint_driver = std::sync::Arc::clone(&driver);
     let mut first_rig = Rig::new("proc.bootstrap.first", &revision);
     let mut first = HostPluginActivation::prepare(
         &mut first_rig.slot,
         first_rig.epoch,
         &first_rig.broker,
         &first_rig.grants,
-        std::sync::Arc::clone(&driver),
+        rig::as_trait(&driver),
     )
     .expect("preparation is inert and succeeds");
     let first_id = first.id().clone();
@@ -268,13 +278,13 @@ async fn the_bootstrap_leaks_nothing_and_diagnostics_stay_diagnostics() {
         libc::close(ambient);
     }
     // Diagnostics ride stdout as text; the protocol never does.
-    let call = observer
-        .begin_call(&second_id, "tool.echo", json!("still-serving"), None)
+    let call = endpoint(&endpoint_driver, &second_id)
+        .call("tool.echo", json!("still-serving"), None)
         .await
         .expect("the call opens");
     assert!(matches!(
         settled_within(call).await,
-        CallEnd::Settled(Outcome::Ok { .. })
+        CallTerminal::Completed(Outcome::Ok { .. })
     ));
     stop_active(second, &second_rig.registry, second_rig.epoch).await;
     stop_active(first, &first_rig.registry, first_rig.epoch).await;

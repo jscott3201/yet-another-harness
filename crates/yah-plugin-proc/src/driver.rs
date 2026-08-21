@@ -16,9 +16,10 @@
 //! fresh activation with a fresh process — restart *policy* stays where
 //! SDK-002 deferred it.
 //!
-//! The start permit's capability context is accepted and deliberately
-//! unused: the wire protocol defines the handle encoding, but nothing mints
-//! a worker handle from a real grant yet. That binding is a later slice.
+//! The start permit's capability context feeds the activation's
+//! worker-to-host application dispatcher, and the negotiated activation
+//! publishes an [`ActivationEndpoint`] — the production invocation
+//! surface, weakly held, withdrawn before teardown.
 
 use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
@@ -28,7 +29,7 @@ use std::sync::{
 };
 use std::time::Duration;
 
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::mpsc;
 use yah_plugin_host::{
     DriverActivationError, DriverDeactivationError, DriverFuture, DriverHealthError, DriverKind,
     DriverPrepareError, DriverStartPermit, DriverStopPermit, PluginActivationId,
@@ -36,11 +37,14 @@ use yah_plugin_host::{
     PreparedDriverActivation,
 };
 use yah_plugin_ipc::session::SessionConfig;
-use yah_plugin_ipc::types::{CallId, CancelTarget};
+
+use yah_plugin_host::PluginStartContext;
 
 use crate::ProcLimits;
 use crate::bootstrap::{WorkerCommand, spawn_worker};
-use crate::pump::{self, CallEnd, DiagnosticStream, PumpCommand, PumpGauges, PumpShared};
+use crate::endpoint::{ActivationEndpoint, EndpointError, activation_endpoint, admission_gate};
+use crate::pump;
+use crate::shared::{DiagnosticStream, PumpCommand, PumpGauges, PumpShared};
 
 type ObservationMap = HashMap<PluginActivationId, Arc<ActivationObservation>>;
 
@@ -165,7 +169,7 @@ impl ProcessPluginDriver {
         kind: DriverKind,
         worker_program: impl Into<PathBuf>,
         plans: impl IntoIterator<Item = ProcActivationPlan>,
-    ) -> (Arc<dyn PluginDriver>, ProcObserver) {
+    ) -> (Arc<Self>, ProcObserver) {
         Self::scripted_with_limits(revision, kind, worker_program, plans, ProcLimits::default())
     }
 
@@ -178,12 +182,12 @@ impl ProcessPluginDriver {
         worker_program: impl Into<PathBuf>,
         plans: impl IntoIterator<Item = ProcActivationPlan>,
         limits: ProcLimits,
-    ) -> (Arc<dyn PluginDriver>, ProcObserver) {
+    ) -> (Arc<Self>, ProcObserver) {
         let observations: Arc<Mutex<ObservationMap>> = Arc::new(Mutex::new(HashMap::new()));
         let observer = ProcObserver {
             observations: Arc::clone(&observations),
         };
-        let driver: Arc<dyn PluginDriver> = Arc::new(Self {
+        let driver = Arc::new(Self {
             revision,
             kind,
             worker_program: worker_program.into(),
@@ -195,6 +199,40 @@ impl ProcessPluginDriver {
             observations,
         });
         (driver, observer)
+    }
+}
+
+impl ProcessPluginDriver {
+    /// The invocation endpoint for one exact activation.
+    ///
+    /// Publication is gated on negotiation: before hello/accept there is
+    /// no worker to talk to, and the endpoint does not exist. The
+    /// returned value holds the pump's command channel only weakly, so
+    /// clones of it can never keep an abandoned activation alive; once
+    /// deactivation has begun it answers `Closing`, and after release it
+    /// answers `Closed` with the retained first-cause summary.
+    pub fn endpoint(&self, id: &PluginActivationId) -> Result<ActivationEndpoint, EndpointError> {
+        let observations = self
+            .observations
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(observation) = observations.get(id) else {
+            return Err(EndpointError::NotStarted);
+        };
+        let Some(link) = observation.link() else {
+            // No live link: either the activation was never started, or
+            // it ran and was released. The two are different facts.
+            return Err(match observation.retired_summary() {
+                None => EndpointError::NotStarted,
+                Some(summary) => EndpointError::Closed { summary },
+            });
+        };
+        admission_gate(&link.shared, true)?;
+        Ok(activation_endpoint(
+            id.clone(),
+            link.commands.clone(),
+            link.shared,
+        ))
     }
 }
 
@@ -265,7 +303,11 @@ struct ActivationCore {
 }
 
 impl ActivationCore {
-    async fn boot(&self, handshake: HandshakeBehavior) -> Result<(), DriverActivationError> {
+    async fn boot(
+        &self,
+        handshake: HandshakeBehavior,
+        context: PluginStartContext,
+    ) -> Result<(), DriverActivationError> {
         let worker = spawn_worker(&self.command).map_err(|error| {
             DriverActivationError::failed(format!("worker did not spawn: {error}"))
         })?;
@@ -273,7 +315,7 @@ impl ActivationCore {
             retired_operation_budget: self.limits.retired_operation_budget,
             ..SessionConfig::default()
         };
-        let handle = pump::start(worker, config, self.limits);
+        let handle = pump::start(worker, config, Some(context), self.limits);
         let shared = Arc::clone(&handle.shared);
         self.observation.attach(&handle);
         {
@@ -316,6 +358,13 @@ impl ActivationCore {
     async fn shutdown(&self) {
         let taken = self.live.lock().await.take();
         if let Some(handle) = taken {
+            // Withdrawal precedes the goodbye: the shared closing flag
+            // flips before the watch signal moves, so no endpoint can
+            // admit a fresh call into a pump that is already saying
+            // goodbye. The two stores are one atomic window from an
+            // endpoint's point of view — availability reads the flag
+            // first and the watch has no queue to lose.
+            handle.shared.set_closing();
             // The watch signal has no queue: deactivation cannot be
             // dropped behind a command flood, and a pump that already
             // ended simply never reads it.
@@ -372,7 +421,8 @@ impl PreparedDriverActivation for PreparedProcActivation {
                     "host start permit did not match the prepared activation",
                 ));
             }
-            core.boot(handshake).await
+            let context = permit.context().clone();
+            core.boot(handshake, context).await
         })
     }
 
@@ -509,6 +559,21 @@ impl ActivationObservation {
         }
     }
 
+    /// The retained summary if the activation ran and was released;
+    /// `None` while it has never started. Distinguishing the two is the
+    /// endpoint's job: never-started is not a closed activation.
+    fn retired_summary(&self) -> Option<Option<String>> {
+        match &*self
+            .link
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+        {
+            ObservationLink::Idle => None,
+            ObservationLink::Live(_) => None,
+            ObservationLink::Retired { close_summary } => Some(close_summary.clone()),
+        }
+    }
+
     fn pump_shared(&self) -> Option<Arc<PumpShared>> {
         self.link().map(|link| link.shared)
     }
@@ -548,14 +613,12 @@ pub enum ResourceState {
     Released = 2,
 }
 
-/// Read-only evidence view over every activation this driver prepared,
-/// plus the worker-interaction hooks the lifecycle tests drive.
+/// Read-only evidence view over every activation this driver prepared.
 ///
-/// The call and cancel hooks are deliberately not part of `PluginDriver`:
-/// the host has no worker-invocation contract yet, and inventing one here
-/// would be inventing it in the wrong crate. They exist so a test can
-/// observe a call, a cancellation, or a disconnect through the same pump
-/// and session the activation runs on.
+/// The invocation authority lives in [`ProcessPluginDriver::endpoint`],
+/// not here: the observer reports what happened and never drives the
+/// wire. A test observes a cancellation or a disconnect through these
+/// snapshots while driving the same pump through the endpoint.
 #[derive(Clone)]
 pub struct ProcObserver {
     observations: Arc<Mutex<ObservationMap>>,
@@ -609,107 +672,11 @@ impl ProcObserver {
         Some(link.shared.gauges(available))
     }
 
-    /// Start a host call toward the worker; settle it via [`PendingCall`].
-    pub async fn begin_call(
-        &self,
-        id: &PluginActivationId,
-        method: &str,
-        payload: serde_json::Value,
-        deadline_ms: Option<u32>,
-    ) -> Result<PendingCall, String> {
-        let link = self
-            .observation(id)
-            .and_then(|state| state.link())
-            .ok_or_else(|| format!("no live worker for activation {id}"))?;
-        let commands = link
-            .commands
-            .upgrade()
-            .ok_or_else(|| "the worker pump has ended".to_owned())?;
-        let (opened_sender, opened) = oneshot::channel();
-        let (settled_sender, settled) = oneshot::channel();
-        commands
-            .try_send(PumpCommand::Call {
-                method: method.to_owned(),
-                payload,
-                deadline_ms,
-                opened: opened_sender,
-                settled: settled_sender,
-            })
-            .map_err(|error| match error {
-                mpsc::error::TrySendError::Full(_) => {
-                    // Pre-admission rejection: the pump never saw this
-                    // call, so no id was minted, no frame queued, and no
-                    // waiter exists to settle. Observable back-pressure,
-                    // never a silent queue.
-                    "the pump command channel is at capacity; the call was not admitted".to_owned()
-                }
-                mpsc::error::TrySendError::Closed(_) => "the worker pump has ended".to_owned(),
-            })?;
-        let call_id = opened
-            .await
-            .map_err(|_| "the worker pump has ended".to_owned())?
-            .map_err(|error| format!("the session refused the call: {error:?}"))?;
-        Ok(PendingCall { call_id, settled })
-    }
-
-    /// Ask the worker to stop one call, or its stream.
-    pub async fn cancel(
-        &self,
-        id: &PluginActivationId,
-        call_id: CallId,
-        target: CancelTarget,
-    ) -> Result<(), String> {
-        let link = self
-            .observation(id)
-            .and_then(|state| state.link())
-            .ok_or_else(|| format!("no live worker for activation {id}"))?;
-        let commands = link
-            .commands
-            .upgrade()
-            .ok_or_else(|| "the worker pump has ended".to_owned())?;
-        let (done_sender, done) = oneshot::channel();
-        commands
-            .try_send(PumpCommand::Cancel {
-                call_id,
-                target,
-                done: done_sender,
-            })
-            .map_err(|error| match error {
-                mpsc::error::TrySendError::Full(_) => {
-                    "the pump command channel is at capacity; the cancel was not admitted"
-                        .to_owned()
-                }
-                mpsc::error::TrySendError::Closed(_) => "the worker pump has ended".to_owned(),
-            })?;
-        done.await
-            .map_err(|_| "the worker pump has ended".to_owned())?
-            .map_err(|error| format!("the session refused the cancel: {error:?}"))
-    }
-
     fn observation(&self, id: &PluginActivationId) -> Option<Arc<ActivationObservation>> {
         self.observations
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .get(id)
             .cloned()
-    }
-}
-
-/// One in-flight host call started through the observer hook.
-pub struct PendingCall {
-    call_id: CallId,
-    settled: oneshot::Receiver<CallEnd>,
-}
-
-impl PendingCall {
-    pub fn call_id(&self) -> CallId {
-        self.call_id
-    }
-
-    /// Wait for the call's end — worker terminal or local settlement.
-    pub async fn settled(self) -> Result<CallEnd, String> {
-        self.settled
-            .await
-            .map_err(|_| "the worker pump ended without settling the call".to_owned())
     }
 }

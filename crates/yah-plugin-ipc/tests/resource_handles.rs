@@ -578,3 +578,55 @@ fn releasing_an_id_the_worker_never_offered_is_refused() {
     );
     assert!(session.drain_outbox().is_empty());
 }
+
+/// The application-lane release: retiring a minted capability handle
+/// spends the id without any ReleaseAck frame — the call's reply is that
+/// release's acknowledgement, so no frame may answer a Release that
+/// never rode the wire. A second retirement is refused as
+/// already-released, and a later Release *frame* for the same id stays
+/// the double-release fault it always was.
+#[test]
+fn an_application_lane_release_spends_the_id_once_without_an_ack_frame() {
+    let mut session = peer::negotiated();
+    let serving = in_flight_call(&mut session, 1);
+    let handle = session
+        .mint_capability_handle(serving)
+        .expect("minted against the live call");
+    assert_eq!(session.live_handles(), 1);
+
+    session.retire_worker_capability(handle).expect("retired");
+    assert_eq!(session.live_handles(), 0, "the gauge follows");
+    assert!(
+        session.drain_outbox().is_empty(),
+        "no ReleaseAck frame answers a Release that never rode the wire"
+    );
+
+    // The id is spent: a second retirement is a named refusal, not a
+    // fault — the dispatcher guards doubles with its own table first.
+    assert_eq!(
+        session.retire_worker_capability(handle),
+        Err(AppError::AlreadyReleased)
+    );
+
+    // And a Release frame for the same id remains the fatal duplicate it
+    // always was.
+    session.feed(&wire(&release(handle, HandleKind::Capability)));
+    assert_fatal(&mut session, WireErrorKind::UnknownHandle);
+}
+
+/// Only capability handles retire through the application lane; an
+/// artifact handle the host holds for the worker to pull-read is
+/// releasable only by the host's own acknowledged request path.
+#[test]
+fn an_application_lane_release_refuses_an_artifact_handle() {
+    let mut session = peer::negotiated();
+    let serving = in_flight_call(&mut session, 1);
+    let offer = session
+        .offer_artifact(serving, b"spilled".to_vec(), "text/plain")
+        .expect("the host offers its own spill");
+    assert_eq!(
+        session.retire_worker_capability(offer.handle),
+        Err(AppError::InvalidField("release with the wrong kind"))
+    );
+    assert_eq!(session.live_handles(), 1, "the offer is untouched");
+}

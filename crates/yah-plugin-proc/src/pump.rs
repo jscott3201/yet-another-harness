@@ -16,256 +16,46 @@
 //! survive it: terminals already in the socket are drained before input is
 //! declared over, and the diagnostic pipes are drained after the reap.
 
-use std::collections::{HashMap, VecDeque};
-use std::sync::{
-    Arc, Mutex,
-    atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering},
-};
+use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::sync::{Notify, mpsc, oneshot, watch};
-use yah_plugin_ipc::session::{AppError, HostSession, SessionEvent};
+use tokio::sync::{mpsc, oneshot, watch};
+use yah_plugin_host::PluginStartContext;
+use yah_plugin_ipc::session::{HostSession, SessionEvent};
 use yah_plugin_ipc::types::*;
 use yah_plugin_ipc::{frame, session::SessionConfig};
 
 use crate::ProcLimits;
 use crate::bootstrap::SpawnedWorker;
+use crate::dispatch::{self, DispatchRequest};
+use crate::endpoint::StreamFrame;
+use crate::shared::{
+    CallEnd, DiagnosticStream, PumpCommand, PumpShared, drain_diagnostics, kind_label,
+};
 
-/// How a host-initiated call ended, as the driver's hooks observe it.
-#[derive(Clone, Debug)]
-pub enum CallEnd {
-    /// The worker's terminal frame arrived.
-    Settled(Outcome),
-    /// The session settled it locally: deadline, goodbye, disconnect, or
-    /// fatal fault.
-    Lost {
-        /// Why: `DeadlineExceeded`, `Cancelled` (a worker goodbye),
-        /// `OutcomeUnknown` (a bare disconnect), and so on.
-        error: WireErrorKind,
-        /// The session's own judgment of whether the worker may have acted
-        /// on work whose outcome the host never learned. True demands
-        /// reconciliation; false (a goodbye, an expired budget the worker
-        /// acknowledged) does not.
-        reconcile: bool,
-    },
+/// One live stream call's delivery side: where items go and how much
+/// credit the host has outstanding toward the worker.
+struct HostStream {
+    inbound: mpsc::Sender<StreamFrame>,
+    /// The worker's stream-open acknowledgement has arrived, so the
+    /// credit window exists and grants are meaningful. Before it, the
+    /// window is simply not open yet — not an error, and never a reason
+    /// to mute the call.
+    opened: bool,
+    /// Lossless items granted but not yet received. Never above the
+    /// negotiated ceiling; re-granted each tick as the consumer drains.
+    outstanding_credit: u32,
+    /// Host-side drops under channel pressure, declared to the consumer
+    /// in the next delivered frame's `dropped` count. Lossy frames drop
+    /// silently by contract; a lossless frame only lands here when a
+    /// lossy flood has filled every slot — possible, so it is declared
+    /// rather than hidden.
+    local_drops: u64,
 }
 
-pub(crate) enum PumpCommand {
-    Call {
-        method: String,
-        payload: serde_json::Value,
-        deadline_ms: Option<u32>,
-        opened: oneshot::Sender<Result<CallId, AppError>>,
-        settled: oneshot::Sender<CallEnd>,
-    },
-    Cancel {
-        call_id: CallId,
-        target: CancelTarget,
-        done: oneshot::Sender<Result<(), AppError>>,
-    },
-    // Shutdown deliberately is not a command: commands queue, and a
-    // deactivation dropped behind a command flood would wait out an
-    // arbitrary backlog. It rides a watch signal instead — one value, no
-    // queue, always deliverable.
-}
-
-const PHASE_HANDSHAKE: u8 = 0;
-const PHASE_ACTIVE: u8 = 1;
-const PHASE_CLOSED: u8 = 2;
-
-/// A read-only memory snapshot of the pump's buffers and queues. Every
-/// field distinguishes logical occupancy from allocated capacity where the
-/// container exposes the difference: the outbound buffer's `capacity` is
-/// the high-water allocation a live pump keeps for reuse (a `Vec` never
-/// shrinks), while `bytes` is what a worker that stopped draining is
-/// actually costing. The command channel's numbers come from the channel
-/// itself; its capacity is the configured bound.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct PumpGauges {
-    /// Encoded frames awaiting a worker that is not draining, in bytes.
-    pub outbound_buffer_bytes: usize,
-    /// What that buffer is allocated for — the high-water it has reached
-    /// this connection. Zero before the first frame and after the
-    /// outbound direction dies, where the undeliverable buffer is
-    /// discarded outright.
-    pub outbound_buffer_capacity: usize,
-    /// Host calls with a waiter parked on the pump.
-    pub pending_calls: usize,
-    /// Free slots in the bounded command channel right now.
-    pub command_channel_available: usize,
-    /// The channel's total configured slots.
-    pub command_channel_capacity: usize,
-}
-
-/// The pump's face toward the driver: nonblocking snapshots and a notifier.
-pub(crate) struct PumpShared {
-    phase: AtomicU8,
-    /// Why the session ended; set once, before the phase turns closed.
-    close_summary: Mutex<Option<String>>,
-    changed: Notify,
-    /// Bounded tails of the worker's stdout and stderr, oldest bytes
-    /// discarded first. Diagnostics are evidence, not a channel.
-    diagnostics: Mutex<Diagnostics>,
-    diagnostics_cap: usize,
-    /// The worker's pid, held so tests can prove the process is gone.
-    worker_pid: i32,
-    /// The outbound direction died (the worker shut its read half) while
-    /// the session stayed open for a goodbye. A separate fact from the
-    /// close: health must name it, but it must not steal the close
-    /// summary a later goodbye wins under the first-cause rule.
-    output_closed: AtomicBool,
-    /// Memory gauges, updated by the pump task at every buffer change.
-    outbound_bytes: AtomicUsize,
-    outbound_capacity: AtomicUsize,
-    pending_calls: AtomicUsize,
-    command_channel_capacity: usize,
-}
-
-#[derive(Default)]
-struct Diagnostics {
-    stdout: VecDeque<u8>,
-    stderr: VecDeque<u8>,
-}
-
-impl PumpShared {
-    fn new(limits: &ProcLimits, worker_pid: i32) -> Self {
-        Self {
-            phase: AtomicU8::new(PHASE_HANDSHAKE),
-            close_summary: Mutex::new(None),
-            changed: Notify::new(),
-            diagnostics: Mutex::new(Diagnostics::default()),
-            diagnostics_cap: limits.diagnostics_cap_bytes,
-            worker_pid,
-            output_closed: AtomicBool::new(false),
-            outbound_bytes: AtomicUsize::new(0),
-            outbound_capacity: AtomicUsize::new(0),
-            pending_calls: AtomicUsize::new(0),
-            command_channel_capacity: limits.command_channel_capacity,
-        }
-    }
-
-    pub fn worker_pid(&self) -> i32 {
-        self.worker_pid
-    }
-
-    pub fn output_closed(&self) -> bool {
-        self.output_closed.load(Ordering::Acquire)
-    }
-
-    fn set_output_closed(&self) {
-        self.output_closed.store(true, Ordering::Release);
-        self.changed.notify_waiters();
-    }
-
-    pub fn is_negotiated(&self) -> bool {
-        self.phase.load(Ordering::Acquire) == PHASE_ACTIVE
-    }
-
-    pub fn is_closed(&self) -> bool {
-        self.phase.load(Ordering::Acquire) == PHASE_CLOSED
-    }
-
-    pub fn close_summary(&self) -> Option<String> {
-        self.close_summary
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone()
-    }
-
-    /// Wait until the phase leaves handshake; resolves immediately if it
-    /// already has. Returns whether the session reached active.
-    pub async fn negotiated(&self) -> bool {
-        loop {
-            let changed = self.changed.notified();
-            match self.phase.load(Ordering::Acquire) {
-                PHASE_ACTIVE => return true,
-                PHASE_CLOSED => return false,
-                _ => changed.await,
-            }
-        }
-    }
-
-    /// The retained tail of one diagnostic stream, lossily decoded.
-    pub fn diagnostics_tail(&self, stream: DiagnosticStream) -> String {
-        let held = self
-            .diagnostics
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let bytes = match stream {
-            DiagnosticStream::Stdout => &held.stdout,
-            DiagnosticStream::Stderr => &held.stderr,
-        };
-        String::from_utf8_lossy(&bytes.iter().copied().collect::<Vec<u8>>()).into_owned()
-    }
-
-    fn set_active(&self) {
-        self.phase.store(PHASE_ACTIVE, Ordering::Release);
-        self.changed.notify_waiters();
-    }
-
-    fn set_closed(&self, summary: String) {
-        {
-            let mut held = self
-                .close_summary
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            // First cause wins: a fatal's reason must not be overwritten by
-            // the disconnect that follows it.
-            held.get_or_insert(summary);
-        }
-        self.phase.store(PHASE_CLOSED, Ordering::Release);
-        self.changed.notify_waiters();
-    }
-
-    fn append_diagnostics(&self, stream: DiagnosticStream, bytes: &[u8]) {
-        let mut held = self
-            .diagnostics
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let buffer = match stream {
-            DiagnosticStream::Stdout => &mut held.stdout,
-            DiagnosticStream::Stderr => &mut held.stderr,
-        };
-        buffer.extend(bytes.iter().copied());
-        while buffer.len() > self.diagnostics_cap {
-            buffer.pop_front();
-        }
-    }
-
-    fn record_outbound(&self, bytes: usize, capacity: usize) {
-        self.outbound_bytes.store(bytes, Ordering::Release);
-        self.outbound_capacity.store(capacity, Ordering::Release);
-    }
-
-    fn record_pending(&self, count: usize) {
-        self.pending_calls.store(count, Ordering::Release);
-    }
-
-    /// One consistent-enough snapshot of the memory gauges. The command
-    /// channel numbers arrive from the caller's sender handle, which is
-    /// the only place that can read the queue without keeping the channel
-    /// alive artificially.
-    pub fn gauges(&self, command_available: Option<usize>) -> PumpGauges {
-        PumpGauges {
-            outbound_buffer_bytes: self.outbound_bytes.load(Ordering::Acquire),
-            outbound_buffer_capacity: self.outbound_capacity.load(Ordering::Acquire),
-            pending_calls: self.pending_calls.load(Ordering::Acquire),
-            command_channel_available: command_available.unwrap_or(0),
-            command_channel_capacity: self.command_channel_capacity,
-        }
-    }
-}
-
-/// Which of the worker's two diagnostic pipes a tail is read from.
-/// Diagnostics are evidence text, never protocol bytes.
-#[derive(Clone, Copy, Debug)]
-pub enum DiagnosticStream {
-    /// The worker's standard output.
-    Stdout,
-    /// The worker's standard error.
-    Stderr,
-}
+mod streams;
 
 pub(crate) struct PumpHandle {
     /// Bounded: a caller flood hits [`mpsc::Sender::try_send`] rejection,
@@ -281,9 +71,15 @@ pub(crate) struct PumpHandle {
 }
 
 /// Start the pump for a freshly spawned worker.
+///
+/// `context` is the start permit's capability snapshot; when present, the
+/// worker-to-host application dispatcher is built here — before the task
+/// runs, so no worker call can ever be answered unknown-method while the
+/// dispatcher is still attaching.
 pub(crate) fn start(
     worker: SpawnedWorker,
     config: SessionConfig,
+    context: Option<PluginStartContext>,
     mut limits: ProcLimits,
 ) -> PumpHandle {
     // The cap accuses a worker of not draining, so it must never sit under
@@ -298,9 +94,21 @@ pub(crate) fn start(
     // One slot is the floor for the same reason: a zero-capacity channel
     // would reject everything, including calls the session would admit.
     limits.command_channel_capacity = limits.command_channel_capacity.max(1);
-    let shared = Arc::new(PumpShared::new(&limits, worker.pgid));
+    let max_stream_credit = config.ceilings.max_stream_credit;
+    let shared = Arc::new(PumpShared::new(&limits, worker.pgid, max_stream_credit));
     let (commands, receiver) = mpsc::channel(limits.command_channel_capacity);
     let (shutdown, shutdown_rx) = watch::channel(None);
+    // The dispatcher is created before the pump task spawns, holding the
+    // command channel only weakly: it can never keep an abandoned
+    // activation's pump alive.
+    let dispatcher = context.map(|context| {
+        dispatch::spawn(
+            context,
+            commands.downgrade(),
+            limits.dispatch_queue_capacity,
+            limits.provider_concurrency,
+        )
+    });
     let pump = Pump {
         session: HostSession::new(config),
         worker,
@@ -309,8 +117,11 @@ pub(crate) fn start(
         shutdown_seen: false,
         shared: Arc::clone(&shared),
         pending: HashMap::new(),
+        streams: HashMap::new(),
+        dispatcher,
         outbuf: Vec::new(),
         output_open: true,
+        max_stream_credit,
         limits,
     };
     let task = tokio::spawn(pump.run());
@@ -330,9 +141,18 @@ struct Pump {
     shutdown_seen: bool,
     shared: Arc<PumpShared>,
     pending: HashMap<CallId, oneshot::Sender<CallEnd>>,
+    /// Delivery channels for this activation's stream calls, keyed by
+    /// call id. Entries die with their call's terminal.
+    streams: HashMap<CallId, HostStream>,
+    /// The bounded lane admitted worker calls are routed into. `None`
+    /// keeps the historical unknown-method auto-refusal.
+    dispatcher: Option<mpsc::Sender<DispatchRequest>>,
     /// Encoded frames awaiting the socket. Progress on it is a `select!`
     /// arm, so transport back-pressure never stalls the rest of the pump.
     outbuf: Vec<u8>,
+    /// The session's own lossless-credit ceiling, mirrored for the
+    /// auto-credit policy below.
+    max_stream_credit: u32,
     /// False once a write failed: the peer shut its read half. That kills
     /// only the outbound direction — the peer's own goodbye or terminals
     /// may still be in flight toward the host, so input runs to its
@@ -412,6 +232,7 @@ impl Pump {
                 }
                 _ = ticker.tick() => {
                     self.session.tick(started.elapsed().as_millis() as u64);
+                    self.regrant_stream_credit();
                 }
                 // The process is the session peer even though a descendant
                 // it spawned may hold the socket open past its death: exit
@@ -430,9 +251,20 @@ impl Pump {
                     self.on_diagnostics(DiagnosticStream::Stderr, &mut stderr, &err_buf, read);
                 }
                 command = self.commands.recv() => match command {
-                    Some(PumpCommand::Call { method, payload, deadline_ms, opened, settled }) => {
-                        match self.session.call_worker(&method, payload, deadline_ms, false) {
+                    Some(PumpCommand::Call { method, payload, deadline_ms, stream, inbound, opened, settled }) => {
+                        match self.session.call_worker(&method, payload, deadline_ms, stream) {
                             Ok(call_id) => {
+                                if let Some(inbound) = inbound {
+                                    self.streams.insert(
+                                        call_id,
+                                        HostStream {
+                                            inbound,
+                                            opened: false,
+                                            outstanding_credit: 0,
+                                            local_drops: 0,
+                                        },
+                                    );
+                                }
                                 self.pending.insert(call_id, settled);
                                 self.shared.record_pending(self.pending.len());
                                 let _ = opened.send(Ok(call_id));
@@ -444,6 +276,21 @@ impl Pump {
                     }
                     Some(PumpCommand::Cancel { call_id, target, done }) => {
                         let _ = done.send(self.session.cancel(call_id, target));
+                    }
+                    Some(PumpCommand::Reply { call_id, outcome, done }) => {
+                        let _ = done.send(self.session.reply_to_worker(call_id, outcome));
+                    }
+                    Some(PumpCommand::MintHandle { minted_for, done }) => {
+                        let _ = done.send(self.session.mint_capability_handle(minted_for));
+                    }
+                    Some(PumpCommand::ReleaseWorkerHandle { handle, done }) => {
+                        // The only handle the host asks a worker to release
+                        // is one the worker offered: a spilled artifact.
+                        let _ =
+                            done.send(self.session.release_worker_handle(handle, HandleKind::Artifact));
+                    }
+                    Some(PumpCommand::RetireWorkerCapability { handle, done }) => {
+                        let _ = done.send(self.session.retire_worker_capability(handle));
                     }
                     // Every command sender is gone: the driver was dropped
                     // without deactivation. The kill path is the safety net.
@@ -513,6 +360,7 @@ impl Pump {
             match event {
                 SessionEvent::Negotiated { .. } => self.shared.set_active(),
                 SessionEvent::HostCallSettled { call_id, outcome } => {
+                    self.streams.remove(&call_id);
                     if let Some(waiter) = self.pending.remove(&call_id) {
                         let _ = waiter.send(CallEnd::Settled(outcome));
                     }
@@ -522,25 +370,51 @@ impl Pump {
                     error,
                     reconcile,
                 } => {
+                    self.streams.remove(&call_id);
                     if let Some(waiter) = self.pending.remove(&call_id) {
                         let _ = waiter.send(CallEnd::Lost { error, reconcile });
                     }
                 }
-                SessionEvent::CallDelivered { call_id, .. } => {
-                    // No application sits above this driver yet, and silence
-                    // is not an answer the protocol permits: every worker
-                    // call gets its terminal.
-                    let _ = self.session.reply_to_worker(
+                SessionEvent::StreamOpened { call_id, credit } => {
+                    if let Some(stream) = self.streams.get_mut(&call_id) {
+                        stream.opened = true;
+                        stream.outstanding_credit = credit;
+                    }
+                }
+                SessionEvent::CreditGranted {
+                    call_id,
+                    additional,
+                } => {
+                    if let Some(stream) = self.streams.get_mut(&call_id) {
+                        stream.outstanding_credit += additional;
+                    }
+                }
+                SessionEvent::StreamItem {
+                    call_id,
+                    seq,
+                    more,
+                    class,
+                    dropped,
+                    payload,
+                } => {
+                    self.deliver_stream_item(
                         call_id,
-                        Outcome::Err {
-                            error: WireError {
-                                kind: WireErrorKind::UnknownMethod,
-                                message: "unknown-method".to_owned(),
-                                retryable: false,
-                                reconcile_required: false,
-                            },
+                        StreamFrame {
+                            seq,
+                            more,
+                            class,
+                            dropped,
+                            payload,
                         },
                     );
+                }
+                SessionEvent::CallDelivered {
+                    call_id,
+                    method,
+                    payload,
+                    ..
+                } => {
+                    self.route_worker_call(call_id, &method, payload);
                 }
                 SessionEvent::Fatal { kind, detail } => {
                     self.shared
@@ -767,33 +641,6 @@ impl Pump {
     }
 }
 
-/// Retain one diagnostic stream's remaining text at pump exit, to
-/// end-of-file or a bound. Runs after the group sweep, so the pipe's
-/// writers are gone and end-of-file is prompt; the wall-clock bound covers
-/// the paths where something unexpected still holds the write end.
-async fn drain_diagnostics<R: tokio::io::AsyncRead + Unpin>(
-    shared: &PumpShared,
-    stream: DiagnosticStream,
-    source: &mut Option<R>,
-    buffer: &mut [u8],
-) {
-    let deadline = tokio::time::Instant::now() + Duration::from_millis(100);
-    let mut budget: usize = 256 * 1024;
-    let Some(reader) = source.as_mut() else {
-        return;
-    };
-    while budget > 0 {
-        match tokio::time::timeout_at(deadline, reader.read(buffer)).await {
-            Ok(Ok(0)) => return,
-            Ok(Ok(count)) => {
-                budget = budget.saturating_sub(count);
-                shared.append_diagnostics(stream, &buffer[..count]);
-            }
-            _ => return,
-        }
-    }
-}
-
 /// Read one chunk from an optional stream; pends forever once it is gone,
 /// which in a `select!` simply stops the arm from firing.
 async fn read_stream<R: tokio::io::AsyncRead + Unpin>(
@@ -803,26 +650,5 @@ async fn read_stream<R: tokio::io::AsyncRead + Unpin>(
     match source {
         Some(stream) => stream.read(buffer).await,
         None => std::future::pending().await,
-    }
-}
-
-fn kind_label(kind: WireErrorKind) -> &'static str {
-    match kind {
-        WireErrorKind::UnsupportedVersion => "unsupported-version",
-        WireErrorKind::UnknownRequiredFeature => "unknown-required-feature",
-        WireErrorKind::NegotiationRequired => "negotiation-required",
-        WireErrorKind::InvalidFrame => "invalid-frame",
-        WireErrorKind::FrameTooLarge => "frame-too-large",
-        WireErrorKind::PayloadTooLarge => "payload-too-large",
-        WireErrorKind::UnknownCall => "unknown-call",
-        WireErrorKind::DuplicateCall => "duplicate-call",
-        WireErrorKind::UnknownMethod => "unknown-method",
-        WireErrorKind::ResourceExhausted => "resource-exhausted",
-        WireErrorKind::DeadlineExceeded => "deadline-exceeded",
-        WireErrorKind::Cancelled => "cancelled",
-        WireErrorKind::UnknownHandle => "unknown-handle",
-        WireErrorKind::InvalidRead => "invalid-read",
-        WireErrorKind::OutcomeUnknown => "outcome-unknown",
-        WireErrorKind::Internal => "internal",
     }
 }

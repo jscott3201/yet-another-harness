@@ -25,13 +25,18 @@
 //! ambient authority.
 
 mod bootstrap;
+mod dispatch;
 mod driver;
+mod endpoint;
 mod pump;
+mod shared;
 
-pub use driver::{
-    PendingCall, ProcActivationPlan, ProcObserver, ProcessPluginDriver, ResourceState,
+pub use driver::{ProcActivationPlan, ProcObserver, ProcessPluginDriver, ResourceState};
+pub use endpoint::{
+    ActivationEndpoint, ArtifactReader, Availability, CallTerminal, EndpointError, PendingCall,
+    Refusal, StreamCall, StreamFrame,
 };
-pub use pump::{CallEnd, DiagnosticStream};
+pub use shared::{CallEnd, DiagnosticStream};
 
 /// The file descriptor the worker's protocol channel arrives on.
 ///
@@ -94,6 +99,19 @@ pub struct ProcLimits {
     /// overshoot past the budget is bounded by the session's negotiated
     /// in-flight and live-handle ceilings.
     pub retired_operation_budget: Option<u64>,
+    /// Slots in the worker-to-host dispatch queue — the lane that routes
+    /// admitted worker calls (the versioned capability family) to
+    /// application providers off the pump task. Bounded on purpose: a
+    /// worker flood must hit an observable, refusable bound, not an
+    /// unbounded backlog of host work. A value below one is clamped to
+    /// one at start.
+    pub dispatch_queue_capacity: usize,
+    /// Provider calls the dispatcher may run concurrently. Providers are
+    /// host-registered synchronous code; the bound keeps one slow or
+    /// panicking provider family from occupying every dispatch slot
+    /// while others starve. A value below one is clamped to one at
+    /// start.
+    pub provider_concurrency: usize,
 }
 
 impl Default for ProcLimits {
@@ -106,6 +124,8 @@ impl Default for ProcLimits {
             outbound_buffer_cap_bytes: 8 * 1024 * 1024,
             command_channel_capacity: 16,
             retired_operation_budget: Some(1_000_000),
+            dispatch_queue_capacity: 16,
+            provider_concurrency: 4,
         }
     }
 }

@@ -9,11 +9,10 @@
 //! the pump, starve the deadline clock or the child-exit watch, leak a
 //! waiter, or grow host memory past a named bound.
 //!
-//! Handle release/reclaim races over real transport are absent here on
-//! purpose: the pump exposes no handle surface yet (no application sits
-//! above the driver — that is YAH-M4-03), so those races are pinned at
-//! the session level by the model corpus and the resource-handle
-//! fixtures.
+//! Handle release/reclaim races over real transport are pinned where the
+//! surface lives: the session-level model corpus covers the wire law, and
+//! the endpoint tests drive the dispatcher's capability table through the
+//! real transport.
 
 #[path = "support/fixtures.rs"]
 mod fixtures;
@@ -21,12 +20,14 @@ mod fixtures;
 mod rig;
 
 use fixtures::lifecycle_revision;
-use rig::{Rig, diagnostics_show, health_becomes, process_gone, settled_within, stop_active};
+use rig::{
+    Rig, diagnostics_show, endpoint, health_becomes, process_gone, settled_within, stop_active,
+};
 use serde_json::json;
 use yah_plugin_host::{DriverKind, HostPluginActivation, PluginHealth};
-use yah_plugin_ipc::types::WireErrorKind;
 use yah_plugin_proc::{
-    CallEnd, ProcActivationPlan, ProcLimits, ProcessPluginDriver, ResourceState,
+    CallTerminal, EndpointError, ProcActivationPlan, ProcLimits, ProcessPluginDriver, Refusal,
+    ResourceState,
 };
 
 fn pressure_limits() -> ProcLimits {
@@ -51,6 +52,7 @@ async fn an_inbound_call_flood_dies_at_the_ceiling_without_wedging_the_pump() {
         vec![ProcActivationPlan::worker("flood")],
         pressure_limits(),
     );
+    let endpoint_driver = std::sync::Arc::clone(&driver);
     let mut rig = Rig::new("proc.flood", &revision);
     let mut activation =
         HostPluginActivation::prepare(&mut rig.slot, rig.epoch, &rig.broker, &rig.grants, driver)
@@ -61,15 +63,12 @@ async fn an_inbound_call_flood_dies_at_the_ceiling_without_wedging_the_pump() {
     // A host call with a real deadline, issued into the flood: if the
     // pump were wedged processing the flood, this deadline could not
     // fire.
-    let call = observer
-        .begin_call(&id, "tool.probe", json!("probe"), Some(60))
+    let call = endpoint(&endpoint_driver, &id)
+        .call("tool.probe", json!("probe"), Some(60))
         .await
         .expect("the host side still admits calls during the flood");
     match settled_within(call).await {
-        CallEnd::Lost {
-            error: WireErrorKind::DeadlineExceeded,
-            reconcile: true,
-        } => {}
+        CallTerminal::DeadlineExceeded => {}
         other => panic!("the probe call should die at its deadline under the flood, got {other:?}"),
     }
     diagnostics_show(&observer, &id, "flooded:400").await;
@@ -96,6 +95,7 @@ async fn a_command_flood_meets_bounded_admission_and_loses_no_admitted_call() {
         vec![ProcActivationPlan::worker("deaf")],
         pressure_limits(),
     );
+    let endpoint_driver = std::sync::Arc::clone(&driver);
     let mut rig = Rig::new("proc.cmdflood", &revision);
     let mut activation =
         HostPluginActivation::prepare(&mut rig.slot, rig.epoch, &rig.broker, &rig.grants, driver)
@@ -105,19 +105,25 @@ async fn a_command_flood_meets_bounded_admission_and_loses_no_admitted_call() {
     // No deadlines: an admitted call's slot never frees on its own, so
     // the rejections below are deterministic rather than a race between
     // the flood and the expiry clock.
+    let activation_endpoint = endpoint(&endpoint_driver, &id);
     let mut calls = Vec::new();
     for _ in 0..64 {
-        calls.push(observer.begin_call(&id, "tool.flood", json!("x".repeat(64 * 1024)), None));
+        calls.push(activation_endpoint.call("tool.flood", json!("x".repeat(64 * 1024)), None));
     }
     let mut admitted = Vec::new();
     let mut rejected = 0usize;
     for call in calls {
         match call.await {
             Ok(pending) => admitted.push(pending),
-            Err(message) => {
+            Err(error) => {
+                // Rejection must be observable and named: pre-admission
+                // pressure or a session ceiling, never a silent queue.
                 assert!(
-                    message.contains("at capacity") || message.contains("refused the call"),
-                    "rejection must be observable and named: {message}"
+                    matches!(
+                        error,
+                        EndpointError::AtCapacity | EndpointError::Refused(Refusal::CallCeiling)
+                    ),
+                    "rejection must be observable and named: {error:?}"
                 );
                 rejected += 1;
             }
@@ -149,11 +155,8 @@ async fn a_command_flood_meets_bounded_admission_and_loses_no_admitted_call() {
     let expected = gauges.pending_calls;
     let mut settled = 0usize;
     for call in admitted {
-        match tokio::time::timeout(std::time::Duration::from_secs(5), call.settled()).await {
-            Ok(Ok(CallEnd::Lost {
-                error: WireErrorKind::OutcomeUnknown,
-                reconcile: true,
-            })) => settled += 1,
+        match tokio::time::timeout(std::time::Duration::from_secs(5), call.terminal()).await {
+            Ok(Ok(CallTerminal::LostOutcomeUnknown)) => settled += 1,
             other => panic!("outcome-unknown settlement expected, got {other:?}"),
         }
     }
@@ -290,6 +293,7 @@ async fn deactivation_under_combined_pressure_reclaims_everything() {
             ..ProcLimits::default()
         },
     );
+    let endpoint_driver = std::sync::Arc::clone(&driver);
     let mut rig = Rig::new("proc.chaos", &revision);
     let mut activation =
         HostPluginActivation::prepare(&mut rig.slot, rig.epoch, &rig.broker, &rig.grants, driver)
@@ -300,9 +304,10 @@ async fn deactivation_under_combined_pressure_reclaims_everything() {
 
     diagnostics_show(&observer, &id, "chaos:begin").await;
     let mut calls = Vec::new();
+    let activation_endpoint = endpoint(&endpoint_driver, &id);
     for _ in 0..8 {
-        if let Ok(call) = observer
-            .begin_call(&id, "tool.probe", json!("x".repeat(32 * 1024)), Some(120))
+        if let Ok(call) = activation_endpoint
+            .call("tool.probe", json!("x".repeat(32 * 1024)), Some(120))
             .await
         {
             calls.push(call);
@@ -318,12 +323,9 @@ async fn deactivation_under_combined_pressure_reclaims_everything() {
     for call in calls {
         // Deactivation settles held work outcome-unknown — the flood may
         // have kept the worker busy, so reconciliation is required.
-        match tokio::time::timeout(std::time::Duration::from_secs(5), call.settled()).await {
-            Ok(Ok(CallEnd::Lost {
-                error: WireErrorKind::OutcomeUnknown,
-                reconcile: true,
-            })) => {}
-            Ok(Ok(CallEnd::Settled(_))) => {}
+        match tokio::time::timeout(std::time::Duration::from_secs(5), call.terminal()).await {
+            Ok(Ok(CallTerminal::LostOutcomeUnknown)) => {}
+            Ok(Ok(CallTerminal::Completed(_))) => {}
             other => panic!("every admitted call settles exactly once, got {other:?}"),
         }
     }
@@ -394,6 +396,7 @@ async fn a_saturated_command_queue_rejects_pre_admission_and_deactivation_resolv
         vec![ProcActivationPlan::worker("deaf")],
         pressure_limits(),
     );
+    let endpoint_driver = std::sync::Arc::clone(&driver);
     let mut rig = Rig::new("proc.queuesat", &revision);
     let mut activation =
         HostPluginActivation::prepare(&mut rig.slot, rig.epoch, &rig.broker, &rig.grants, driver)
@@ -405,16 +408,17 @@ async fn a_saturated_command_queue_rejects_pre_admission_and_deactivation_resolv
         .expect("live gauges")
         .command_channel_capacity;
 
-    // Single-poll each submission: `begin_call`'s first poll runs its
-    // synchronous head — link lookup through `try_send` — and parks on
-    // the `opened` oneshot. Polling with a no-op waker never yields, so
-    // the pump cannot interleave and the queue genuinely fills.
+    // Single-poll each submission: the endpoint call's first poll runs
+    // its synchronous head — admission gate through `try_send` — and
+    // parks on the `opened` oneshot. Polling with a no-op waker never
+    // yields, so the pump cannot interleave and the queue genuinely
+    // fills.
+    let activation_endpoint = endpoint(&endpoint_driver, &id);
     let waker = Waker::noop();
     let mut cx = Context::from_waker(waker);
     let mut submissions: Vec<_> = (0..=capacity)
         .map(|_| {
-            Some(Box::pin(observer.begin_call(
-                &id,
+            Some(Box::pin(activation_endpoint.call(
                 "tool.queue",
                 json!("q"),
                 None,
@@ -433,7 +437,7 @@ async fn a_saturated_command_queue_rejects_pre_admission_and_deactivation_resolv
                 // still-pending queue.
                 let _ = slot.take();
                 match result {
-                    Err(message) => queue_rejected.push(message),
+                    Err(error) => queue_rejected.push(error),
                     Ok(_) => {
                         panic!("a queued-slot submission cannot open before any pump tick")
                     }
@@ -444,7 +448,7 @@ async fn a_saturated_command_queue_rejects_pre_admission_and_deactivation_resolv
     assert_eq!(queued, capacity, "every slot fills before the rejection");
     assert_eq!(
         queue_rejected,
-        vec!["the pump command channel is at capacity; the call was not admitted".to_owned()],
+        vec![EndpointError::AtCapacity],
         "the one-past submission is the queue's Full branch, not a session refusal"
     );
     // Nothing was dequeued: no id minted, no session admission, no
@@ -484,10 +488,10 @@ async fn a_saturated_command_queue_rejects_pre_admission_and_deactivation_resolv
         .expect("no queued submission is left hanging");
         match resolved {
             Ok(pending) => admitted.push(pending),
-            Err(message) => {
-                assert_eq!(
-                    message, "the worker pump has ended",
-                    "an undelivered call ends observably"
+            Err(error) => {
+                assert!(
+                    matches!(error, EndpointError::Closed { .. }),
+                    "an undelivered call ends observably: {error:?}"
                 );
                 ended_with_pump += 1;
             }
@@ -499,17 +503,11 @@ async fn a_saturated_command_queue_rejects_pre_admission_and_deactivation_resolv
         "every submission is accounted for exactly once"
     );
     for pending in admitted {
-        let settled = tokio::time::timeout(std::time::Duration::from_secs(5), pending.settled())
+        let settled = tokio::time::timeout(std::time::Duration::from_secs(5), pending.terminal())
             .await
             .expect("admitted work settles despite the backlog");
         assert!(
-            matches!(
-                settled,
-                Ok(CallEnd::Lost {
-                    error: WireErrorKind::OutcomeUnknown,
-                    reconcile: true
-                })
-            ),
+            matches!(settled, Ok(CallTerminal::LostOutcomeUnknown)),
             "outcome-unknown settlement expected, got {settled:?}"
         );
     }
@@ -545,6 +543,7 @@ async fn a_half_closed_output_releases_its_buffer_and_reports_zero_capacity() {
         vec![ProcActivationPlan::worker("hoard-drain-shut:400:300:30000")],
         pressure_limits(),
     );
+    let endpoint_driver = std::sync::Arc::clone(&driver);
     let mut rig = Rig::new("proc.halfclose", &revision);
     let mut activation =
         HostPluginActivation::prepare(&mut rig.slot, rig.epoch, &rig.broker, &rig.grants, driver)
@@ -556,9 +555,10 @@ async fn a_half_closed_output_releases_its_buffer_and_reports_zero_capacity() {
     // the session) land while the worker is hoarding. Sixteen, not
     // more: nothing settles during the hoard, so the session's 16-call
     // in-flight ceiling is the whole allowance.
+    let activation_endpoint = endpoint(&endpoint_driver, &id);
     for _ in 0..16 {
-        observer
-            .begin_call(&id, "tool.hoard", json!("x".repeat(250_000)), None)
+        activation_endpoint
+            .call("tool.hoard", json!("x".repeat(250_000)), None)
             .await
             .expect("the pump admits while its buffer grows");
     }
@@ -588,13 +588,13 @@ async fn a_half_closed_output_releases_its_buffer_and_reports_zero_capacity() {
     // gauge reports from then on must be the truth about retained
     // memory — the buffer released, not merely cleared.
     tokio::time::sleep(std::time::Duration::from_millis(1_000)).await;
-    let probe_a = observer
-        .begin_call(&id, "tool.probe", json!("a"), None)
+    let probe_a = activation_endpoint
+        .call("tool.probe", json!("a"), None)
         .await
         .expect("the probe is admitted");
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-    let probe_b = observer
-        .begin_call(&id, "tool.probe", json!("b"), None)
+    let probe_b = activation_endpoint
+        .call("tool.probe", json!("b"), None)
         .await
         .expect("the second probe is admitted");
     let mut released = false;
@@ -613,7 +613,7 @@ async fn a_half_closed_output_releases_its_buffer_and_reports_zero_capacity() {
     // and both probes resolve — no lost waiter, whichever path each took.
     stop_active(activation, &rig.registry, rig.epoch).await;
     for pending in [probe_a, probe_b] {
-        let settled = tokio::time::timeout(std::time::Duration::from_secs(5), pending.settled())
+        let settled = tokio::time::timeout(std::time::Duration::from_secs(5), pending.terminal())
             .await
             .expect("every probe settles");
         assert!(settled.is_ok(), "a probe settles exactly once: {settled:?}");

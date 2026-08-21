@@ -101,7 +101,12 @@ portable lifecycle cases against an independently described driver subject; a
 deterministic reference fake, the trusted
 [local authoring driver](plugin-authoring.md), the Wasmtime component driver,
 and the [worker process driver](plugin-worker-protocol.md) pass, but no package
-is ever loaded. Call deadlines and forced termination remain each driver's own
+is ever loaded. The process driver additionally publishes, per negotiated
+activation, an invocation endpoint over which host code drives calls,
+streams, cancellations, and spilled-artifact reads, and through which worker
+calls reach application capability providers off the pump task — the wire
+contract stays the host's; the endpoint is its production face (see
+[the worker protocol page](plugin-worker-protocol.md#the-activation-endpoint)). Call deadlines and forced termination remain each driver's own
 mechanism, never the host contract's: the Wasmtime driver enforces them with a
 per-store epoch deadline re-armed per call, the process driver with a handshake
 clock, per-call session deadlines, and a process-group kill path, and the host

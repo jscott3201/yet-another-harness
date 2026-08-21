@@ -12,9 +12,9 @@
 use std::path::PathBuf;
 
 use yah_plugin_host::{
-    DriverConformanceCase, DriverConformanceSetupError, PackageDigest, PackageRelativePath,
-    PluginEntrypoint, PluginManifest, PluginPackageId, PluginRevision, PluginVersion,
-    SdkVersionRequirement,
+    CapabilityId, CapabilityRequest, DriverConformanceCase, DriverConformanceSetupError,
+    PackageDigest, PackageRelativePath, PluginEntrypoint, PluginManifest, PluginPackageId,
+    PluginRevision, PluginVersion, SdkVersionRequirement,
 };
 
 /// The compiled fake worker, built by cargo beside this test binary.
@@ -33,6 +33,39 @@ pub(super) fn revision(
 /// A revision for the lifecycle tests, which are not case-keyed.
 pub(super) fn lifecycle_revision(name: &str, digest: char) -> PluginRevision {
     named_revision(&format!("test.proc.{name}"), digest).expect("lifecycle fixture is valid")
+}
+
+/// The same, with capability requests in the manifest. Effective grants
+/// admit only requested IDs, so a fixture that is to be granted anything
+/// must say so here first.
+pub(super) fn lifecycle_revision_requesting(
+    name: &str,
+    digest: char,
+    capabilities: &[&str],
+) -> PluginRevision {
+    let requested = capabilities
+        .iter()
+        .map(|capability| {
+            CapabilityRequest::new(CapabilityId::new(*capability).expect("fixture capability ID"))
+        })
+        .collect();
+    let package =
+        PluginPackageId::new(format!("test.proc.{name}")).expect("fixture package ID is valid");
+    let manifest = PluginManifest::new(
+        package,
+        PluginVersion::new("1.0.0").expect("fixture version is valid"),
+        SdkVersionRequirement::new(">=0.1.0, <0.2.0").expect("fixture SDK requirement is valid"),
+        PluginEntrypoint::NodeProcess {
+            path: PackageRelativePath::new("worker.mjs").expect("fixture path is valid"),
+        },
+        vec![],
+        vec![],
+        requested,
+    )
+    .expect("fixture manifest is valid");
+    let digest = PackageDigest::new(format!("blake3:{}", digest.to_string().repeat(64)))
+        .expect("fixture digest is valid");
+    PluginRevision::new(manifest, digest)
 }
 
 fn named_revision(package: &str, digest: char) -> Result<PluginRevision, String> {

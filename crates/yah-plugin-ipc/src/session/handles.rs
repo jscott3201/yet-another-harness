@@ -42,6 +42,31 @@ impl HostSession {
         Ok(handle)
     }
 
+    /// Retire a live capability handle the worker released through the
+    /// application lane (`capability.release`), not through a Release
+    /// frame. The call's reply is that release's acknowledgement, so no
+    /// `ReleaseAck` frame rides the wire — there was no Release frame to
+    /// answer. The id is spent either way: a second retirement is refused
+    /// as already-released, and a later Release frame for it is the same
+    /// double-release fault a frame duplicate would be.
+    pub fn retire_worker_capability(&mut self, handle: HandleId) -> Result<(), AppError> {
+        if self.phase != Phase::Active {
+            return Err(AppError::NotActive);
+        }
+        let Some(entry) = self.handles.get(&handle) else {
+            return Err(if self.retired_handles.contains(&handle) {
+                AppError::AlreadyReleased
+            } else {
+                AppError::UnknownWorkerHandle
+            });
+        };
+        if entry.kind != HandleKind::Capability {
+            return Err(AppError::InvalidField("release with the wrong kind"));
+        }
+        self.drop_handle(handle, true);
+        Ok(())
+    }
+
     /// Offer spilled bytes behind an artifact handle. The offer carries
     /// size and digest so the reader can refuse before the first pull and
     /// verify after the last. Counts against the same live-handle ceiling
