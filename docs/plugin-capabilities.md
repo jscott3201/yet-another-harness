@@ -97,6 +97,10 @@ ABI.
 This slice does not implement:
 
 - policy evaluation, approval, audit, expiration, or in-place grant changes;
+- worker-process capability serving: the process driver's dispatcher now
+  carries the portable text contract to workers over the wire (see the
+  [worker protocol page](plugin-worker-protocol.md#the-activation-endpoint)),
+  but no worker SDK exists to consume it;
 - concrete filesystem, network, secret, graph, tool, or model capabilities;
 - configuration or typed capability-specific constraint schemas;
 - async calls, streams, task supervision, deadlines, rate limits, or forced

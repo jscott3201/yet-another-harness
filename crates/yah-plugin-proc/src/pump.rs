@@ -330,8 +330,21 @@ impl Pump {
                             ),
                         });
                     }
-                    Some(PumpCommand::MintHandle { minted_for, done }) => {
-                        let _ = done.send(self.session.mint_capability_handle(minted_for));
+                    Some(PumpCommand::MintHandle {
+                        minted_for,
+                        capability,
+                        done,
+                    }) => {
+                        // Mint first, insert only on success: the gauge
+                        // and the table cannot diverge on the insertion
+                        // path because both happen inside this one arm.
+                        let minted = self.session.mint_capability_handle(minted_for);
+                        if let Ok(handle) = &minted
+                            && let Some(table) = &self.capability_table
+                        {
+                            table.insert(*handle, capability);
+                        }
+                        let _ = done.send(minted);
                     }
                     Some(PumpCommand::ReleaseWorkerHandle { handle, done }) => {
                         // The only handle the host asks a worker to release

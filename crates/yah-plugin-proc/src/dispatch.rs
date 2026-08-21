@@ -33,6 +33,11 @@ use yah_plugin_ipc::types::{CallId, HandleId, Outcome, WireError, WireErrorKind}
 
 use crate::shared::PumpCommand;
 
+/// The capability shape the dispatcher's table holds, named so the pump
+/// can carry one through a mint command without reaching into this
+/// module's generics.
+pub(crate) type DispatchedCapability = CapabilityHandle<dyn TextCapability>;
+
 /// One admitted worker call handed to the application lane.
 pub(crate) struct DispatchRequest {
     pub call_id: CallId,
@@ -51,7 +56,11 @@ pub(crate) struct CapabilityTable {
 }
 
 impl CapabilityTable {
-    fn insert(&self, handle: HandleId, capability: CapabilityHandle<dyn TextCapability>) {
+    pub(crate) fn insert(
+        &self,
+        handle: HandleId,
+        capability: CapabilityHandle<dyn TextCapability>,
+    ) {
         self.entries
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -194,10 +203,15 @@ impl Dispatcher {
     /// insertion happens only after the session mint succeeds, so the
     /// session's live-handle gauge and this table cannot diverge on the
     /// insertion path.
-    async fn mint(&self, call_id: CallId) -> Option<Result<HandleId, AppError>> {
+    async fn mint(
+        &self,
+        call_id: CallId,
+        capability: CapabilityHandle<dyn TextCapability>,
+    ) -> Option<Result<HandleId, AppError>> {
         self.commands(
             |done: oneshot::Sender<Result<HandleId, AppError>>| PumpCommand::MintHandle {
                 minted_for: call_id,
+                capability,
                 done,
             },
         )
@@ -293,7 +307,11 @@ impl Dispatcher {
             Ok(handle) => handle,
             Err(error) => return acquire_refusal(error),
         };
-        let Some(minted) = self.mint(request.call_id).await else {
+        // The capability rides the mint command: the pump inserts the
+        // table entry in the same task that processes reclamation
+        // events, so a handle reclaimed between mint and insert can
+        // never leave a ghost behind.
+        let Some(minted) = self.mint(request.call_id, handle).await else {
             return refusal(
                 WireErrorKind::ResourceExhausted,
                 "the activation ended before the capability handle was minted",
@@ -328,7 +346,6 @@ impl Dispatcher {
                 );
             }
         };
-        self.table.insert(wire_handle, handle);
         Outcome::Ok {
             result: serde_json::json!({ "handle": wire_handle }),
         }
@@ -376,11 +393,7 @@ impl Dispatcher {
                         TextCapabilityFailureCode::InvalidInput => WireErrorKind::InvalidFrame,
                         TextCapabilityFailureCode::Failed => WireErrorKind::Internal,
                     },
-                    message: {
-                        let mut bounded = failure.message;
-                        bounded.truncate(yah_plugin_ipc::MAX_ERROR_DETAIL_CHARS);
-                        bounded
-                    },
+                    message: bound_chars(failure.message),
                     retryable: false,
                     reconcile_required: false,
                 },
@@ -446,6 +459,21 @@ impl Dispatcher {
             ),
         }
     }
+}
+
+/// Bound provider-authored text to the wire's detail budget without
+/// ever splitting a character: `String::truncate` panics on a non-
+/// boundary index, and a panic here would kill this task and strand an
+/// admitted call's terminal.
+fn bound_chars(mut text: String) -> String {
+    if text.len() > yah_plugin_ipc::MAX_ERROR_DETAIL_CHARS {
+        let mut end = yah_plugin_ipc::MAX_ERROR_DETAIL_CHARS;
+        while !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        text.truncate(end);
+    }
+    text
 }
 
 /// Map a broker refusal onto the bounded refusal surface, whole-set —

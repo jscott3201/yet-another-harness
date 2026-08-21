@@ -81,9 +81,13 @@ pub(crate) enum PumpCommand {
         bytes: Vec<u8>,
         done: oneshot::Sender<Result<(), AppError>>,
     },
-    /// Mint a wire handle for a capability acquired on a worker call.
+    /// Mint a wire handle for a capability acquired on a worker call,
+    /// inserting the dispatcher's table entry in the same breath — the
+    /// pump owns both the session and the table mirror, so a handle
+    /// reclaimed by a racing terminal can never leave a ghost entry.
     MintHandle {
         minted_for: CallId,
+        capability: crate::dispatch::DispatchedCapability,
         done: oneshot::Sender<Result<HandleId, AppError>>,
     },
     /// Ask the worker to release a handle it offered (a spilled artifact)

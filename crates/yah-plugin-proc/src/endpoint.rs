@@ -361,6 +361,9 @@ impl ActivationEndpoint {
     ) -> Result<PendingCall, EndpointError> {
         // Byte bounds precede the queue: serialize now, refuse oversize
         // before any slot is occupied.
+        // A `serde_json::Value` always serializes; if it ever could not,
+        // treating it as over-bound is the fail-closed answer, and the
+        // size reported is the honest "unknown, refused anyway".
         let payload_bytes = serde_json::to_vec(payload)
             .map(|bytes| bytes.len())
             .unwrap_or(usize::MAX);
@@ -552,6 +555,11 @@ impl<'e> ArtifactReader<'e> {
                 "artifact read missing bytes",
             )))?;
         let bytes = base16_decode(hex)?;
+        if bytes.len() as u64 != u64::from(len) {
+            return Err(EndpointError::Refused(Refusal::InvalidField(
+                "artifact read chunk length disagrees with the request",
+            )));
+        }
         self.hasher.update(&bytes);
         self.offset = end;
         self.remaining -= u64::from(len);

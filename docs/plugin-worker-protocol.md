@@ -378,7 +378,11 @@ the negotiated credit ceiling — a slow consumer throttles the worker through
 the credit window instead of growing host memory, and the host re-grants
 what the consumer drains each tick — while the terminal still lands exactly
 once. Dropping the item receiver mutes delivery and cancels the stream half;
-it never cancels the terminal.
+it never cancels the terminal. One honest corner: a lossy flood can fill
+every item-channel slot, forcing the host to drop a lossless item it had
+granted credit for — the drop is declared in the next frame's cumulative
+drop count rather than hidden, and consumers must treat any nonzero drop
+count as a possible gap.
 
 Worker-to-host calls are routed to a bounded application dispatcher built
 from the start permit's capability context. The pump never runs provider
@@ -425,8 +429,9 @@ to a process the host did not spawn, and no current scenario does that.
   by default; a budget-less session still grows with call count for its
   lifetime. The budget retires new admissions, it never forgets: no
   protocol mechanism for forgetting exists.
-- Any binding from the capability broker to these handles. The wire encoding
-  for a brokered resource exists; nothing yet mints one from a real grant.
 - Worker-side enforcement evidence. The fixtures drive the host session
   only; a worker SDK must pass its own conformance against the same corpus
-  shape.
+  shape. The capability broker is now bound to these handles through the
+  process driver's dispatcher, which mints wire handles from real grants
+  for the portable text contract — see [the activation
+  endpoint](#the-activation-endpoint).
