@@ -13,7 +13,7 @@ in it can block, sleep, spawn, or open a socket. The real IO lives in the
 the worker, owns the transport and the kill path, and authenticates the
 bootstrap; no worker-side SDK exists yet. One hundred fifty-one
 deterministic tests in `crates/yah-plugin-ipc/tests/` drive the host side
-of every rule below with a scripted byte-level peer — one hundred thirteen
+of every rule below with a scripted byte-level peer — one hundred fifteen
 session fixtures plus the byte-boundary property suite, the shared fuzz
 corpus inventory, and a session reference model compared against
 production over thousands of generated traces — and four cargo-fuzz
