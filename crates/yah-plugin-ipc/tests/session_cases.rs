@@ -652,24 +652,43 @@ fn named_budget_cases_match_the_model() {
     // worker-side retirements.
     case(
         "host_admissions_stop_at_the_budget",
-        Some(1),
+        Some(3),
         vec![
             Action::Hello,
+            // A worker call stays in flight across the budget boundary,
+            // so the offer/mint gates are reachable after it fills.
             Action::WorkerCall {
                 id: 1,
                 stream: false,
             },
-            Action::AnswerWorkerCall {
+            Action::HostCall { deadline_ms: None },
+            // The spilled terminal retires two entries: the host call id
+            // and the offered handle (2 of the 3-slot budget).
+            Action::WorkerReply {
                 id: 1,
-                outcome: WOutcome::Ok,
+                outcome: WOutcome::Spilled {
+                    handle: 2,
+                    bytes: 10,
+                },
             },
-            // Retired operations: 1 — the budget is full.
             Action::WorkerCall {
                 id: 2,
                 stream: false,
             },
+            // The answer fills the budget (3 of 3).
+            Action::AnswerWorkerCall {
+                id: 1,
+                outcome: WOutcome::Ok,
+            },
+            // Every new host admission is now SessionRetired: the offer
+            // and mint on the still-in-flight call, the release of the
+            // remembered worker handle, and a new host call.
             Action::OfferArtifact { id: 2, bytes: 8 },
             Action::Mint { id: 2 },
+            Action::HostRelease {
+                handle: 2,
+                kind: Kind::Artifact,
+            },
             Action::HostCall { deadline_ms: None },
         ],
     );

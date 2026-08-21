@@ -364,9 +364,12 @@ async fn the_command_channel_reports_its_configured_bound() {
     let gauges = observer.gauges(&id).expect("live gauges");
     assert_eq!(gauges.command_channel_capacity, 2);
     assert!(gauges.command_channel_available <= 2);
-    assert_eq!(
-        gauges.outbound_buffer_bytes, 0,
-        "a fresh pump buffers nothing"
+    // The accept frame may still sit in the outbound buffer at read
+    // time; what must hold is the frame bound, not a race with the
+    // handshake.
+    assert!(
+        gauges.outbound_buffer_bytes <= yah_plugin_ipc::MAX_FRAME_BYTES + 64,
+        "a fresh pump buffers at most its handshake traffic"
     );
     stop_active(activation, &rig.registry, rig.epoch).await;
     assert!(observer.gauges(&id).is_none(), "gauges end with the pump");

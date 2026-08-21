@@ -24,7 +24,7 @@ use yah_plugin_ipc::types::*;
 /// The correlation budget every run carries, so retention growth is
 /// bounded and assertable. The documented overshoot past the budget is
 /// bounded by the in-flight and live-handle ceilings.
-const BUDGET: u64 = 64;
+const BUDGET: u64 = 24;
 const MAX_ACTIONS: usize = 64;
 const MAX_ID: u64 = 64;
 
@@ -174,8 +174,11 @@ libfuzzer_sys::fuzz_target!(|data: &[u8]| {
         // Budget plus the documented worst-case overshoot: in-flight
         // calls of both directions, live handles, and their pending
         // releases, each retiring at most one entry.
+        // The documented worst case: worker in flight + twice the host
+        // in flight (a spilled terminal retires two entries) + twice the
+        // live-handle ceiling.
         assert!(
-            session.retired_operations() <= BUDGET + 16 + 32 + 16 + 16,
+            session.retired_operations() <= BUDGET + 32 + 2 * 16 + 2 * 16,
             "retired correlation memory escaped its bound"
         );
     }

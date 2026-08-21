@@ -163,6 +163,7 @@ impl ModelSession {
         self.reclaim_all_handles();
         self.pending_releases.clear();
         self.reclaimed_handles.clear();
+        self.worker_calls.clear();
         self.closed = true;
         self.active = false;
         self.events.push(EventFact::Fatal { kind });
@@ -639,6 +640,7 @@ impl ModelSession {
         self.reclaim_all_handles();
         self.pending_releases.clear();
         self.reclaimed_handles.clear();
+        self.worker_calls.clear();
         self.closed = true;
         self.active = false;
     }

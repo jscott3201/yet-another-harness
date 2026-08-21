@@ -52,8 +52,12 @@ pub struct SessionConfig {
     /// applications with [`AppError::SessionRetired`]) and no new id is
     /// spent, while every already-admitted call, terminal, release, and
     /// ack completes exactly as before. Retirements from admitted work
-    /// may pass the budget; the overshoot is bounded by the negotiated
-    /// in-flight and live-handle ceilings, so the bound stays strict.
+    /// may pass the budget; the worst-case overshoot is
+    /// `worker_calls_in_flight + 2*host_calls_in_flight + 2*live_handles`
+    /// entries (an admitted call retires one id; a spilled terminal
+    /// retires the call id and the offered handle; a released or
+    /// reclaimed handle and each acked worker release retire one), so the
+    /// bound stays strict.
     pub retired_operation_budget: Option<u64>,
 }
 
@@ -521,8 +525,11 @@ impl HostSession {
         // worker, so pending releases are void, not still owed. The
         // reclaimed table dies with the session too — after close, no
         // frame is read, so no racing release can arrive to consult it.
+        // Worker calls in flight die with their answers; keeping them in
+        // the map would leave the in-flight gauge lying after close.
         self.pending_worker_releases.clear();
         self.reclaimed_handles.clear();
+        self.worker_calls.clear();
         self.phase = Phase::Closed;
     }
 
@@ -538,6 +545,7 @@ impl HostSession {
         self.reclaim_all_handles();
         self.pending_worker_releases.clear();
         self.reclaimed_handles.clear();
+        self.worker_calls.clear();
         if self.phase == Phase::Active {
             self.outbox.push(HostMessage::Goodbye(Goodbye {
                 reason: bounded_reason(kind),
