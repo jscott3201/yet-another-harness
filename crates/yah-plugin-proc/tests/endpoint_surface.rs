@@ -35,6 +35,11 @@ struct Upper;
 
 impl TextCapability for Upper {
     fn invoke(&self, input: &str) -> Result<String, TextCapabilityFailure> {
+        if input == "big" {
+            // Over the inline result bound: only a spilled answer can
+            // carry this, which is exactly what the dispatcher must do.
+            return Ok("X".repeat(yah_plugin_ipc::MAX_INLINE_RESULT_BYTES + 1));
+        }
         Ok(input.to_uppercase())
     }
 }
@@ -307,12 +312,14 @@ async fn a_capability_cycle_runs_through_the_dispatcher() {
     let id = activation.id().clone();
     let _handle = activation.activate(&rig.registry).await.expect("starts");
 
-    for _ in 0..40 {
-        let out = observer.diagnostics_tail(&id, yah_plugin_proc::DiagnosticStream::Stdout);
-        eprintln!("OUT: {out:?}");
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-    }
     diagnostics_show(&observer, &id, "cap:acquired:").await;
+    diagnostics_show(&observer, &id, "cap:invoked:\"HOLA\"").await;
+    // The handle is not single-use: a second invoke through the same id
+    // answers, and the release still retires it exactly once.
+    diagnostics_show(&observer, &id, "cap:reinvoked:\"HOLA\"").await;
+    // An over-inline-bound result spills instead of stranding the call.
+    diagnostics_show(&observer, &id, "cap:big:spilled:").await;
+    diagnostics_show(&observer, &id, "cap:released:").await;
     stop_active(activation, &rig.registry, rig.epoch).await;
 }
 

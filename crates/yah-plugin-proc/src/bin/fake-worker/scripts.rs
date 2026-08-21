@@ -57,6 +57,45 @@ pub fn capability_cycle(wire: &mut Wire, capability: &str) -> i32 {
         other => println!("cap:invoke:unexpected:{other:?}"),
     }
     std::io::Write::flush(&mut std::io::stdout()).ok();
+    // A second invoke through the same handle: a handle stays invocable
+    // until its release — single-use handles would strand the id against
+    // the live-handle ceiling.
+    wire.send(&WorkerMessage::Call(Call {
+        call_id: CallId(4),
+        method: "capability.invoke".to_owned(),
+        deadline_ms: None,
+        stream: false,
+        payload: serde_json::json!({ "handle": handle, "input": "hola" }),
+    }));
+    match wire.next_frame() {
+        Some(HostMessage::Reply(Reply {
+            call_id: CallId(4),
+            outcome: Outcome::Ok { result },
+        })) => println!("cap:reinvoked:{result}"),
+        other => println!("cap:reinvoke:unexpected:{other:?}"),
+    }
+    std::io::Write::flush(&mut std::io::stdout()).ok();
+    // An over-bound result comes back as a spilled offer, not a lost
+    // terminal.
+    wire.send(&WorkerMessage::Call(Call {
+        call_id: CallId(6),
+        method: "capability.invoke".to_owned(),
+        deadline_ms: None,
+        stream: false,
+        payload: serde_json::json!({ "handle": handle, "input": "big" }),
+    }));
+    match wire.next_frame() {
+        Some(HostMessage::Reply(Reply {
+            call_id: CallId(6),
+            outcome,
+        })) => match outcome {
+            Outcome::Spilled { artifact } => println!("cap:big:spilled:{}", artifact.bytes),
+            Outcome::Ok { .. } => println!("cap:big:inline"),
+            other => println!("cap:big:{other:?}"),
+        },
+        other => println!("cap:big:unexpected:{other:?}"),
+    }
+    std::io::Write::flush(&mut std::io::stdout()).ok();
     // Release: the id is spent; a second release must be refused.
     wire.send(&WorkerMessage::Call(Call {
         call_id: CallId(5),

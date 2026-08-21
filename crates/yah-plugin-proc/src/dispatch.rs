@@ -150,9 +150,28 @@ impl Dispatcher {
     /// channel. Fails only when the activation is gone; a worker call
     /// whose session ended needs no answer.
     async fn reply(&self, call_id: CallId, outcome: Outcome) {
-        let Some(commands) = self.commands().await else {
-            return;
+        // Refusals are static text, so only an Ok result can ever trip
+        // the inline bound; keep a copy just in case it does.
+        let spillable = match &outcome {
+            Outcome::Ok { result } => serde_json::to_vec(result)
+                .ok()
+                .filter(|bytes| bytes.len() > yah_plugin_ipc::MAX_INLINE_RESULT_BYTES),
+            _ => None,
         };
+        let applied = self.send_reply(call_id, outcome).await;
+        if !matches!(applied, Some(Err(AppError::SpillRequired { .. }))) {
+            return;
+        }
+        // The inline result was over the bound. Spill it exactly as the
+        // protocol demands — the session mints the offer and pins the
+        // bytes host-side, and the call still ends with its one terminal.
+        if let Some(bytes) = spillable {
+            let _ = self.spill_reply(call_id, bytes).await;
+        }
+    }
+
+    async fn send_reply(&self, call_id: CallId, outcome: Outcome) -> Option<Result<(), AppError>> {
+        let commands = self.commands().await?;
         let (done_sender, done) = oneshot::channel();
         if commands
             .try_send(PumpCommand::Reply {
@@ -162,11 +181,27 @@ impl Dispatcher {
             })
             .is_err()
         {
-            return;
+            return None;
         }
         // Application waits for the pump to have applied the reply; the
         // wire delivery itself stays the session's exactly-once law.
-        let _ = done.await;
+        done.await.ok()
+    }
+
+    async fn spill_reply(&self, call_id: CallId, bytes: Vec<u8>) -> Option<Result<(), AppError>> {
+        let commands = self.commands().await?;
+        let (done_sender, done) = oneshot::channel();
+        if commands
+            .try_send(PumpCommand::SpillReply {
+                call_id,
+                bytes,
+                done: done_sender,
+            })
+            .is_err()
+        {
+            return None;
+        }
+        done.await.ok()
     }
 
     /// Mint a wire handle for a freshly acquired capability. The table

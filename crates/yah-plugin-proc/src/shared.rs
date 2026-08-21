@@ -71,6 +71,16 @@ pub(crate) enum PumpCommand {
         outcome: Outcome,
         done: oneshot::Sender<Result<(), AppError>>,
     },
+    /// The application's result was over the inline bound: spill the
+    /// bytes through the session (which mints the offer and pins them
+    /// host-side) and answer the call with it. A spill the session
+    /// refuses is answered a bounded resource refusal instead — the
+    /// call still gets its exactly-one terminal either way.
+    SpillReply {
+        call_id: CallId,
+        bytes: Vec<u8>,
+        done: oneshot::Sender<Result<(), AppError>>,
+    },
     /// Mint a wire handle for a capability acquired on a worker call.
     MintHandle {
         minted_for: CallId,

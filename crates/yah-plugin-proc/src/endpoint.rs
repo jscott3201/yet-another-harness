@@ -63,6 +63,10 @@ pub enum EndpointError {
     SessionRetired,
     /// The session refused the operation on protocol or resource grounds.
     Refused(Refusal),
+    /// A call inside a composite operation ended without an answer to
+    /// consume — deadline, cancellation, or loss. The inner terminal is
+    /// carried whole: its loss kind says whether reconciliation is owed.
+    Unsettled(CallTerminal),
 }
 
 impl From<AppError> for EndpointError {
@@ -526,12 +530,7 @@ impl<'e> ArtifactReader<'e> {
         let terminal = pending.terminal().await?;
         let outcome = match terminal {
             CallTerminal::Completed(outcome) => outcome,
-            CallTerminal::LostOutcomeUnknown => {
-                return Err(EndpointError::Closed { summary: None });
-            }
-            CallTerminal::LostCancelled | CallTerminal::DeadlineExceeded => {
-                return Err(EndpointError::Closed { summary: None });
-            }
+            other => return Err(EndpointError::Unsettled(other)),
         };
         let result = match outcome {
             Outcome::Ok { result } => result,

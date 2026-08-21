@@ -23,7 +23,7 @@ use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::{mpsc, oneshot, watch};
 use yah_plugin_host::PluginStartContext;
-use yah_plugin_ipc::session::{HostSession, SessionEvent};
+use yah_plugin_ipc::session::{AppError, HostSession, SessionEvent};
 use yah_plugin_ipc::types::*;
 use yah_plugin_ipc::{frame, session::SessionConfig};
 
@@ -291,6 +291,45 @@ impl Pump {
                     }
                     Some(PumpCommand::Reply { call_id, outcome, done }) => {
                         let _ = done.send(self.session.reply_to_worker(call_id, outcome));
+                    }
+                    Some(PumpCommand::SpillReply { call_id, bytes, done }) => {
+                        let spilled = self.session.offer_artifact(
+                            call_id,
+                            bytes,
+                            "application/json",
+                        );
+                        let _ = done.send(match spilled {
+                            Ok(offer) => self
+                                .session
+                                .reply_to_worker(call_id, Outcome::Spilled { artifact: offer }),
+                            // The budget or handle ceiling refused the
+                            // spill; the call still owes its terminal.
+                            Err(error) => self.session.reply_to_worker(
+                                call_id,
+                                Outcome::Err {
+                                    error: WireError {
+                                        kind: WireErrorKind::ResourceExhausted,
+                                        message: match error {
+                                            AppError::SessionRetired => {
+                                                "the activation's correlation budget is spent"
+                                                    .to_owned()
+                                            }
+                                            AppError::HandleCeiling => {
+                                                "the activation's live-handle ceiling is exhausted"
+                                                    .to_owned()
+                                            }
+                                            AppError::UnknownCall => {
+                                                "the call ended before the result could be answered"
+                                                    .to_owned()
+                                            }
+                                            _ => "the result could not be answered".to_owned(),
+                                        },
+                                        retryable: false,
+                                        reconcile_required: false,
+                                    },
+                                },
+                            ),
+                        });
                     }
                     Some(PumpCommand::MintHandle { minted_for, done }) => {
                         let _ = done.send(self.session.mint_capability_handle(minted_for));
