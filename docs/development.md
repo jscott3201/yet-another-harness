@@ -108,7 +108,7 @@ Tooling, pinned by what the recorded evidence ran:
 - `cargo install cargo-fuzz --locked --version 0.13.2`
 - `libfuzzer-sys 0.4`, from the fuzz package's own lockfile.
 
-Three targets, each independently runnable:
+Four targets, each independently runnable:
 
 ```bash
 cd crates/yah-plugin-ipc/fuzz
@@ -121,6 +121,9 @@ rustup run nightly-2026-08-15 cargo fuzz run strict_json_admission \
 # C: admitted-frame round trip (well-typed frames, arbitrary chunkings)
 rustup run nightly-2026-08-15 cargo fuzz run frame_round_trip \
   fuzz/corpus/frame_round_trip ../tests/corpus -- -max_len=65536 -max_total_time=30
+# D: the stateful host session under arbitrary bounded action traces
+rustup run nightly-2026-08-15 cargo fuzz run session_actions \
+  fuzz/corpus/session_actions ../tests/corpus -- -max_len=4096 -max_total_time=30
 ```
 
 The second directory argument is the shared seed corpus,

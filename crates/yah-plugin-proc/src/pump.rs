@@ -393,9 +393,6 @@ impl Pump {
                     }
                 }
                 ready = self.worker.channel.writable(), if self.output_open && !self.outbuf.is_empty() => {
-                    if std::env::var("PUMP_DEBUG").is_ok() {
-                        eprintln!("arm: writable ok={}", ready.is_ok());
-                    }
                     if ready.is_err() || !self.write_ready() {
                         // Not an end of input: what the peer already sent —
                         // its goodbye above all — still decides how this
