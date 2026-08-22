@@ -23,8 +23,6 @@ tokio = { workspace = true, features = [
     "sync",
     "time",
 ] }
+yah-compose = { path = "../yah-compose" }
 yah-plugin-host = { path = "../yah-plugin-host" }
 yah-plugin-ipc = { path = "../yah-plugin-ipc" }
-
-[dev-dependencies]
-yah-compose = { path = "../yah-compose" }

@@ -120,7 +120,108 @@ pub fn capability_cycle(wire: &mut Wire, capability: &str) -> i32 {
         other => println!("cap:release:unexpected:{other:?}"),
     }
     std::io::Write::flush(&mut std::io::stdout()).ok();
-    super::serve_conformant(wire)
+    super::serve_after_handshake(wire)
+}
+
+/// Acquire one capability, invoke it once, and remain in the already-negotiated
+/// session until the host ends it. This isolates the lifecycle test's blocked
+/// callback from the full-cycle fixture's later protocol work.
+pub fn capability_hold(wire: &mut Wire, capability: &str) -> i32 {
+    if !wire.handshake() {
+        return 70;
+    }
+    wire.send(&WorkerMessage::Call(Call {
+        call_id: CallId(1),
+        method: "capability.acquire".to_owned(),
+        deadline_ms: None,
+        stream: false,
+        payload: serde_json::json!({ "capability": capability }),
+    }));
+    let handle = match wire.next_frame() {
+        Some(HostMessage::Reply(Reply {
+            call_id: CallId(1),
+            outcome: Outcome::Ok { result },
+        })) => result["handle"].as_u64(),
+        _ => None,
+    };
+    let Some(handle) = handle else {
+        return 70;
+    };
+    println!("hold:acquired:{handle}");
+    std::io::Write::flush(&mut std::io::stdout()).ok();
+    wire.send(&WorkerMessage::Call(Call {
+        call_id: CallId(2),
+        method: "capability.invoke".to_owned(),
+        deadline_ms: None,
+        stream: false,
+        payload: serde_json::json!({ "handle": handle, "input": "hold" }),
+    }));
+    loop {
+        match wire.next_frame() {
+            Some(HostMessage::Goodbye(_)) | None => return 0,
+            Some(_) => {}
+        }
+    }
+}
+
+/// Exercise an independently registered method twice under a bounded handler
+/// slot, while continuing to answer an ordinary host call from the pump.
+pub fn registered_method(wire: &mut Wire, method: &str) -> i32 {
+    if !wire.handshake() {
+        return 70;
+    }
+    wire.send(&WorkerMessage::Call(Call {
+        call_id: CallId(1),
+        method: "application.unknown".to_owned(),
+        deadline_ms: None,
+        stream: false,
+        payload: serde_json::json!(null),
+    }));
+    match wire.next_frame() {
+        Some(HostMessage::Reply(Reply {
+            call_id: CallId(1),
+            outcome: Outcome::Err { error },
+        })) => println!(
+            "registered:unknown:{:?}:echoed={}",
+            error.kind,
+            error.message.contains("application.unknown")
+        ),
+        other => println!("registered:unknown:unexpected:{other:?}"),
+    }
+    std::io::Write::flush(&mut std::io::stdout()).ok();
+    for call_id in [CallId(2), CallId(3)] {
+        wire.send(&WorkerMessage::Call(Call {
+            call_id,
+            method: method.to_owned(),
+            deadline_ms: None,
+            stream: false,
+            payload: serde_json::json!({ "call": call_id.0 }),
+        }));
+    }
+    let mut completed = 0;
+    loop {
+        match wire.next_frame() {
+            Some(HostMessage::Call(call)) => wire.send(&WorkerMessage::Reply(Reply {
+                call_id: call.call_id,
+                outcome: Outcome::Ok {
+                    result: call.payload,
+                },
+            })),
+            Some(HostMessage::Reply(Reply {
+                call_id: CallId(2 | 3),
+                outcome: Outcome::Ok { .. },
+            })) => {
+                completed += 1;
+                if completed == 2 {
+                    println!("registered:done");
+                    std::io::Write::flush(&mut std::io::stdout()).ok();
+                    return super::serve_after_handshake(wire);
+                }
+            }
+            Some(HostMessage::Goodbye(_)) | None => return 0,
+            Some(_) => {}
+        }
+    }
 }
 
 /// Probe the dispatcher's refusal surface: unknown method, forged
@@ -233,7 +334,7 @@ pub fn capability_hostile(wire: &mut Wire) -> i32 {
         }
     }
     std::io::Write::flush(&mut std::io::stdout()).ok();
-    super::serve_conformant(wire)
+    super::serve_after_handshake(wire)
 }
 
 /// Open a stream on the host's first stream call and send `count`

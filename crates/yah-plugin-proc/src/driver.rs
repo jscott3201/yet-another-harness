@@ -42,6 +42,7 @@ use yah_plugin_host::PluginStartContext;
 
 use crate::ProcLimits;
 use crate::bootstrap::{WorkerCommand, spawn_worker};
+use crate::dispatch::WorkerMethodRegistry;
 use crate::endpoint::{ActivationEndpoint, EndpointError, activation_endpoint, admission_gate};
 use crate::pump;
 use crate::shared::{DiagnosticStream, PumpCommand, PumpGauges, PumpShared};
@@ -153,6 +154,7 @@ pub struct ProcessPluginDriver {
     kind: DriverKind,
     worker_program: PathBuf,
     limits: ProcLimits,
+    methods: WorkerMethodRegistry,
     script: Mutex<ActivationScript>,
     observations: Arc<Mutex<ObservationMap>>,
 }
@@ -170,7 +172,33 @@ impl ProcessPluginDriver {
         worker_program: impl Into<PathBuf>,
         plans: impl IntoIterator<Item = ProcActivationPlan>,
     ) -> (Arc<Self>, ProcObserver) {
-        Self::scripted_with_limits(revision, kind, worker_program, plans, ProcLimits::default())
+        Self::scripted_with_limits_and_methods(
+            revision,
+            kind,
+            worker_program,
+            plans,
+            ProcLimits::default(),
+            WorkerMethodRegistry::new(),
+        )
+    }
+
+    /// [`Self::scripted`] with application methods frozen before any
+    /// activation can start.
+    pub fn scripted_with_methods(
+        revision: PluginRevisionId,
+        kind: DriverKind,
+        worker_program: impl Into<PathBuf>,
+        plans: impl IntoIterator<Item = ProcActivationPlan>,
+        methods: WorkerMethodRegistry,
+    ) -> (Arc<Self>, ProcObserver) {
+        Self::scripted_with_limits_and_methods(
+            revision,
+            kind,
+            worker_program,
+            plans,
+            ProcLimits::default(),
+            methods,
+        )
     }
 
     /// [`Self::scripted`] with explicit [`ProcLimits`]. Out-of-range
@@ -183,6 +211,26 @@ impl ProcessPluginDriver {
         plans: impl IntoIterator<Item = ProcActivationPlan>,
         limits: ProcLimits,
     ) -> (Arc<Self>, ProcObserver) {
+        Self::scripted_with_limits_and_methods(
+            revision,
+            kind,
+            worker_program,
+            plans,
+            limits,
+            WorkerMethodRegistry::new(),
+        )
+    }
+
+    /// [`Self::scripted_with_limits`] with a frozen application method
+    /// registry shared by each exact activation.
+    pub fn scripted_with_limits_and_methods(
+        revision: PluginRevisionId,
+        kind: DriverKind,
+        worker_program: impl Into<PathBuf>,
+        plans: impl IntoIterator<Item = ProcActivationPlan>,
+        limits: ProcLimits,
+        methods: WorkerMethodRegistry,
+    ) -> (Arc<Self>, ProcObserver) {
         let observations: Arc<Mutex<ObservationMap>> = Arc::new(Mutex::new(HashMap::new()));
         let observer = ProcObserver {
             observations: Arc::clone(&observations),
@@ -192,6 +240,7 @@ impl ProcessPluginDriver {
             kind,
             worker_program: worker_program.into(),
             limits,
+            methods,
             script: Mutex::new(ActivationScript {
                 pending: plans.into_iter().collect(),
                 assigned: HashMap::new(),
@@ -276,6 +325,7 @@ impl PluginDriver for ProcessPluginDriver {
             core: Arc::new(ActivationCore {
                 command: WorkerCommand::new(&self.worker_program).arg(plan.mode),
                 limits: self.limits,
+                methods: self.methods.clone(),
                 observation,
                 live: tokio::sync::Mutex::new(None),
             }),
@@ -295,6 +345,7 @@ struct PreparedProcActivation {
 struct ActivationCore {
     command: WorkerCommand,
     limits: ProcLimits,
+    methods: WorkerMethodRegistry,
     observation: Arc<ActivationObservation>,
     /// The running pump, if the activation spawned. An async-aware lock
     /// for the same store shape as the wasm lane; both critical sections
@@ -315,7 +366,13 @@ impl ActivationCore {
             retired_operation_budget: self.limits.retired_operation_budget,
             ..SessionConfig::default()
         };
-        let handle = pump::start(worker, config, Some(context), self.limits);
+        let handle = pump::start(
+            worker,
+            config,
+            Some(context),
+            self.methods.clone(),
+            self.limits,
+        );
         let shared = Arc::clone(&handle.shared);
         self.observation.attach(&handle);
         {

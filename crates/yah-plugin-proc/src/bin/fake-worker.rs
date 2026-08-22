@@ -57,6 +57,8 @@
 //!   against the host's application dispatcher — acquire the named
 //!   capability, invoke it, release it — printing each result to stdout,
 //!   then serve echo calls until goodbye.
+//! - `capability-hold:<id>`: handshake, acquire the named capability, and
+//!   hold its first invoke until the host replies or says goodbye.
 //! - `capability-hostile`: handshake, then probe the dispatcher's refusal
 //!   surface — an unknown method, a forged handle, a malformed id, a
 //!   double release — printing each refusal kind to stdout, then serve
@@ -69,6 +71,9 @@
 //!   then fire `n` invokes back to back without reading replies, printing
 //!   each reply's disposition as it arrives — the concurrent load that
 //!   meets the dispatcher's queue and concurrency bounds.
+//! - `registered-method:<name>`: call an independently registered method
+//!   twice under one provider slot while still serving host calls.
+//! - `audit-echo`: echo host calls and record each payload on diagnostics.
 //! - `spill:<bytes>`: handshake, then answer the first call with a
 //!   spilled offer of `bytes` pattern-filled bytes held worker-side, then
 //!   serve `artifact.read` pull requests for it until goodbye — the
@@ -477,6 +482,10 @@ fn run(mode: &str, wire: &mut Wire) -> i32 {
             let capability = m.split(':').nth(1).unwrap_or("text.upper").to_owned();
             scripts::capability_cycle(wire, &capability)
         }
+        m if m.starts_with("capability-hold:") => {
+            let capability = m.split(':').nth(1).unwrap_or("text.upper").to_owned();
+            scripts::capability_hold(wire, &capability)
+        }
         "capability-hostile" => scripts::capability_hostile(wire),
         m if m.starts_with("stream-items:") => {
             let count: u64 = m
@@ -494,6 +503,11 @@ fn run(mode: &str, wire: &mut Wire) -> i32 {
                 .unwrap_or(4);
             scripts::capability_flood(wire, count)
         }
+        m if m.starts_with("registered-method:") => {
+            let method = m.split(':').nth(1).unwrap_or("application.hold").to_owned();
+            scripts::registered_method(wire, &method)
+        }
+        "audit-echo" => serve_audit_echo(wire),
         m if m.starts_with("release-withhold") => scripts::release_withhold(wire),
         m if m.starts_with("release-die") => scripts::release_die(wire),
         m if m.starts_with("release-goodbye") => scripts::release_goodbye(wire),
@@ -549,9 +563,38 @@ fn serve_conformant(wire: &mut Wire) -> i32 {
     if !wire.handshake() {
         return 70;
     }
+    serve_after_handshake(wire)
+}
+
+/// Echo host calls after the caller has already completed negotiation.
+fn serve_after_handshake(wire: &mut Wire) -> i32 {
     loop {
         match wire.next_frame() {
             Some(HostMessage::Call(call)) => {
+                wire.send(&WorkerMessage::Reply(Reply {
+                    call_id: call.call_id,
+                    outcome: Outcome::Ok {
+                        result: call.payload,
+                    },
+                }));
+            }
+            Some(HostMessage::Goodbye(_)) | None => return 0,
+            Some(_) => {}
+        }
+    }
+}
+
+/// Echo host calls while retaining a worker-authored trace for stale-endpoint
+/// tests. Diagnostics are evidence only; protocol results remain the oracle.
+fn serve_audit_echo(wire: &mut Wire) -> i32 {
+    if !wire.handshake() {
+        return 70;
+    }
+    loop {
+        match wire.next_frame() {
+            Some(HostMessage::Call(call)) => {
+                println!("audit:{}", call.payload);
+                let _ = std::io::stdout().flush();
                 wire.send(&WorkerMessage::Reply(Reply {
                     call_id: call.call_id,
                     outcome: Outcome::Ok {

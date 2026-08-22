@@ -14,12 +14,66 @@ mod fixtures;
 #[path = "support/rig.rs"]
 mod rig;
 
-use fixtures::lifecycle_revision;
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
+use std::time::Duration;
+
+use fixtures::{lifecycle_revision, lifecycle_revision_requesting, worker_program};
 use rig::{Rig, diagnostics_show, endpoint, health_becomes, scripted, settled_within, stop_active};
 use serde_json::json;
-use yah_plugin_host::{HostPluginActivation, PluginHealth};
+use yah_plugin_host::{
+    CapabilityDefinition, CapabilityId, DriverKind, EffectiveCapabilityGrants,
+    HostPluginActivation, PluginHealth, TextCapability, TextCapabilityFailure,
+};
 use yah_plugin_ipc::types::{CancelReason, CancelTarget, Outcome};
-use yah_plugin_proc::{CallTerminal, ProcActivationPlan, WORKER_CHANNEL_FD};
+use yah_plugin_proc::{
+    Availability, CallTerminal, EndpointError, ProcActivationPlan, ProcLimits, ProcessPluginDriver,
+    ResourceState, WORKER_CHANNEL_FD,
+};
+
+const BLOCKING_CAPABILITY: &str = "test.text-blocking/v1";
+
+struct BlockingText {
+    entered: AtomicBool,
+    open: AtomicBool,
+}
+
+impl TextCapability for BlockingText {
+    fn invoke(&self, _input: &str) -> Result<String, TextCapabilityFailure> {
+        self.entered.store(true, Ordering::Release);
+        while !self.open.load(Ordering::Acquire) {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        Ok("released".to_owned())
+    }
+}
+
+async fn provider_enters(provider: &BlockingText) {
+    for _ in 0..500 {
+        if provider.entered.load(Ordering::Acquire) {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("the scripted worker never reached the blocked provider");
+}
+
+async fn process_gone_within(pid: i32, bound: Duration) -> bool {
+    tokio::time::timeout(bound, async {
+        loop {
+            if unsafe { libc::kill(pid, 0) } == -1
+                && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+            {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .is_ok()
+}
 
 #[tokio::test]
 async fn a_dead_worker_poisons_its_activation_and_a_fresh_one_serves() {
@@ -88,6 +142,199 @@ async fn a_dead_worker_poisons_its_activation_and_a_fresh_one_serves() {
         other => panic!("expected the echo, got {other:?}"),
     }
     stop_active(fresh, &rig.registry, rig.epoch).await;
+}
+
+/// A retained endpoint is bound to its own activation. A later activation on
+/// the same driver must neither admit it nor receive a call it attempted.
+#[tokio::test]
+async fn a_stopped_endpoint_cannot_retarget_a_replacement_activation() {
+    let revision = lifecycle_revision("stale-endpoint", '4');
+    let (driver, observer) = scripted(
+        &revision,
+        vec![
+            ProcActivationPlan::worker("audit-echo"),
+            ProcActivationPlan::worker("audit-echo"),
+        ],
+    );
+    let mut first_rig = Rig::new("proc.stale-endpoint.first", &revision);
+    let mut first = HostPluginActivation::prepare(
+        &mut first_rig.slot,
+        first_rig.epoch,
+        &first_rig.broker,
+        &first_rig.grants,
+        rig::as_trait(&driver),
+    )
+    .expect("first preparation succeeds");
+    let first_id = first.id().clone();
+    let _first_handle = first
+        .activate(&first_rig.registry)
+        .await
+        .expect("first starts");
+    let retained = endpoint(&driver, &first_id);
+    stop_active(first, &first_rig.registry, first_rig.epoch).await;
+
+    assert!(
+        matches!(retained.availability(), Availability::Closed { .. }),
+        "a retained endpoint remains typed closed after its activation stops"
+    );
+    let retained_refusal = retained
+        .call("tool.echo", json!({ "source": "A" }), None)
+        .await;
+
+    let mut second_rig = Rig::new("proc.stale-endpoint.second", &revision);
+    let mut second = HostPluginActivation::prepare(
+        &mut second_rig.slot,
+        second_rig.epoch,
+        &second_rig.broker,
+        &second_rig.grants,
+        rig::as_trait(&driver),
+    )
+    .expect("replacement preparation succeeds");
+    let second_id = second.id().clone();
+    let _second_handle = second
+        .activate(&second_rig.registry)
+        .await
+        .expect("replacement starts");
+
+    // This branch is unreachable in the real implementation. It is kept so
+    // the stale-resolution mutation can prove that an A lookup would send a
+    // real call to B before the test records its failure after cleanup.
+    let stale_lookup_closed = match driver.endpoint(&first_id) {
+        Err(EndpointError::Closed { .. } | EndpointError::Closing) => true,
+        Ok(retargeted) => {
+            let leaked = retargeted
+                .call("tool.echo", json!({ "source": "A" }), None)
+                .await
+                .expect("a retargeted endpoint would admit against B");
+            assert!(
+                matches!(settled_within(leaked).await, CallTerminal::Completed(_)),
+                "the mutation must reach B rather than merely manufacture an endpoint"
+            );
+            false
+        }
+        Err(other) => panic!("stale lookup must be closed, got {other:?}"),
+    };
+    let fresh = endpoint(&driver, &second_id)
+        .call("tool.echo", json!({ "source": "B" }), None)
+        .await
+        .expect("the replacement endpoint serves");
+    assert_eq!(
+        settled_within(fresh).await,
+        CallTerminal::Completed(Outcome::Ok {
+            result: json!({ "source": "B" }),
+        })
+    );
+    diagnostics_show(&observer, &second_id, "audit:{\"source\":\"B\"}").await;
+    let second_trace = observer
+        .diagnostics_tail(&second_id, yah_plugin_proc::DiagnosticStream::Stdout)
+        .unwrap_or_default();
+    stop_active(second, &second_rig.registry, second_rig.epoch).await;
+
+    assert!(
+        matches!(
+            retained_refusal,
+            Err(EndpointError::Closed { .. } | EndpointError::Closing)
+        ),
+        "the retained endpoint admits nothing after A stops"
+    );
+    assert!(
+        stale_lookup_closed,
+        "an A lookup must not resolve to B or admit a call there"
+    );
+    assert!(
+        !second_trace.contains("\"source\":\"A\"") && second_trace.contains("\"source\":\"B\""),
+        "B receives only its own endpoint call: {second_trace}"
+    );
+}
+
+/// Scope cancellation withdraws the endpoint and reaps the worker even when
+/// an already-admitted trusted provider still owns the activity drain.
+#[tokio::test]
+async fn scope_cancellation_reaps_before_a_blocked_provider_returns() {
+    let revision = lifecycle_revision_requesting("blocked-close", 'b', &[BLOCKING_CAPABILITY]);
+    let (driver, observer) = ProcessPluginDriver::scripted_with_limits(
+        revision.id().clone(),
+        DriverKind::NodeProcess,
+        worker_program(),
+        vec![ProcActivationPlan::worker(
+            "capability-hold:test.text-blocking/v1",
+        )],
+        ProcLimits {
+            kill_grace_ms: 20,
+            ..ProcLimits::default()
+        },
+    );
+    let mut rig = Rig::new("proc.blocked-close", &revision);
+    let provider = Arc::new(BlockingText {
+        entered: AtomicBool::new(false),
+        open: AtomicBool::new(false),
+    });
+    let registration = rig
+        .broker
+        .register(
+            &CapabilityDefinition::<dyn TextCapability>::new(
+                CapabilityId::new(BLOCKING_CAPABILITY).expect("canonical id"),
+            ),
+            Arc::clone(&provider) as Arc<dyn TextCapability>,
+        )
+        .expect("registration succeeds");
+    let grants = EffectiveCapabilityGrants::new(&revision, [registration.grant()])
+        .expect("fixture requests the capability");
+    let mut activation = HostPluginActivation::prepare(
+        &mut rig.slot,
+        rig.epoch,
+        &rig.broker,
+        &grants,
+        rig::as_trait(&driver),
+    )
+    .expect("preparation succeeds");
+    let id = activation.id().clone();
+    let _handle = activation.activate(&rig.registry).await.expect("starts");
+    let retained = endpoint(&driver, &id);
+    diagnostics_show(&observer, &id, "hold:acquired:").await;
+    provider_enters(&provider).await;
+    let pid = observer.worker_pid(&id).expect("the worker is live");
+
+    let (slot, _activation_handle) = activation.release_active().expect("releases active");
+    slot.reconcile(
+        &rig.registry,
+        yah_compose::DesiredComponentState::removed(slot.generation(2)),
+    )
+    .expect("starts closing and cancels the scope");
+
+    let fresh_admission = retained.call("tool.echo", json!("after-close"), None).await;
+    let finish = slot.finish_stop(rig.epoch);
+    tokio::pin!(finish);
+    let scope_still_waits_for_provider =
+        tokio::time::timeout(Duration::from_millis(100), finish.as_mut())
+            .await
+            .is_err();
+    let reaped_before_provider_returns = process_gone_within(pid, Duration::from_secs(3)).await;
+
+    // The provider contract remains synchronous. Let it return so the
+    // pre-cleanup activity drain can complete through the normal path.
+    provider.open.store(true, Ordering::Release);
+    tokio::time::timeout(Duration::from_secs(5), finish.as_mut())
+        .await
+        .expect("scope completion resumes after the provider returns")
+        .expect("cleanup succeeds");
+    assert_eq!(
+        observer.resource_state(&id),
+        Ok(ResourceState::Released),
+        "deferred deactivation joins and retires the already-reaped pump"
+    );
+
+    assert!(
+        matches!(
+            fresh_admission,
+            Err(EndpointError::Closing | EndpointError::Closed { .. })
+        ) && reaped_before_provider_returns
+            && scope_still_waits_for_provider,
+        "scope cancellation must withdraw admission and reap before the blocked provider returns; \
+         admission_withdrawn={}, reaped_before_return={reaped_before_provider_returns}, \
+         scope_still_waits_for_provider={scope_still_waits_for_provider}",
+        fresh_admission.is_err(),
+    );
 }
 
 #[tokio::test]

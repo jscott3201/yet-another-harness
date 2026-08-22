@@ -19,6 +19,7 @@ use std::time::Duration;
 
 use tokio::io::AsyncReadExt;
 use tokio::sync::{Notify, mpsc, oneshot};
+use yah_compose::ScopeCancellation;
 use yah_plugin_ipc::session::AppError;
 use yah_plugin_ipc::types::*;
 
@@ -186,6 +187,9 @@ pub(crate) struct PumpShared {
     /// instant withdrawal becomes possible — no window where a fresh call
     /// is admitted into a pump that is already saying goodbye.
     closing: AtomicBool,
+    /// Scope cancellation fires before the activity drain can reach driver
+    /// cleanup. Endpoint admission observes it directly for the same fence.
+    scope_cancellation: Option<ScopeCancellation>,
     /// Memory gauges, updated by the pump task at every buffer change.
     outbound_bytes: AtomicUsize,
     outbound_capacity: AtomicUsize,
@@ -205,7 +209,12 @@ struct Diagnostics {
 }
 
 impl PumpShared {
-    pub(crate) fn new(limits: &ProcLimits, worker_pid: i32, max_stream_credit: u32) -> Self {
+    pub(crate) fn new(
+        limits: &ProcLimits,
+        worker_pid: i32,
+        max_stream_credit: u32,
+        scope_cancellation: Option<ScopeCancellation>,
+    ) -> Self {
         Self {
             phase: AtomicU8::new(PHASE_HANDSHAKE),
             close_summary: Mutex::new(None),
@@ -215,6 +224,7 @@ impl PumpShared {
             worker_pid,
             output_closed: AtomicBool::new(false),
             closing: AtomicBool::new(false),
+            scope_cancellation,
             outbound_bytes: AtomicUsize::new(0),
             outbound_capacity: AtomicUsize::new(0),
             pending_calls: AtomicUsize::new(0),
@@ -238,6 +248,10 @@ impl PumpShared {
 
     pub fn is_closing(&self) -> bool {
         self.closing.load(Ordering::Acquire)
+            || self
+                .scope_cancellation
+                .as_ref()
+                .is_some_and(ScopeCancellation::is_cancelled)
     }
 
     pub fn stream_channel_capacity(&self) -> usize {

@@ -357,11 +357,13 @@ worker is a test fixture, not an SDK.
 Once a worker completes hello/accept, the driver publishes an
 `ActivationEndpoint` for that exact activation — the production invocation
 surface the test-facing observation hooks were holding open. Publication is
-gated on negotiation (there is no worker to talk to before it) and
-withdrawal precedes the goodbye: deactivation flips a shared closing flag
-before the queue-free shutdown signal moves, so no fresh call is admitted
-into a pump that is already saying goodbye, and after release the endpoint
-answers closed with the retained first-cause summary. Clones hold the pump's
+gated on negotiation (there is no worker to talk to before it) and withdrawal
+precedes the goodbye: scope cancellation is itself an admission fence, then
+the pump starts its queue-free bounded shutdown before deferred driver cleanup
+can run. A trusted synchronous capability callback may still delay scope
+completion until it returns, but it cannot keep fresh endpoint admission open
+or the worker process alive. After release the endpoint answers closed with
+the retained first-cause summary. Clones hold the pump's
 command channel only weakly, so an endpoint kept past its activation can
 never keep the worker alive — an abandoned activation still reaps itself —
 and every operation fails closed with typed errors: never-started,
@@ -394,14 +396,18 @@ frame left to ride. Dropping the item receiver mutes delivery and cancels
 the stream half; it never cancels the terminal, and awaiting the terminal
 without draining cannot wedge.
 
-Worker-to-host calls are routed to a bounded application dispatcher built
-from the start permit's capability context. The pump never runs provider
-code: requests wait in a bounded queue whose overflow answers the worker a
-retryable resource-exhausted refusal before any provider runs, provider
-concurrency is a semaphore, request bodies are byte-bounded before they
-occupy a slot, and results return through the same bounded command channel
-so the session stays single-owner. The dispatcher serves the versioned
-capability family over an exact activation-local handle table: acquire
+Worker-to-host calls are routed to a bounded application dispatcher. Its
+protocol-owned methods and application-owned methods are frozen before an
+activation starts; application registrations expose only bounded JSON request
+and result values, never session or frame mutation. Duplicate and
+protocol-reserved names are refused at registration. The pump never runs
+provider code: requests wait in a bounded queue whose overflow answers the
+worker a retryable resource-exhausted refusal before any provider runs,
+provider concurrency is a semaphore, request bodies and application results
+are bounded before they cross the wire, and replies return through the same
+bounded command channel so the session stays single-owner. The dispatcher
+serves the versioned capability family over an exact activation-local handle
+table: acquire
 resolves the grant through the same broker gates as the Wasm lane and mints
 a wire handle only after the session does, invoke re-enters the handle's own
 revocation and admission gates off-pump inside a bounded permit (a provider

@@ -734,7 +734,7 @@ mod tests {
             command_channel_capacity: 3,
             ..ProcLimits::default()
         };
-        let shared = Arc::new(crate::shared::PumpShared::new(&limits, 1, 16));
+        let shared = Arc::new(crate::shared::PumpShared::new(&limits, 1, 16, None));
         let (sender, receiver) = mpsc::channel::<PumpCommand>(limits.command_channel_capacity);
         let id = unit_activation_id("cancel-pin");
         shared.set_active();

@@ -82,7 +82,9 @@ resource tables rather than serialize process-local IDs: the Wasm driver now
 does exactly this for providers registered under the portable [`TextCapability`]
 contract, keeping behind each guest-held resource an entry that wraps an
 activation-scoped handle, so every guest call re-enters `try_with` and its
-gates. Process adapters will follow the same shape.
+gates. The process driver now applies that same narrow portable text path over
+its worker protocol; it does not establish the remaining cross-runtime
+conformance or SDK surface.
 
 [`TextCapability`]: ../crates/yah-plugin-host/src/capability/text.rs
 
@@ -97,21 +99,17 @@ ABI.
 This slice does not implement:
 
 - policy evaluation, approval, audit, expiration, or in-place grant changes;
-- worker-process capability serving: the process driver's dispatcher now
-  carries the portable text contract to workers over the wire (see the
-  [worker protocol page](plugin-worker-protocol.md#the-activation-endpoint)),
-  but no worker SDK exists to consume it;
+- a worker SDK for the process driver's narrow portable text path (see the
+  [worker protocol page](plugin-worker-protocol.md#the-activation-endpoint));
 - concrete filesystem, network, secret, graph, tool, or model capabilities;
 - configuration or typed capability-specific constraint schemas;
 - async calls, streams, task supervision, deadlines, rate limits, or forced
   cancellation;
 - durable work-attempt identity or child invocation scopes;
-- a binding from this broker to any transport, production execution drivers,
-  or sandbox enforcement. The WIT encoding exists for the portable text
-  contract, and the [worker wire protocol](plugin-worker-protocol.md) defines
-  a handle encoding for future process lanes, but nothing mints a worker
-  handle from a real grant; richer or typed-per-capability encodings do not
-  exist;
+- a general broker-to-transport binding or sandbox enforcement. The process
+  driver mints worker handles from real grants only for the portable text
+  contract; richer capability contracts and typed-per-capability encodings do
+  not exist;
 - provider cleanup ownership, durable external effects, or Selene persistence;
   or
 - automatic lifecycle changes after a host policy decision.

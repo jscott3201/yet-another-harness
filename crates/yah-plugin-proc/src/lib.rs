@@ -31,6 +31,10 @@ mod endpoint;
 mod pump;
 mod shared;
 
+pub use dispatch::{
+    WorkerMethod, WorkerMethodFailure, WorkerMethodFailureCode, WorkerMethodRegistrationError,
+    WorkerMethodRegistry, WorkerMethodRequest, WorkerMethodResult, WorkerMethodResultError,
+};
 pub use driver::{ProcActivationPlan, ProcObserver, ProcessPluginDriver, ResourceState};
 pub use endpoint::{
     ActivationEndpoint, ArtifactReader, Availability, CallTerminal, EndpointError, PendingCall,

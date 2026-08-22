@@ -22,6 +22,7 @@ use std::time::Duration;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::{mpsc, oneshot, watch};
+use yah_compose::ScopeCancellation;
 use yah_plugin_host::PluginStartContext;
 use yah_plugin_ipc::session::{AppError, HostSession, SessionEvent};
 use yah_plugin_ipc::types::*;
@@ -29,7 +30,7 @@ use yah_plugin_ipc::{frame, session::SessionConfig};
 
 use crate::ProcLimits;
 use crate::bootstrap::SpawnedWorker;
-use crate::dispatch::{self, DispatchRequest};
+use crate::dispatch::{self, DispatchRequest, WorkerMethodRegistry};
 use crate::endpoint::StreamFrame;
 use crate::shared::{
     CallEnd, DiagnosticStream, PumpCommand, PumpShared, ReleaseEnd, drain_diagnostics, kind_label,
@@ -102,6 +103,7 @@ pub(crate) fn start(
     worker: SpawnedWorker,
     config: SessionConfig,
     context: Option<PluginStartContext>,
+    methods: WorkerMethodRegistry,
     mut limits: ProcLimits,
 ) -> PumpHandle {
     // The cap accuses a worker of not draining, so it must never sit under
@@ -117,7 +119,15 @@ pub(crate) fn start(
     // would reject everything, including calls the session would admit.
     limits.command_channel_capacity = limits.command_channel_capacity.max(1);
     let max_stream_credit = config.ceilings.max_stream_credit;
-    let shared = Arc::new(PumpShared::new(&limits, worker.pgid, max_stream_credit));
+    let scope_cancellation = context
+        .as_ref()
+        .map(|context| context.cancellation().clone());
+    let shared = Arc::new(PumpShared::new(
+        &limits,
+        worker.pgid,
+        max_stream_credit,
+        scope_cancellation.clone(),
+    ));
     let (commands, receiver) = mpsc::channel(limits.command_channel_capacity);
     let (shutdown, shutdown_rx) = watch::channel(None);
     // The dispatcher is created before the pump task spawns, holding the
@@ -129,6 +139,7 @@ pub(crate) fn start(
             commands.downgrade(),
             limits.dispatch_queue_capacity,
             limits.provider_concurrency,
+            methods,
         )
     });
     // The capability table's second key-holder: when the session
@@ -153,6 +164,7 @@ pub(crate) fn start(
         output_open: true,
         close_orderly: false,
         max_stream_credit,
+        scope_cancellation,
         limits,
     };
     let task = tokio::spawn(pump.run());
@@ -202,11 +214,14 @@ struct Pump {
     /// goodbye or the worker announced its own stop, `false` for a bare
     /// disconnect or fatal fault. Set by whichever arm learns first.
     close_orderly: bool,
+    /// The scope fence fires before the deferred driver cleanup can poll.
+    scope_cancellation: Option<ScopeCancellation>,
     limits: ProcLimits,
 }
 
 impl Pump {
     async fn run(mut self) {
+        let scope_cancellation = self.scope_cancellation.clone();
         let started = tokio::time::Instant::now();
         let mut ticker = tokio::time::interval(Duration::from_millis(self.limits.tick_interval_ms));
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -428,6 +443,16 @@ impl Pump {
                     let reason =
                         self.shutdown.borrow().clone().unwrap_or_else(|| "deactivated".to_owned());
                     self.begin_goodbye(&reason);
+                    break;
+                }
+                // This arrives before the scope's activity drain lets the
+                // deferred deactivation cleanup poll. A stuck trusted
+                // callback can still delay scope completion, never the
+                // worker's bounded shutdown and reap.
+                _ = scope_cancelled(&scope_cancellation), if !self.shutdown_seen => {
+                    self.shutdown_seen = true;
+                    self.shared.set_closing();
+                    self.begin_goodbye("activation scope cancelled");
                     break;
                 }
             }
@@ -808,6 +833,13 @@ impl Pump {
             Ok(0) | Err(_) => *source = None,
             Ok(count) => self.shared.append_diagnostics(stream, &buffer[..count]),
         }
+    }
+}
+
+async fn scope_cancelled(cancellation: &Option<ScopeCancellation>) {
+    match cancellation {
+        Some(cancellation) => cancellation.cancelled().await,
+        None => std::future::pending().await,
     }
 }
 

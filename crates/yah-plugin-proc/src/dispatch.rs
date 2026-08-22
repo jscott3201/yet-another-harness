@@ -1,10 +1,11 @@
 //! The bounded worker-to-host application dispatcher.
 //!
-//! Admitted worker calls — the versioned capability family, and any
-//! other method a future application registers — are routed here off the
-//! pump task. The pump never runs provider code: a slow or panicking
-//! provider can extend a dispatch slot, never IO, ticks, cancellation,
-//! endpoint withdrawal, or the kill path.
+//! Admitted worker calls route through an immutable activation-local table
+//! here, off the pump task. The table contains protocol-owned capability
+//! methods and the application's pre-registered methods; no activation can
+//! mutate it after start. The pump never runs provider code: a slow or
+//! panicking provider can extend a dispatch slot, never IO, ticks, endpoint
+//! withdrawal, or the kill path.
 //!
 //! Bounds are structural: the queue is a bounded channel whose overflow
 //! answers the worker an observable, retryable refusal before any
@@ -19,7 +20,7 @@
 //! one exception follows the Wasm lane's rule: a provider's own refusal
 //! text is its caller-facing contract and crosses verbatim, bounded.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::panic::AssertUnwindSafe;
 use std::sync::{Arc, Mutex};
 
@@ -32,6 +33,13 @@ use yah_plugin_ipc::session::AppError;
 use yah_plugin_ipc::types::{CallId, HandleId, Outcome, WireError, WireErrorKind};
 
 use crate::shared::PumpCommand;
+
+mod methods;
+
+pub use methods::{
+    WorkerMethod, WorkerMethodFailure, WorkerMethodFailureCode, WorkerMethodRegistrationError,
+    WorkerMethodRegistry, WorkerMethodRequest, WorkerMethodResult, WorkerMethodResultError,
+};
 
 /// The capability shape the dispatcher's table holds, named so the pump
 /// can carry one through a mint command without reaching into this
@@ -116,11 +124,26 @@ fn malformed(method: &'static str) -> Outcome {
 #[derive(Clone)]
 struct Dispatcher {
     table: Arc<CapabilityTable>,
+    routes: Arc<BTreeMap<String, DispatchRoute>>,
     /// Weak: the task never keeps an ended activation's command channel
     /// alive, so it cannot outlive its activation as authority.
     commands: mpsc::WeakSender<PumpCommand>,
     context: PluginStartContext,
     providers: Arc<Semaphore>,
+}
+
+#[derive(Clone)]
+enum DispatchRoute {
+    Capability(CapabilityMethod),
+    Application(Arc<dyn WorkerMethod>),
+    ArtifactRead,
+}
+
+#[derive(Clone, Copy)]
+enum CapabilityMethod {
+    Acquire,
+    Invoke,
+    Release,
 }
 
 /// Build and spawn the dispatcher for one activation. Returns the bounded
@@ -130,17 +153,44 @@ pub(crate) fn spawn(
     commands: mpsc::WeakSender<PumpCommand>,
     queue_capacity: usize,
     provider_concurrency: usize,
+    methods: WorkerMethodRegistry,
 ) -> (mpsc::Sender<DispatchRequest>, Arc<CapabilityTable>) {
     let (queue, receiver) = mpsc::channel(queue_capacity.max(1));
     let table = Arc::new(CapabilityTable::default());
     let dispatcher = Dispatcher {
         table: Arc::clone(&table),
+        routes: Arc::new(routes(methods)),
         commands,
         context,
         providers: Arc::new(Semaphore::new(provider_concurrency.max(1))),
     };
     tokio::spawn(dispatcher.run(receiver));
     (queue, table)
+}
+
+fn routes(methods: WorkerMethodRegistry) -> BTreeMap<String, DispatchRoute> {
+    let mut routes = BTreeMap::from([
+        (
+            "capability.acquire".to_owned(),
+            DispatchRoute::Capability(CapabilityMethod::Acquire),
+        ),
+        (
+            "capability.invoke".to_owned(),
+            DispatchRoute::Capability(CapabilityMethod::Invoke),
+        ),
+        (
+            "capability.release".to_owned(),
+            DispatchRoute::Capability(CapabilityMethod::Release),
+        ),
+        ("artifact.read".to_owned(), DispatchRoute::ArtifactRead),
+    ]);
+    routes.extend(
+        methods
+            .into_methods()
+            .into_iter()
+            .map(|(name, method)| (name, DispatchRoute::Application(method))),
+    );
+    routes
 }
 
 impl Dispatcher {
@@ -282,29 +332,61 @@ impl Dispatcher {
     }
 
     async fn dispatch(&self, request: &DispatchRequest) -> Outcome {
-        match request.method.as_str() {
-            "capability.acquire" => self.acquire(request).await,
-            "capability.invoke" => self.invoke(request).await,
-            "capability.release" => self.release_request(request).await,
-            // artifact.read is served by the session itself from
-            // host-held spill bytes; reaching the dispatcher under that
-            // name would mean the interception changed. Answer the
-            // closed family's refusal rather than guess.
-            "artifact.read" => refusal(
+        let Some(route) = self.routes.get(&request.method).cloned() else {
+            // The method name is worker text and must not echo; the
+            // refusal names the receiver's closed family, never the ask.
+            return refusal(
+                WireErrorKind::UnknownMethod,
+                "the receiver does not offer the requested method",
+                false,
+            );
+        };
+        match route {
+            DispatchRoute::Capability(CapabilityMethod::Acquire) => self.acquire(request).await,
+            DispatchRoute::Capability(CapabilityMethod::Invoke) => self.invoke(request).await,
+            DispatchRoute::Capability(CapabilityMethod::Release) => {
+                self.release_request(request).await
+            }
+            // artifact.read is served by the session itself from host-held
+            // spill bytes. The registration keeps the reserved method's
+            // refusal stable if interception ever changes.
+            DispatchRoute::ArtifactRead => refusal(
                 WireErrorKind::UnknownMethod,
                 "artifact.read is served by the host session",
                 false,
             ),
-            other => refusal(
-                WireErrorKind::UnknownMethod,
-                match other {
-                    // The method name is worker text and must not echo;
-                    // the refusal names the family, never the ask.
-                    "capability.acquire" | "capability.invoke" | "capability.release" => {
-                        unreachable!("the capability family is matched above")
-                    }
-                    _ => "the receiver does not offer the requested method",
+            DispatchRoute::Application(method) => self.application(request, method).await,
+        }
+    }
+
+    async fn application(
+        &self,
+        request: &DispatchRequest,
+        method: Arc<dyn WorkerMethod>,
+    ) -> Outcome {
+        let request = WorkerMethodRequest::new(request.payload.clone());
+        match tokio::task::spawn_blocking(move || {
+            std::panic::catch_unwind(AssertUnwindSafe(|| method.invoke(&request)))
+        })
+        .await
+        {
+            Ok(Ok(Ok(result))) => Outcome::Ok {
+                result: result.into_inner(),
+            },
+            Ok(Ok(Err(failure))) => Outcome::Err {
+                error: WireError {
+                    kind: match failure.code() {
+                        WorkerMethodFailureCode::InvalidInput => WireErrorKind::InvalidFrame,
+                        WorkerMethodFailureCode::Failed => WireErrorKind::Internal,
+                    },
+                    message: failure.message().to_owned(),
+                    retryable: false,
+                    reconcile_required: false,
                 },
+            },
+            Ok(Err(_)) | Err(_) => refusal(
+                WireErrorKind::Internal,
+                "the registered method failed unexpectedly",
                 false,
             ),
         }
