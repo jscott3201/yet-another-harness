@@ -79,6 +79,17 @@ async fn registered_methods_are_frozen_bounded_and_off_pump() {
             .expect_err("the protocol-owned method cannot be replaced"),
         WorkerMethodRegistrationError::ReservedName,
     );
+    for reserved in [
+        yah_plugin_proc::TEXT_CAPABILITY_ACQUIRE_METHOD,
+        yah_plugin_proc::TEXT_CAPABILITY_INVOKE_METHOD,
+    ] {
+        assert_eq!(
+            methods
+                .register(reserved, Arc::clone(&method) as Arc<dyn WorkerMethod>)
+                .expect_err("a protocol-owned capability route cannot be replaced"),
+            WorkerMethodRegistrationError::ReservedName,
+        );
+    }
     assert_eq!(
         methods
             .register("", Arc::clone(&method) as Arc<dyn WorkerMethod>)

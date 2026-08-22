@@ -15,7 +15,11 @@ use std::sync::{
 use yah_compose::ScopeCancellation;
 use yah_plugin_ipc::{MAX_INLINE_RESULT_BYTES, MAX_METHOD_CHARS};
 
-const RESERVED_EXACT: [&str; 1] = ["artifact.read"];
+const RESERVED_EXACT: [&str; 3] = [
+    "artifact.read",
+    super::TEXT_CAPABILITY_ACQUIRE_METHOD,
+    super::TEXT_CAPABILITY_INVOKE_METHOD,
+];
 
 /// One bounded worker request delivered to a registered application method.
 ///

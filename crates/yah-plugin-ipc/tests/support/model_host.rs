@@ -137,18 +137,19 @@ impl ModelSession {
         self.worker_calls.remove(pos);
         self.retired_worker_calls.push(id);
         if reclaim {
-            let mut count = 0;
+            let mut reclaimed = Vec::new();
             for handle in minted {
                 if let Some(pos) = self.handles.iter().position(|entry| entry.id == handle) {
                     let entry = self.handles.remove(pos);
                     let kind = entry.kind;
                     self.live_handles -= 1;
                     self.reclaimed_handles.push((handle, kind));
-                    count += 1;
+                    reclaimed.push(handle);
                 }
             }
-            if count > 0 {
-                self.events.push(EventFact::HandlesReclaimed { count });
+            if !reclaimed.is_empty() {
+                self.events
+                    .push(EventFact::HandlesReclaimed { handles: reclaimed });
             }
         }
     }

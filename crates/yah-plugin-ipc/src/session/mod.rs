@@ -142,7 +142,7 @@ pub enum SessionEvent {
     WorkerHandleReleased { handle: HandleId, kind: HandleKind },
     /// The session reclaimed handles without a release frame: auto-release
     /// on a failed minting call, goodbye, disconnect, or fatal fault.
-    HandlesReclaimed { count: u32 },
+    HandlesReclaimed { handles: Vec<HandleId> },
     /// The worker said goodbye; in-flight work settles as cancelled.
     WorkerGoodbye { reason: String },
     /// A refusable protocol fault was answered on one call.

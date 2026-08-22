@@ -11,13 +11,16 @@ use std::sync::Arc;
 
 use tokio::sync::{Semaphore, mpsc, oneshot};
 use yah_compose::ScopeCancellation;
+use yah_plugin_host::PluginStartContext;
 use yah_plugin_ipc::session::AppError;
 use yah_plugin_ipc::types::{CallId, CancelReason, Outcome, WireError, WireErrorKind};
 
 use crate::shared::PumpCommand;
 
+mod capabilities;
 mod methods;
 
+pub use capabilities::{TEXT_CAPABILITY_ACQUIRE_METHOD, TEXT_CAPABILITY_INVOKE_METHOD};
 pub use methods::{
     WorkerMethod, WorkerMethodCancellation, WorkerMethodFailure, WorkerMethodFailureCode,
     WorkerMethodRegistrationError, WorkerMethodRegistry, WorkerMethodRequest, WorkerMethodResult,
@@ -27,12 +30,39 @@ pub use methods::{
 /// One session-admitted worker call handed to the application lane.
 pub(crate) struct DispatchRequest {
     pub call_id: CallId,
-    pub method: String,
-    pub payload: serde_json::Value,
+    pub work: DispatchWork,
     pub cancellation: WorkerMethodCancellation,
 }
 
-fn refusal(kind: WireErrorKind, message: &'static str, retryable: bool) -> Outcome {
+impl DispatchRequest {
+    fn payload(&self) -> serde_json::Value {
+        match &self.work {
+            DispatchWork::CapabilityAcquire { payload }
+            | DispatchWork::Application { payload, .. } => payload.clone(),
+            DispatchWork::CapabilityInvoke { .. } => serde_json::Value::Null,
+        }
+    }
+}
+
+pub(crate) enum DispatchWork {
+    Application {
+        method: String,
+        payload: serde_json::Value,
+    },
+    CapabilityAcquire {
+        payload: serde_json::Value,
+    },
+    CapabilityInvoke {
+        capability: capabilities::DispatchedTextCapability,
+        input: String,
+    },
+}
+
+pub(crate) use capabilities::{
+    DispatchedTextCapability, decode_invoke, malformed_invoke, unknown_handle,
+};
+
+pub(super) fn refusal(kind: WireErrorKind, message: &'static str, retryable: bool) -> Outcome {
     Outcome::Err {
         error: WireError {
             kind,
@@ -54,20 +84,28 @@ struct Dispatcher {
     methods: Arc<BTreeMap<String, Arc<dyn WorkerMethod>>>,
     /// Weak so callbacks and queued work cannot keep an ended pump alive.
     commands: mpsc::WeakSender<PumpCommand>,
+    context: PluginStartContext,
     providers: Arc<Semaphore>,
 }
 
+struct DispatchAnswer {
+    outcome: Outcome,
+    capability: bool,
+}
+
 pub(crate) fn spawn(
-    scope_cancellation: ScopeCancellation,
+    context: PluginStartContext,
     commands: mpsc::WeakSender<PumpCommand>,
     queue_capacity: usize,
     provider_concurrency: usize,
     methods: WorkerMethodRegistry,
 ) -> mpsc::Sender<DispatchRequest> {
+    let scope_cancellation = context.cancellation().clone();
     let (queue, receiver) = mpsc::channel(queue_capacity.max(1));
     let dispatcher = Dispatcher {
         methods: Arc::new(methods.into_methods()),
         commands,
+        context,
         providers: Arc::new(Semaphore::new(provider_concurrency.max(1))),
     };
     tokio::spawn(dispatcher.run(receiver, scope_cancellation));
@@ -88,7 +126,11 @@ impl Dispatcher {
         done.await.ok()
     }
 
-    async fn reply(&self, call_id: CallId, outcome: Outcome) {
+    async fn reply(&self, call_id: CallId, answer: DispatchAnswer) {
+        let DispatchAnswer {
+            outcome,
+            capability,
+        } = answer;
         let spillable = match &outcome {
             Outcome::Ok { result } => serde_json::to_vec(result)
                 .ok()
@@ -105,7 +147,15 @@ impl Dispatcher {
         match applied {
             Some(Ok(())) | None => {}
             Some(Err(AppError::SpillRequired { .. })) => {
-                if let Some(bytes) = spillable {
+                if capability {
+                    let _ = self
+                        .command(|done| PumpCommand::Reply {
+                            call_id,
+                            outcome: capabilities::exhausted_result(),
+                            done,
+                        })
+                        .await;
+                } else if let Some(bytes) = spillable {
                     let _ = self
                         .command(|done| PumpCommand::SpillReply {
                             call_id,
@@ -121,6 +171,15 @@ impl Dispatcher {
                 | AppError::SessionRetired
                 | AppError::NotActive,
             )) => {}
+            Some(Err(_)) if capability => {
+                let _ = self
+                    .command(|done| PumpCommand::Reply {
+                        call_id,
+                        outcome: capabilities::exhausted_result(),
+                        done,
+                    })
+                    .await;
+            }
             Some(Err(_)) => {
                 let _ = self
                     .command(|done| PumpCommand::Reply {
@@ -157,8 +216,8 @@ impl Dispatcher {
             };
             let dispatcher = self.clone();
             tokio::spawn(async move {
-                let outcome = dispatcher.dispatch(&request).await;
-                dispatcher.reply(request.call_id, outcome).await;
+                let answer = dispatcher.dispatch(&request).await;
+                dispatcher.reply(request.call_id, answer).await;
                 drop(permit);
             });
         }
@@ -167,19 +226,46 @@ impl Dispatcher {
         // worker independently of callbacks already running.
     }
 
-    async fn dispatch(&self, request: &DispatchRequest) -> Outcome {
+    async fn dispatch(&self, request: &DispatchRequest) -> DispatchAnswer {
         if request.cancellation.is_cancelled() {
-            return cancelled();
+            return DispatchAnswer {
+                outcome: cancelled(),
+                capability: !matches!(&request.work, DispatchWork::Application { .. }),
+            };
         }
-        let Some(method) = self.methods.get(&request.method).cloned() else {
-            // The method is worker-authored text and never crosses back.
+        let (outcome, capability) = match &request.work {
+            DispatchWork::CapabilityAcquire { .. } => {
+                (self.acquire_capability(request).await, true)
+            }
+            DispatchWork::CapabilityInvoke { capability, input } => (
+                self.invoke_capability(request, capability.clone(), input.clone())
+                    .await,
+                true,
+            ),
+            DispatchWork::Application { method, payload } => {
+                (self.application(request, method, payload).await, false)
+            }
+        };
+        DispatchAnswer {
+            outcome,
+            capability,
+        }
+    }
+
+    async fn application(
+        &self,
+        request: &DispatchRequest,
+        method_name: &str,
+        payload: &serde_json::Value,
+    ) -> Outcome {
+        let Some(method) = self.methods.get(method_name).cloned() else {
             return refusal(
                 WireErrorKind::UnknownMethod,
                 "the receiver does not offer the requested method",
                 false,
             );
         };
-        let view = WorkerMethodRequest::new(request.payload.clone(), request.cancellation.clone());
+        let view = WorkerMethodRequest::new(payload.clone(), request.cancellation.clone());
         let cancellation = request.cancellation.clone();
         let result = tokio::task::spawn_blocking(move || {
             std::panic::catch_unwind(AssertUnwindSafe(|| method.invoke(&view)))

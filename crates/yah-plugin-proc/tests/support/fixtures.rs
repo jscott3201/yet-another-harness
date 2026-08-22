@@ -12,9 +12,9 @@
 use std::path::PathBuf;
 
 use yah_plugin_host::{
-    DriverConformanceCase, DriverConformanceSetupError, PackageDigest, PackageRelativePath,
-    PluginEntrypoint, PluginManifest, PluginPackageId, PluginRevision, PluginVersion,
-    SdkVersionRequirement,
+    CapabilityId, CapabilityRequest, DriverConformanceCase, DriverConformanceSetupError,
+    PackageDigest, PackageRelativePath, PluginEntrypoint, PluginManifest, PluginPackageId,
+    PluginRevision, PluginVersion, SdkVersionRequirement,
 };
 
 /// The compiled fake worker, built by cargo beside this test binary.
@@ -35,7 +35,26 @@ pub(super) fn lifecycle_revision(name: &str, digest: char) -> PluginRevision {
     named_revision(&format!("test.proc.{name}"), digest).expect("lifecycle fixture is valid")
 }
 
+pub(super) fn capability_revision(name: &str, digest: char, capability: &str) -> PluginRevision {
+    revision_with_capabilities(
+        &format!("test.proc.{name}"),
+        digest,
+        vec![CapabilityRequest::new(
+            CapabilityId::new(capability).expect("fixture capability id is valid"),
+        )],
+    )
+    .expect("capability fixture is valid")
+}
+
 fn named_revision(package: &str, digest: char) -> Result<PluginRevision, String> {
+    revision_with_capabilities(package, digest, Vec::new())
+}
+
+fn revision_with_capabilities(
+    package: &str,
+    digest: char,
+    capabilities: Vec<CapabilityRequest>,
+) -> Result<PluginRevision, String> {
     let package = PluginPackageId::new(package)
         .map_err(|error| format!("fixture package ID is invalid: {error}"))?;
     let manifest = PluginManifest::new(
@@ -49,7 +68,7 @@ fn named_revision(package: &str, digest: char) -> Result<PluginRevision, String>
         },
         vec![],
         vec![],
-        vec![],
+        capabilities,
     )
     .map_err(|error| format!("fixture manifest invalid: {error}"))?;
     let digest = PackageDigest::new(format!("blake3:{}", digest.to_string().repeat(64)))

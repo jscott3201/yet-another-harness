@@ -12,7 +12,9 @@ use tokio::sync::mpsc;
 use yah_plugin_ipc::session::AppError;
 use yah_plugin_ipc::types::{CallId, CancelTarget, Outcome, StreamClass, WireError, WireErrorKind};
 
-use crate::dispatch::DispatchRequest;
+use crate::dispatch::{
+    DispatchRequest, DispatchWork, TEXT_CAPABILITY_ACQUIRE_METHOD, TEXT_CAPABILITY_INVOKE_METHOD,
+};
 use crate::endpoint::StreamFrame;
 
 impl super::Pump {
@@ -58,11 +60,38 @@ impl super::Pump {
             );
             return;
         };
+        let work = if method == TEXT_CAPABILITY_ACQUIRE_METHOD {
+            DispatchWork::CapabilityAcquire { payload }
+        } else if method == TEXT_CAPABILITY_INVOKE_METHOD {
+            let prepared = match crate::dispatch::decode_invoke(payload) {
+                Ok(prepared) => prepared,
+                Err(()) => {
+                    let _ = self
+                        .session
+                        .reply_to_worker(call_id, crate::dispatch::malformed_invoke());
+                    return;
+                }
+            };
+            let Some(capability) = self.capability_table.get(&prepared.handle).cloned() else {
+                let _ = self
+                    .session
+                    .reply_to_worker(call_id, crate::dispatch::unknown_handle());
+                return;
+            };
+            DispatchWork::CapabilityInvoke {
+                capability,
+                input: prepared.input,
+            }
+        } else {
+            DispatchWork::Application {
+                method: method.to_owned(),
+                payload,
+            }
+        };
         let cancellation = crate::dispatch::WorkerMethodCancellation::new(scope_cancellation);
         match dispatcher.try_send(DispatchRequest {
             call_id,
-            method: method.to_owned(),
-            payload,
+            work,
             cancellation: cancellation.clone(),
         }) {
             Ok(()) => {

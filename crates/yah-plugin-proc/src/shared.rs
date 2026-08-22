@@ -87,6 +87,13 @@ pub(crate) enum PumpCommand {
         bytes: Vec<u8>,
         done: oneshot::Sender<Result<(), AppError>>,
     },
+    /// Mint a capability handle and mirror its activation-local authority in
+    /// the pump-owned table only when the session mint succeeds.
+    MintCapability {
+        call_id: CallId,
+        capability: crate::dispatch::DispatchedTextCapability,
+        done: oneshot::Sender<Result<HandleId, AppError>>,
+    },
     /// Ask the worker to release a handle it offered (a spilled artifact)
     /// and wait for its acknowledgement. An admission refusal answers at
     /// once; a successful admission does not complete the waiter — the
@@ -150,6 +157,16 @@ pub struct PumpGauges {
     pub command_channel_capacity: usize,
 }
 
+/// Authority-free counts for the two sides of process capability bookkeeping.
+/// The terminal snapshot remains observable after the pump and its tables drop.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct CapabilityHandleGauges {
+    /// Live host-session handles of every kind, including artifacts.
+    pub session_live_handles: usize,
+    /// Text capability entries in the process activation's private table.
+    pub process_capability_entries: usize,
+}
+
 /// The pump's face toward the driver: nonblocking snapshots and a notifier.
 pub(crate) struct PumpShared {
     phase: AtomicU8,
@@ -181,6 +198,8 @@ pub(crate) struct PumpShared {
     outbound_capacity: AtomicUsize,
     pending_calls: AtomicUsize,
     pending_releases: AtomicUsize,
+    session_live_handles: AtomicUsize,
+    process_capability_entries: AtomicUsize,
     command_channel_capacity: usize,
     /// The item-channel capacity for stream calls: the negotiated credit
     /// ceiling. Credit never exceeds it, so lossless items can always be
@@ -228,6 +247,8 @@ impl PumpShared {
             outbound_capacity: AtomicUsize::new(0),
             pending_calls: AtomicUsize::new(0),
             pending_releases: AtomicUsize::new(0),
+            session_live_handles: AtomicUsize::new(0),
+            process_capability_entries: AtomicUsize::new(0),
             command_channel_capacity: limits.command_channel_capacity,
             stream_channel_capacity: max_stream_credit as usize,
         }
@@ -360,6 +381,19 @@ impl PumpShared {
 
     pub(crate) fn record_pending_releases(&self, count: usize) {
         self.pending_releases.store(count, Ordering::Release);
+    }
+
+    pub(crate) fn record_capability_handles(&self, session: usize, process: usize) {
+        self.session_live_handles.store(session, Ordering::Release);
+        self.process_capability_entries
+            .store(process, Ordering::Release);
+    }
+
+    pub fn capability_handle_gauges(&self) -> CapabilityHandleGauges {
+        CapabilityHandleGauges {
+            session_live_handles: self.session_live_handles.load(Ordering::Acquire),
+            process_capability_entries: self.process_capability_entries.load(Ordering::Acquire),
+        }
     }
 
     /// One consistent-enough snapshot of the memory gauges. The command

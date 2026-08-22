@@ -78,11 +78,11 @@ provider lifecycle.
 `try_with` is a trusted in-process contract seam, not a hostile-code sandbox.
 Capability contract authors must not return or clone raw authority that bypasses
 the handle. Runtime adapters map these semantics onto authenticated opaque
-resource tables rather than serialize process-local IDs: the Wasm driver now
-does exactly this for providers registered under the portable [`TextCapability`]
-contract, keeping behind each guest-held resource an entry that wraps an
-activation-scoped handle, so every guest call re-enters `try_with` and its
-gates. Process adapters will follow the same shape.
+resource tables rather than serialize process-local IDs. The Wasm driver keeps
+an activation-scoped handle behind each guest-held resource. The process driver
+now applies the same rule to [`TextCapability`]: its pump owns a table keyed by
+session-local wire handle names, and every invoke uses the broker handle stored
+there. Neither table index nor wire name is bearer authority.
 
 [`TextCapability`]: ../crates/yah-plugin-host/src/capability/text.rs
 
@@ -102,12 +102,10 @@ This slice does not implement:
 - async calls, streams, task supervision, deadlines, rate limits, or forced
   cancellation;
 - durable work-attempt identity or child invocation scopes;
-- a binding from this broker to any transport, production execution drivers,
-  or sandbox enforcement. The WIT encoding exists for the portable text
-  contract, and the [worker wire protocol](plugin-worker-protocol.md) defines
-  a handle encoding for future process lanes, but nothing mints a worker
-  handle from a real grant; richer or typed-per-capability encodings do not
-  exist;
+- transport bindings beyond the portable text contract. Wasm carries it through
+  its WIT resource, and the [worker wire protocol](plugin-worker-protocol.md)
+  carries it through two versioned worker calls plus the protocol's existing
+  release frame. Richer or typed-per-capability encodings do not exist;
 - provider cleanup ownership, durable external effects, or Selene persistence;
   or
 - automatic lifecycle changes after a host policy decision.

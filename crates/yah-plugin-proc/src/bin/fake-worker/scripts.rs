@@ -6,8 +6,19 @@ use yah_plugin_ipc::types::*;
 
 use super::Wire;
 
+#[path = "scripts/capability.rs"]
+mod capability;
 #[path = "scripts/spill.rs"]
 mod spill;
+
+pub use capability::{
+    acquire_probe as capability_acquire_probe, basic as capability_basic,
+    cancel_during as capability_cancel_during, cancel_queued as capability_cancel_queued,
+    handle_limit as capability_handle_limit,
+    malformed_and_unknown as capability_malformed_and_unknown,
+    provider_outcomes as capability_provider_outcomes, reclaim as capability_reclaim,
+    release_order as capability_release_order, replacement as capability_replacement,
+};
 
 pub use spill::{
     release_bogus_ack, release_die, release_goodbye, release_later, release_withhold, spill,

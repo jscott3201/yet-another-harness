@@ -170,14 +170,14 @@ impl ModelSession {
     }
 
     pub(super) fn reclaim_all_handles(&mut self) {
-        let mut count = 0;
+        let mut handles = Vec::new();
         for entry in std::mem::take(&mut self.handles) {
+            handles.push(entry.id);
             self.reclaimed_handles.push((entry.id, entry.kind));
             self.live_handles -= 1;
-            count += 1;
         }
-        if count > 0 {
-            self.events.push(EventFact::HandlesReclaimed { count });
+        if !handles.is_empty() {
+            self.events.push(EventFact::HandlesReclaimed { handles });
         }
     }
 

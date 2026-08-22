@@ -133,7 +133,8 @@ package loading and admission, the Node and Python process lanes (in
 progress — the [wire protocol](docs/plugin-worker-protocol.md) is
 fixture-pinned, and a supervised process driver now exposes an
 activation-scoped call/stream/artifact endpoint plus bounded registered host
-methods, but the Node and CPython SDKs do not exist yet), sandbox enforcement,
+methods and a real portable text-capability bridge, but the Node and CPython
+SDKs do not exist yet), sandbox enforcement,
 and the graph, memory, and session domains beyond the kernel. The Wasm lane
 bounds a guest's cost, not its authority:
 guest code still runs in the host process, and no sandbox claim is made.
@@ -157,8 +158,8 @@ plugin model spans the execution lanes; the isolation mechanism differs:
 |---|---|---|---|
 | Built-in Rust | landed | First-party components and trusted integrations | Statically linked Rust traits |
 | Wasm Component | landed | Portable third-party plugins | Wasmtime, WIT imports/exports, explicit limits |
-| Node.js / TypeScript | protocol, process driver, and production endpoint landed | Modern ESM plugins after package and containment policy land | Future ESM-first SDK over the [process protocol](docs/plugin-worker-protocol.md); no worker SDK or sandbox exists |
-| CPython | protocol, process driver, and production endpoint landed | Modern Python plugins after package and containment policy land | Future CPython worker and SDK over the process protocol; no worker SDK or sandbox exists |
+| Node.js / TypeScript | protocol, process driver, endpoint, and host text-capability bridge landed | Modern ESM plugins after package and containment policy land | Future ESM-first SDK over the [process protocol](docs/plugin-worker-protocol.md); no worker SDK or sandbox exists |
+| CPython | protocol, process driver, endpoint, and host text-capability bridge landed | Modern Python plugins after package and containment policy land | Future CPython worker and SDK over the process protocol; no worker SDK or sandbox exists |
 | Native embedding | later, optional | Foreign-language applications embedding the Rust library | Optional UniFFI bindings; not a plugin sandbox or universal plugin ABI |
 | Browser / JS host | later, optional | Rust-backed web and JavaScript utilities | Optional `wasm-bindgen` surface |
 
