@@ -23,13 +23,16 @@ use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::{mpsc, oneshot, watch};
 use yah_compose::ScopeCancellation;
+use yah_plugin_host::PluginStartContext;
 use yah_plugin_ipc::session::{AppError, HostSession, SessionEvent};
 use yah_plugin_ipc::types::*;
 use yah_plugin_ipc::{frame, session::SessionConfig};
 
 use crate::ProcLimits;
 use crate::bootstrap::SpawnedWorker;
-use crate::dispatch::{self, DispatchRequest, WorkerMethodCancellation, WorkerMethodRegistry};
+use crate::dispatch::{
+    self, DispatchRequest, DispatchedTextCapability, WorkerMethodCancellation, WorkerMethodRegistry,
+};
 use crate::endpoint::StreamFrame;
 use crate::shared::{
     CallEnd, DiagnosticStream, PumpCommand, PumpShared, ReleaseEnd, drain_diagnostics, kind_label,
@@ -99,10 +102,11 @@ pub(crate) struct PumpHandle {
 pub(crate) fn start(
     worker: SpawnedWorker,
     config: SessionConfig,
-    scope_cancellation: ScopeCancellation,
+    context: PluginStartContext,
     methods: WorkerMethodRegistry,
     mut limits: ProcLimits,
 ) -> PumpHandle {
+    let scope_cancellation = context.cancellation().clone();
     // The cap accuses a worker of not draining, so it must never sit under
     // one frame the session itself admits: a bound below that would kill a
     // conformant worker for a frame it was never given the chance to read.
@@ -128,7 +132,7 @@ pub(crate) fn start(
     // command channel only weakly: it can never keep an abandoned
     // activation's pump alive.
     let dispatcher = dispatch::spawn(
-        scope_cancellation.clone(),
+        context,
         commands.downgrade(),
         limits.dispatch_queue_capacity,
         limits.provider_concurrency,
@@ -145,6 +149,7 @@ pub(crate) fn start(
         streams: HashMap::new(),
         dispatcher: Some(dispatcher),
         worker_cancellations: HashMap::new(),
+        capability_table: HashMap::new(),
         pending_releases: HashMap::new(),
         outbuf: Vec::new(),
         output_open: true,
@@ -183,6 +188,10 @@ struct Pump {
     /// Cooperative cancellation views for worker calls still owned by the
     /// application lane. The callback receives a clone, never this table.
     worker_cancellations: HashMap<CallId, WorkerMethodCancellation>,
+    /// Host capability authority behind worker-visible handle names. The pump
+    /// alone mutates this table and clones an entry while routing an invoke,
+    /// before any later release frame can remove it.
+    capability_table: HashMap<HandleId, DispatchedTextCapability>,
     /// Encoded frames awaiting the socket. Progress on it is a `select!`
     /// arm, so transport back-pressure never stalls the rest of the pump.
     outbuf: Vec<u8>,
@@ -387,6 +396,15 @@ impl Pump {
                         }
                         let _ = done.send(result);
                     }
+                    Some(PumpCommand::MintCapability { call_id, capability, done }) => {
+                        let minted = self.session.mint_capability_handle(call_id);
+                        if let Ok(handle) = minted {
+                            self.capability_table.insert(handle, capability);
+                            let _ = done.send(Ok(handle));
+                        } else {
+                            let _ = done.send(minted);
+                        }
+                    }
                     Some(PumpCommand::ReleaseWorkerHandle { handle, done }) => {
                         // The only handle the host asks a worker to release
                         // is one the worker offered: a spilled artifact.
@@ -493,7 +511,16 @@ impl Pump {
         for event in events {
             match event {
                 SessionEvent::Negotiated { .. } => self.shared.set_active(),
-                SessionEvent::HandleReleased { .. } | SessionEvent::HandlesReclaimed { .. } => {}
+                SessionEvent::HandleReleased { handle, kind } => {
+                    if kind == HandleKind::Capability {
+                        self.capability_table.remove(&handle);
+                    }
+                }
+                SessionEvent::HandlesReclaimed { handles } => {
+                    for handle in handles {
+                        self.capability_table.remove(&handle);
+                    }
+                }
                 SessionEvent::WorkerHandleReleased { handle, .. } => {
                     // The ack is the only thing that turns an admitted
                     // release into reported success.
@@ -590,6 +617,10 @@ impl Pump {
                 _ => {}
             }
         }
+        self.shared.record_capability_handles(
+            self.session.live_handles() as usize,
+            self.capability_table.len(),
+        );
     }
 
     /// Settle every outstanding release waiter as lost — no ack will

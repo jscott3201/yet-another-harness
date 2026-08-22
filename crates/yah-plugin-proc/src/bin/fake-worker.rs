@@ -502,6 +502,18 @@ fn run(mode: &str, wire: &mut Wire) -> i32 {
         "registered-cancel-queued" => scripts::registered_cancel_queued(wire),
         "registered-panic" => scripts::registered_panic(wire),
         "registered-failure" => scripts::registered_failure(wire),
+        "capability-basic" => scripts::capability_basic(wire),
+        "capability-acquire-probe" => scripts::capability_acquire_probe(wire),
+        "capability-replacement" => scripts::capability_replacement(wire),
+        "capability-provider-outcomes" => scripts::capability_provider_outcomes(wire),
+        "capability-malformed" => scripts::capability_malformed_and_unknown(wire),
+        "capability-handle-limit" => scripts::capability_handle_limit(wire),
+        "capability-release-order" => scripts::capability_release_order(wire),
+        "capability-cancel-queued" => scripts::capability_cancel_queued(wire),
+        "capability-cancel-during" => scripts::capability_cancel_during(wire),
+        m if m.starts_with("capability-reclaim:") => {
+            scripts::capability_reclaim(wire, m.split(':').nth(1).unwrap_or("deactivate"))
+        }
         m if m.starts_with("registered-flood:") => {
             let count = m
                 .split(':')

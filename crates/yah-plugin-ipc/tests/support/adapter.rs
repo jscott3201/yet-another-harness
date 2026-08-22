@@ -458,7 +458,9 @@ fn event_fact(event: SessionEvent) -> EventFact {
             handle: handle.0,
             kind: fact_kind(kind),
         },
-        SessionEvent::HandlesReclaimed { count } => EventFact::HandlesReclaimed { count },
+        SessionEvent::HandlesReclaimed { handles } => EventFact::HandlesReclaimed {
+            handles: handles.into_iter().map(|handle| handle.0).collect(),
+        },
         SessionEvent::WorkerGoodbye { .. } => EventFact::WorkerGoodbye,
         SessionEvent::CallRefused { call_id, kind } => EventFact::CallRefused {
             call_id: call_id.0,

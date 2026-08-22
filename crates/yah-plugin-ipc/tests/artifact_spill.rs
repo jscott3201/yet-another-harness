@@ -481,12 +481,14 @@ fn a_read_is_admitted_through_the_same_ceiling_as_any_call() {
 #[test]
 fn a_disconnect_reclaims_an_offer_that_was_never_closed() {
     let mut session = peer::negotiated();
-    let _offer = spilled(&mut session, &[5; 32]);
+    let offer = spilled(&mut session, &[5; 32]);
     assert_eq!(session.live_handles(), 1);
     session.end_of_input();
     let events = session.drain_events();
     assert!(
-        events.contains(&SessionEvent::HandlesReclaimed { count: 1 }),
+        events.contains(&SessionEvent::HandlesReclaimed {
+            handles: vec![offer.handle],
+        }),
         "the close that never came is the host's job now: {events:?}"
     );
     assert_eq!(session.live_handles(), 0);

@@ -32,7 +32,8 @@ mod pump;
 mod shared;
 
 pub use dispatch::{
-    WorkerMethod, WorkerMethodCancellation, WorkerMethodFailure, WorkerMethodFailureCode,
+    TEXT_CAPABILITY_ACQUIRE_METHOD, TEXT_CAPABILITY_INVOKE_METHOD, WorkerMethod,
+    WorkerMethodCancellation, WorkerMethodFailure, WorkerMethodFailureCode,
     WorkerMethodRegistrationError, WorkerMethodRegistry, WorkerMethodRequest, WorkerMethodResult,
     WorkerMethodResultError,
 };
@@ -41,7 +42,7 @@ pub use endpoint::{
     ActivationEndpoint, ArtifactReader, Availability, CallTerminal, EndpointError, PendingCall,
     Refusal, StreamCall, StreamFrame,
 };
-pub use shared::{CallEnd, DiagnosticStream};
+pub use shared::{CallEnd, CapabilityHandleGauges, DiagnosticStream};
 
 /// The file descriptor the worker's protocol channel arrives on.
 ///

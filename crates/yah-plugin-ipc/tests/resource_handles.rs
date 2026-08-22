@@ -157,7 +157,7 @@ fn releasing_with_the_wrong_kind_is_fatal() {
 fn a_failed_minting_call_reclaims_what_it_briefly_held() {
     let mut session = peer::negotiated();
     let serving = in_flight_call(&mut session, 1);
-    let _handle = session.mint_capability_handle(serving).expect("minted");
+    let handle = session.mint_capability_handle(serving).expect("minted");
     assert_eq!(session.live_handles(), 1);
     // The acquire failed after the grant was staged: the err terminal must
     // not leak the handle to a worker that never learned it existed.
@@ -176,7 +176,9 @@ fn a_failed_minting_call_reclaims_what_it_briefly_held() {
         .expect("err reply goes out");
     assert_eq!(
         session.drain_events(),
-        vec![SessionEvent::HandlesReclaimed { count: 1 }]
+        vec![SessionEvent::HandlesReclaimed {
+            handles: vec![handle],
+        }]
     );
     assert_eq!(session.live_handles(), 0);
     assert!(
@@ -189,7 +191,12 @@ fn a_failed_minting_call_reclaims_what_it_briefly_held() {
 fn a_disconnect_reclaims_every_live_handle() {
     let mut session = peer::negotiated();
     let serving = in_flight_call(&mut session, 1);
-    let _handle = session.mint_capability_handle(serving).expect("minted");
+    let first = session
+        .mint_capability_handle(serving)
+        .expect("first minted");
+    let second = session
+        .mint_capability_handle(serving)
+        .expect("second minted");
     session
         .reply_to_worker(
             serving,
@@ -198,11 +205,13 @@ fn a_disconnect_reclaims_every_live_handle() {
             },
         )
         .expect("grant reply goes out");
-    assert_eq!(session.live_handles(), 1);
+    assert_eq!(session.live_handles(), 2);
     session.end_of_input();
     let events = session.drain_events();
     assert!(
-        events.contains(&SessionEvent::HandlesReclaimed { count: 1 }),
+        events.contains(&SessionEvent::HandlesReclaimed {
+            handles: vec![first, second],
+        }),
         "the release frames that will never come are the host's job: {events:?}"
     );
     assert_eq!(session.live_handles(), 0);

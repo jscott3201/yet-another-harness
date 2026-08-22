@@ -30,11 +30,10 @@ use std::sync::{
 use std::time::Duration;
 
 use tokio::sync::mpsc;
-use yah_compose::ScopeCancellation;
 use yah_plugin_host::{
     DriverActivationError, DriverDeactivationError, DriverFuture, DriverHealthError, DriverKind,
     DriverPrepareError, DriverStartPermit, DriverStopPermit, PluginActivationId,
-    PluginActivationRequest, PluginDriver, PluginHealth, PluginRevisionId,
+    PluginActivationRequest, PluginDriver, PluginHealth, PluginRevisionId, PluginStartContext,
     PreparedDriverActivation,
 };
 use yah_plugin_ipc::session::SessionConfig;
@@ -44,6 +43,7 @@ use crate::bootstrap::{WorkerCommand, spawn_worker};
 use crate::dispatch::WorkerMethodRegistry;
 use crate::endpoint::{ActivationEndpoint, EndpointError, activation_endpoint, admission_gate};
 use crate::pump;
+use crate::shared::CapabilityHandleGauges;
 use crate::shared::{DiagnosticStream, PumpCommand, PumpGauges, PumpShared};
 
 type ObservationMap = HashMap<PluginActivationId, Arc<ActivationObservation>>;
@@ -356,7 +356,7 @@ impl ActivationCore {
     async fn boot(
         &self,
         handshake: HandshakeBehavior,
-        cancellation: ScopeCancellation,
+        context: PluginStartContext,
     ) -> Result<(), DriverActivationError> {
         let worker = spawn_worker(&self.command).map_err(|error| {
             DriverActivationError::failed(format!("worker did not spawn: {error}"))
@@ -365,13 +365,7 @@ impl ActivationCore {
             retired_operation_budget: self.limits.retired_operation_budget,
             ..SessionConfig::default()
         };
-        let handle = pump::start(
-            worker,
-            config,
-            cancellation,
-            self.methods.clone(),
-            self.limits,
-        );
+        let handle = pump::start(worker, config, context, self.methods.clone(), self.limits);
         let shared = Arc::clone(&handle.shared);
         self.observation.attach(&handle);
         {
@@ -475,8 +469,8 @@ impl PreparedDriverActivation for PreparedProcActivation {
                     "host start permit did not match the prepared activation",
                 ));
             }
-            let cancellation = permit.context().cancellation().clone();
-            core.boot(handshake, cancellation).await
+            let context = permit.context().clone();
+            core.boot(handshake, context).await
         })
     }
 
@@ -560,7 +554,10 @@ struct ActivationObservation {
 enum ObservationLink {
     Idle,
     Live(ActivationLink),
-    Retired { close_summary: Option<String> },
+    Retired {
+        close_summary: Option<String>,
+        capability_handles: CapabilityHandleGauges,
+    },
 }
 
 #[derive(Clone)]
@@ -598,6 +595,7 @@ impl ActivationObservation {
         if let ObservationLink::Live(link) = &*held {
             *held = ObservationLink::Retired {
                 close_summary: link.shared.close_summary(),
+                capability_handles: link.shared.capability_handle_gauges(),
             };
         }
     }
@@ -624,7 +622,7 @@ impl ActivationObservation {
         {
             ObservationLink::Idle => None,
             ObservationLink::Live(_) => None,
-            ObservationLink::Retired { close_summary } => Some(close_summary.clone()),
+            ObservationLink::Retired { close_summary, .. } => Some(close_summary.clone()),
         }
     }
 
@@ -640,7 +638,7 @@ impl ActivationObservation {
         {
             ObservationLink::Idle => None,
             ObservationLink::Live(link) => link.shared.close_summary(),
-            ObservationLink::Retired { close_summary } => close_summary.clone(),
+            ObservationLink::Retired { close_summary, .. } => close_summary.clone(),
         }
     }
 
@@ -724,6 +722,27 @@ impl ProcObserver {
         let link = self.observation(id)?.link()?;
         let available = link.commands.upgrade().map(|sender| sender.capacity());
         Some(link.shared.gauges(available))
+    }
+
+    /// Live or terminal capability bookkeeping counts for one activation.
+    /// Values are observations only: neither count exposes a handle or keeps
+    /// the session, broker, provider, or activation alive.
+    pub fn capability_handle_gauges(
+        &self,
+        id: &PluginActivationId,
+    ) -> Option<CapabilityHandleGauges> {
+        let observation = self.observation(id)?;
+        match &*observation
+            .link
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+        {
+            ObservationLink::Idle => None,
+            ObservationLink::Live(link) => Some(link.shared.capability_handle_gauges()),
+            ObservationLink::Retired {
+                capability_handles, ..
+            } => Some(*capability_handles),
+        }
     }
 
     fn observation(&self, id: &PluginActivationId) -> Option<Arc<ActivationObservation>> {

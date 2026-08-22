@@ -109,10 +109,11 @@ contract itself states no deadline. These layers do not implement
 package loading or admission, policy/approval evaluation, configuration
 delivery, general component callbacks, recurring health checks, restart/backoff
 policy, task supervision, WIT execution/resource transport, sandboxing, or
-durable activation identity or work-attempt fencing. Portable nonempty capability
-transport, guest ABI behavior, backend containment, and multi-runtime
+durable activation identity or work-attempt fencing. Portable nonempty
+capability transport now has Wasm and process-host evidence for the text
+contract, but worker SDK behavior, backend containment, and multi-runtime
 equivalence remain later evidence profiles. Invocation and draining remain
-driver-specific; the process endpoint does not add methods to this lifecycle
+driver-specific; the process capability methods do not change this lifecycle
 contract. A separate
 [WIT draft](wasm-plugin-contract.md) fixes the first host/guest binding shape,
 and a Wasmtime driver now passes this same corpus against it.

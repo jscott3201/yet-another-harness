@@ -91,7 +91,7 @@ pub enum EventFact {
         kind: Kind,
     },
     HandlesReclaimed {
-        count: u32,
+        handles: Vec<u64>,
     },
     WorkerGoodbye,
     CallRefused {

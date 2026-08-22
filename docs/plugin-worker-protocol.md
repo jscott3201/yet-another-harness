@@ -267,6 +267,37 @@ passes it on the wire, so a release naming a reclaimed id is answered with
 the ordinary ack rather than a fault — the ack spends the id, and a second
 release for it is the double-release desync again.
 
+## Portable text capability service
+
+The process driver reserves two versioned worker-call methods. Application
+registrations cannot replace them:
+
+- `yah.capability.text.acquire/v1` takes exactly
+  `{"capability":"<CapabilityId>"}`.
+- `yah.capability.text.invoke/v1` takes exactly
+  `{"handle":<HandleId>,"input":"<text>"}`.
+
+Unknown members make that call an `invalid-frame` wire error. Acquire success is
+`{"ok":{"handle":<HandleId>}}`; invoke success is
+`{"ok":{"output":"<text>"}}`. Capability-domain failures remain inside an
+`ok` outcome as
+`{"error":{"code":"<stable-code>","message":"<bounded text>"}}`. Acquire
+uses `invalid-id`, `not-granted`, `revoked`, `unavailable`, `mismatched`,
+`handle-limit`, and `exhausted`. Invoke uses `revoked`, `exhausted`,
+`invalid-input`, and `failed`. Provider-authored failure text is clipped to 512
+characters. Broker identities, activation identities, Rust contract types, and
+malformed worker text do not cross the boundary.
+
+An unknown, forged, released, or wrong-kind capability handle is a call-local
+`unknown-handle` wire error. It does not poison the session. Capability output
+never spills to an artifact: if the complete method result cannot enter the
+64-KiB inline lane, invoke returns domain `exhausted` with static text.
+
+Release has no capability method. The worker sends the existing `release`
+control frame with kind `capability`; the host removes the exact table entry and
+answers with `release-ack`. Handle names are monotonic and local to one session.
+They prevent reuse races but are neither unguessable nor bearer authority.
+
 ## Cancellation and loss
 
 A cancelled call still terminates: the worker acknowledges a `cancel` by
@@ -376,6 +407,15 @@ they do not receive the session, pump, endpoint, or command sender. Results
 return through pump-owned session mutation. Unknown methods and queue overflow
 receive host-authored bounded errors that do not reflect worker text.
 
+The two text-capability methods use that same bounded dispatch queue and
+provider semaphore. The pump remains the only session mutator and owns the
+capability table. It clones an invoke's table entry while routing the call, so an
+invoke frame before a later release may finish, while a call after the release
+ack cannot find the handle. Minting returns through a pump command; the pump
+adds the table entry only after `HostSession` accepts the handle. Exact release
+and reclamation events remove the matching entries. Read-only terminal gauges
+retain only the final session-handle and process-table counts.
+
 The endpoint can pull a worker-spilled result through `artifact.read`, verify
 every declared byte, chunk length, media type, canonical lowercase ASCII hex,
 and the whole-object BLAKE3 digest, then wait for acknowledgement of explicit
@@ -402,8 +442,7 @@ to a process the host did not spawn, and no current scenario does that.
   by default; a budget-less session still grows with call count for its
   lifetime. The budget retires new admissions, it never forgets: no
   protocol mechanism for forgetting exists.
-- Any binding from the capability broker to these handles. The wire encoding
-  for a brokered resource exists; nothing yet mints one from a real grant.
-- Worker-side enforcement evidence. The fixtures drive the host session
-  only; a worker SDK must pass its own conformance against the same corpus
-  shape.
+- Any capability family beyond the portable text contract.
+- Worker SDK enforcement evidence. The Rust fake worker exercises the real
+  process and host bridge, but it is not a Node or CPython SDK. Each SDK must
+  pass its own conformance against the same contract.
