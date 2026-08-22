@@ -23,7 +23,7 @@
 //! outcome-unknown. A decoder panic or a hang on half a frame is exactly
 //! the failure mode this module exists to make unrepresentable.
 
-use crate::MAX_FRAME_BYTES;
+use crate::{FRAME_PREFIX_BYTES, MAX_FRAME_BYTES};
 
 /// Prefix a serialized frame for the wire.
 ///
@@ -36,7 +36,7 @@ pub fn encode(frame: &[u8]) -> Vec<u8> {
         frame.len(),
         MAX_FRAME_BYTES
     );
-    let mut wire = Vec::with_capacity(4 + frame.len());
+    let mut wire = Vec::with_capacity(FRAME_PREFIX_BYTES + frame.len());
     wire.extend_from_slice(
         &u32::try_from(frame.len())
             .expect("bounded above")
@@ -97,7 +97,7 @@ impl FrameDecoder {
         if let Some(error) = &self.poisoned {
             return Err(error.clone());
         }
-        if self.buffer.len() < 4 {
+        if self.buffer.len() < FRAME_PREFIX_BYTES {
             return Ok(None);
         }
         let declared = u32::from_be_bytes([
@@ -114,11 +114,11 @@ impl FrameDecoder {
                 declared: declared as u64,
             }));
         }
-        if self.buffer.len() < 4 + declared {
+        if self.buffer.len() < FRAME_PREFIX_BYTES + declared {
             return Ok(None);
         }
-        let frame = self.buffer[4..4 + declared].to_vec();
-        self.buffer.drain(..4 + declared);
+        let frame = self.buffer[FRAME_PREFIX_BYTES..FRAME_PREFIX_BYTES + declared].to_vec();
+        self.buffer.drain(..FRAME_PREFIX_BYTES + declared);
         Ok(Some(frame))
     }
 
@@ -153,7 +153,7 @@ impl FrameDecoder {
         if self.buffer.is_empty() {
             return EndOfInput::Clean;
         }
-        if self.buffer.len() < 4 {
+        if self.buffer.len() < FRAME_PREFIX_BYTES {
             return EndOfInput::TruncatedPrefix {
                 have: self.buffer.len(),
             };
@@ -166,7 +166,7 @@ impl FrameDecoder {
         ]) as usize;
         EndOfInput::TruncatedFrame {
             declared,
-            have: self.buffer.len() - 4,
+            have: self.buffer.len() - FRAME_PREFIX_BYTES,
         }
     }
 
