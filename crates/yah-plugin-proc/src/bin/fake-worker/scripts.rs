@@ -9,6 +9,14 @@ use super::Wire;
 
 /// Acquire, invoke, and release one granted text capability through
 /// the dispatcher, reporting each step on stdout.
+#[path = "scripts/spill.rs"]
+mod spill;
+
+pub use spill::{
+    release_ack_wrong_kind, release_bogus_ack, release_die, release_goodbye, release_later,
+    release_withhold, spill, spill_poison,
+};
+
 pub fn capability_cycle(wire: &mut Wire, capability: &str) -> i32 {
     if !wire.handshake() {
         return 70;
@@ -256,6 +264,19 @@ pub fn stream_items(wire: &mut Wire, count: u64) -> i32 {
                 Some(HostMessage::Credit(credit_frame)) if credit_frame.call_id == call_id => {
                     credit += credit_frame.additional;
                 }
+                // A stream cancel means the consumer stopped listening:
+                // stop producing and answer at once.
+                Some(HostMessage::Cancel(cancel))
+                    if cancel.call_id == call_id && cancel.target == CancelTarget::Stream =>
+                {
+                    wire.send(&WorkerMessage::Reply(Reply {
+                        call_id,
+                        outcome: Outcome::Cancelled {
+                            reason: CancelReason::Requested,
+                        },
+                    }));
+                    return 0;
+                }
                 Some(HostMessage::Goodbye(_)) | None => return 0,
                 Some(_) => {}
             }
@@ -343,81 +364,134 @@ pub fn capability_flood(wire: &mut Wire, count: u64) -> i32 {
     super::serve_conformant(wire)
 }
 
-/// Answer the first call with a spilled offer held worker-side, then
-/// serve pull reads until goodbye.
-pub fn spill(wire: &mut Wire, bytes: usize) -> i32 {
+/// Open the host's stream, spend the announced initial credit on lossless
+/// items, then stop and report every Credit frame the host grants. The
+/// overgrant detector: a correct host grants nothing until this worker's
+/// consumer drains, and exactly what it drains after.
+pub fn stream_stall(wire: &mut Wire, initial_credit: u32) -> i32 {
     if !wire.handshake() {
         return 70;
     }
-    // The worker's own bytes, pattern-filled so corruption is
-    // detectable beyond the digest alone.
-    let payload: Vec<u8> = (0..bytes).map(|i| (i % 251) as u8).collect();
-    let digest = blake3::hash(&payload).to_hex().to_string();
-    // The first call gets the spilled offer; the worker keeps the
-    // bytes and serves pull reads behind the handle.
-    let handle = loop {
+    let call_id = loop {
         match wire.next_frame() {
-            Some(HostMessage::Call(call)) => {
-                wire.send(&WorkerMessage::Reply(Reply {
-                    call_id: call.call_id,
-                    outcome: Outcome::Spilled {
-                        artifact: ArtifactOffer {
-                            handle: HandleId(7),
-                            bytes: bytes as u64,
-                            media_type: "application/octet-stream".to_owned(),
-                            digest_blake3: digest.clone(),
-                        },
-                    },
-                }));
-                break HandleId(7);
-            }
+            Some(HostMessage::Call(call)) if call.stream => break call.call_id,
             Some(HostMessage::Goodbye(_)) | None => return 0,
             Some(_) => {}
         }
     };
-    // Serve pull reads until the host says goodbye.
+    wire.send(&WorkerMessage::StreamOpen(StreamOpen {
+        call_id,
+        credit: initial_credit,
+    }));
+    let mut credit = initial_credit;
+    for seq in 0..initial_credit {
+        while credit == 0 {
+            match wire.next_frame() {
+                Some(HostMessage::Cancel(cancel))
+                    if cancel.call_id == call_id && cancel.target == CancelTarget::Stream =>
+                {
+                    return answer_cancelled(wire, call_id);
+                }
+                Some(HostMessage::Credit(f)) if f.call_id == call_id => credit += f.additional,
+                Some(HostMessage::Goodbye(_)) | None => return 0,
+                Some(_) => {}
+            }
+        }
+        credit -= 1;
+        wire.send(&WorkerMessage::StreamData(StreamData {
+            call_id,
+            seq: u64::from(seq),
+            more: true,
+            class: StreamClass::Lossless,
+            dropped: 0,
+            payload: serde_json::json!({ "n": seq }),
+        }));
+    }
+    println!("stall:sent:{initial_credit}");
+    std::io::Write::flush(&mut std::io::stdout()).ok();
     loop {
         match wire.next_frame() {
-            Some(HostMessage::Call(call)) => {
-                let read: Result<serde_json::Value, _> =
-                    serde_json::from_value(call.payload.clone());
-                let chunk = read.ok().and_then(|value| {
-                    let offset = value["offset"].as_u64()? as usize;
-                    let len = value["len"].as_u64()? as usize;
-                    payload
-                        .get(offset..offset + len)
-                        .map(|slice| slice.iter().map(|b| format!("{b:02x}")).collect::<String>())
-                });
-                match chunk {
-                    Some(hex) => wire.send(&WorkerMessage::Reply(Reply {
-                        call_id: call.call_id,
-                        outcome: Outcome::Ok {
-                            result: serde_json::json!({
-                                "bytes_hex": hex,
-                                "media_type": "application/octet-stream",
-                            }),
-                        },
-                    })),
-                    None => wire.send(&WorkerMessage::Reply(Reply {
-                        call_id: call.call_id,
-                        outcome: Outcome::Err {
-                            error: WireError {
-                                kind: WireErrorKind::InvalidRead,
-                                message: "read outside the offered range".to_owned(),
-                                retryable: false,
-                                reconcile_required: false,
-                            },
-                        },
-                    })),
-                }
+            Some(HostMessage::Credit(frame)) if frame.call_id == call_id => {
+                println!("stall:credit:{}", frame.additional);
+                std::io::Write::flush(&mut std::io::stdout()).ok();
             }
-            Some(HostMessage::Release(release)) if release.handle == handle => {
-                // Acknowledge the explicit release the host owes a
-                // spilled handle.
-                wire.send(&WorkerMessage::ReleaseAck(ReleaseAck {
-                    handle: release.handle,
-                    kind: release.kind,
-                }));
+            Some(HostMessage::Cancel(cancel))
+                if cancel.call_id == call_id && cancel.target == CancelTarget::Stream =>
+            {
+                return answer_cancelled(wire, call_id);
+            }
+            Some(HostMessage::Goodbye(_)) | None => return 0,
+            Some(_) => {}
+        }
+    }
+}
+
+fn answer_cancelled(wire: &mut Wire, call_id: CallId) -> i32 {
+    wire.send(&WorkerMessage::Reply(Reply {
+        call_id,
+        outcome: Outcome::Cancelled {
+            reason: CancelReason::Requested,
+        },
+    }));
+    0
+}
+
+/// Open the host's stream, flood `count` lossy items past any window,
+/// then send one final credited lossless item before the terminal. The
+/// reservation detector: a host that lets lossy frames eat capacity
+/// reserved for outstanding credit drops the final lossless frame.
+pub fn stream_lossy_flood(wire: &mut Wire, count: u64) -> i32 {
+    if !wire.handshake() {
+        return 70;
+    }
+    let call_id = loop {
+        match wire.next_frame() {
+            Some(HostMessage::Call(call)) if call.stream => break call.call_id,
+            Some(HostMessage::Goodbye(_)) | None => return 0,
+            Some(_) => {}
+        }
+    };
+    wire.send(&WorkerMessage::StreamOpen(StreamOpen {
+        call_id,
+        credit: 4,
+    }));
+    for seq in 0..count {
+        wire.send(&WorkerMessage::StreamData(StreamData {
+            call_id,
+            seq,
+            more: true,
+            class: StreamClass::Lossy,
+            dropped: 0,
+            payload: serde_json::json!({ "n": seq }),
+        }));
+    }
+    wire.send(&WorkerMessage::StreamData(StreamData {
+        call_id,
+        seq: count,
+        more: false,
+        class: StreamClass::Lossless,
+        dropped: 0,
+        payload: serde_json::json!({ "final": true }),
+    }));
+    // Exactly one terminal still ends the call.
+    wire.send(&WorkerMessage::Reply(Reply {
+        call_id,
+        outcome: Outcome::Ok {
+            result: serde_json::json!({ "streamed": count }),
+        },
+    }));
+    println!("flood:sent:{count}");
+    std::io::Write::flush(&mut std::io::stdout()).ok();
+    // Stay connected without speaking again — a second handshake would
+    // fault the session and drown the evidence this script exists for.
+    // A stream cancel is answered, though: a muted consumer ends the
+    // stream half and the call still owes its terminal.
+    loop {
+        match wire.next_frame() {
+            Some(HostMessage::Cancel(cancel))
+                if cancel.call_id == call_id && cancel.target == CancelTarget::Stream =>
+            {
+                return answer_cancelled(wire, call_id);
             }
             Some(HostMessage::Goodbye(_)) | None => return 0,
             Some(_) => {}

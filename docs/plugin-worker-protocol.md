@@ -163,9 +163,10 @@ byte-bounded, so frame count is the dimension a hostile producer could still
 flood. `lossless` items spend credit and exceeding the window is fatal;
 `lossy` items (progress, logs) spend none but must carry a monotonic count
 of what was dropped. The count rides data frames and nothing else: drops
-recorded after a stream's final item are refused on the recording side,
-and drops recorded before a terminal that follows with no further item are
-lost — the gap information has no frame left to travel on. `credit`
+recorded after a stream's final item are refused on the recording side.
+A recording host must surface its own final local drops through the call's
+terminal metadata rather than waiting for a frame that may never come.
+`credit`
 frames widen the window up to the
 `max_stream_credit` ceiling the accept announced (1024 by default) — a
 bound on the outstanding, unspent window at any moment, not on the sum of
@@ -374,15 +375,20 @@ completes the call with whatever outcome the worker sent (a domain failure
 is data inside it), while deadline expiry, a goodbye, and a bare disconnect
 settle into distinct loss kinds that say whether reconciliation is owed.
 Stream calls deliver the worker's framed items through a channel bounded at
-the negotiated credit ceiling — a slow consumer throttles the worker through
-the credit window instead of growing host memory, and the host re-grants
-what the consumer drains each tick — while the terminal still lands exactly
-once. Dropping the item receiver mutes delivery and cancels the stream half;
-it never cancels the terminal. One honest corner: a lossy flood can fill
-every item-channel slot, forcing the host to drop a lossless item it had
-granted credit for — the drop is declared in the next frame's cumulative
-drop count rather than hidden, and consumers must treat any nonzero drop
-count as a possible gap.
+the negotiated credit ceiling under one conservation law: **frames queued in
+the delivery channel plus outstanding lossless credit never exceed the
+channel's capacity.** Grants replace only frames the consumer has actually
+drained — free slots that were never filled earn nothing, however often the
+clock ticks — so a slow consumer is throttled by exactly the window it has
+not consumed, and a within-credit lossless frame always finds a slot on
+arrival. Lossy frames spend no credit, so they are admitted only into
+capacity no outstanding lossless credit is reserved against; past that they
+drop locally, declared in every later frame's cumulative `dropped` count and
+mirrored into a counter that survives the terminal (`local_drops`), because
+a drop followed immediately by the end of the stream would otherwise have no
+frame left to ride. Dropping the item receiver mutes delivery and cancels
+the stream half; it never cancels the terminal, and awaiting the terminal
+without draining cannot wedge.
 
 Worker-to-host calls are routed to a bounded application dispatcher built
 from the start permit's capability context. The pump never runs provider
@@ -403,11 +409,17 @@ the one Wasm-lane exception that a provider's own refusal text is its
 caller-facing contract.
 
 A spilled result pull-reads through the endpoint behind its digest-carrying
-offer: size and digest are checked before the first pull, chunks are bounded
-at the protocol's per-read bound, the accumulated bytes are verified against
-the BLAKE3 claim (a claim to check, never provenance), and the handle is
-released explicitly — the one handle the host asks a worker to release,
-answered by the worker's acknowledgement.
+offer: size and digest are checked before the first pull (zero-byte offers
+are illegal), chunks are bounded at the protocol's per-read bound and their
+length must agree with the request, each reply's redundant media type must
+agree with the offer rather than be ignored, hex payloads are accepted only
+in canonical form — ASCII lowercase `[0-9a-f]`, even length, nothing else —
+and verification refuses until every declared byte has been read, so a
+digest over an empty or short prefix proves nothing. The handle is then
+released explicitly — the one handle the host asks a worker to release —
+and success is reported only when the worker's acknowledgement names the
+handle; a goodbye, disconnect, fault, or teardown before the ack settles
+the caller with a typed loss instead.
 
 The pathname-socket lane with kernel-attested peer credentials
 (`getpeereid`, `SO_PEERCRED`) is deliberately absent: it exists to attach

@@ -100,9 +100,14 @@ impl super::Pump {
     }
 
     /// Deliver one validated stream item toward the call's consumer.
-    /// Credit accounting happens before delivery: a lossless item spends
-    /// one outstanding unit, and the next tick re-grants what the
-    /// consumer has drained.
+    ///
+    /// The conservation law — queued frames plus outstanding lossless
+    /// credit at most the channel capacity — decides admission before any
+    /// slot is touched. A lossless item spends one credit, so it always
+    /// finds a slot when it arrives within credit: spending shrinks the
+    /// reservation by exactly what delivery grows occupancy. A lossy item
+    /// spends nothing, so it is admitted only into capacity no lossless
+    /// credit is reserved against; past that it drops locally, declared.
     pub(super) fn deliver_stream_item(&mut self, call_id: CallId, mut frame: StreamFrame) {
         let delivered = match self.streams.get_mut(&call_id) {
             None => return, // muted or already ended: nothing to deliver to
@@ -114,14 +119,37 @@ impl super::Pump {
                 // wire's own drops use, so the consumer sees one honest
                 // monotonic gap count.
                 frame.dropped += stream.local_drops;
-                stream.inbound.try_send(frame)
+                match &frame.class {
+                    StreamClass::Lossless => stream.inbound.try_send(frame),
+                    StreamClass::Lossy => {
+                        let free = stream.inbound.capacity() as u32;
+                        let occupied = stream.max_capacity - free.min(stream.max_capacity);
+                        if occupied + stream.outstanding_credit < stream.max_capacity {
+                            stream.inbound.try_send(frame)
+                        } else {
+                            Err(mpsc::error::TrySendError::Full(frame))
+                        }
+                    }
+                }
             }
         };
         match delivered {
-            Ok(()) => {}
+            Ok(()) => {
+                if let Some(stream) = self.streams.get_mut(&call_id) {
+                    stream.accepted += 1;
+                }
+            }
             Err(mpsc::error::TrySendError::Full(_)) => {
+                // A lossless Full cannot happen while the conservation law
+                // holds — a within-credit arrival always has a slot — so a
+                // Full here means drift or a lossy frame past its
+                // reservation. Either way it is declared, never hidden,
+                // and mirrored where the terminal can report it.
                 if let Some(stream) = self.streams.get_mut(&call_id) {
                     stream.local_drops += 1;
+                    stream
+                        .drops
+                        .fetch_add(1, std::sync::atomic::Ordering::Release);
                 }
             }
             Err(mpsc::error::TrySendError::Closed(_)) => {
@@ -140,6 +168,19 @@ impl super::Pump {
     /// through the credit window instead of growing host memory.
     pub(super) fn regrant_stream_credit(&mut self) {
         for call_id in self.streams.keys().copied().collect::<Vec<_>>() {
+            // A muted consumer must be noticed without a delivery to
+            // fail: under drainage-only grants a stopped consumer stops
+            // the deliveries too, so nothing would ever hit the closed
+            // channel. One probe per tick keeps muting prompt.
+            if self
+                .streams
+                .get(&call_id)
+                .is_some_and(|stream| stream.inbound.is_closed())
+            {
+                self.streams.remove(&call_id);
+                let _ = self.session.cancel(call_id, CancelTarget::Stream);
+                continue;
+            }
             let additional = match self.streams.get_mut(&call_id) {
                 None => continue,
                 // Before the worker's stream-open acknowledgement there
@@ -148,11 +189,19 @@ impl super::Pump {
                 // skipping the tick is all it deserves.
                 Some(stream) if !stream.opened => continue,
                 Some(stream) => {
-                    let free = stream.inbound.capacity() as u32;
-                    free.min(
-                        self.max_stream_credit
-                            - stream.outstanding_credit.min(self.max_stream_credit),
-                    )
+                    // Replacement credits are earned by drainage alone:
+                    // how many accepted frames the consumer has actually
+                    // taken out of the channel right now. Free slots that
+                    // were never filled grant nothing, however loudly the
+                    // channel advertises them.
+                    let occupied =
+                        (stream.max_capacity as usize).saturating_sub(stream.inbound.capacity());
+                    let drained = stream.accepted.saturating_sub(occupied as u64) as u32;
+                    let earned = drained.saturating_sub(stream.replaced as u32);
+                    let budget = self
+                        .max_stream_credit
+                        .saturating_sub(stream.outstanding_credit);
+                    earned.min(budget)
                 }
             };
             if additional == 0 {
@@ -162,6 +211,7 @@ impl super::Pump {
                 Ok(()) => {
                     if let Some(stream) = self.streams.get_mut(&call_id) {
                         stream.outstanding_credit += additional;
+                        stream.replaced += u64::from(additional);
                     }
                 }
                 Err(AppError::UnknownCall) => {

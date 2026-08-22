@@ -26,8 +26,8 @@ use yah_plugin_host::{
 };
 use yah_plugin_ipc::types::Outcome;
 use yah_plugin_proc::{
-    ActivationEndpoint, ArtifactReader, Availability, CallTerminal, EndpointError,
-    ProcActivationPlan, ProcLimits, ProcessPluginDriver, Refusal,
+    ActivationEndpoint, ArtifactReader, Availability, CallTerminal, DiagnosticStream,
+    EndpointError, ProcActivationPlan, ProcLimits, ProcessPluginDriver, Refusal,
 };
 
 /// An uppercasing text provider — the dispatcher's first application.
@@ -235,6 +235,11 @@ async fn a_stream_call_delivers_items_in_order_and_one_terminal() {
         seen.push(frame.seq);
     }
     assert_eq!(seen, vec![0, 1, 2, 3, 4, 5], "items arrive in sequence");
+    assert_eq!(
+        stream.local_drops(),
+        0,
+        "a producer within its granted credit never causes a host-local drop"
+    );
     match stream.terminal().await.expect("the call settles") {
         CallTerminal::Completed(Outcome::Ok { result }) => {
             assert_eq!(result, json!({ "streamed": 6 }))
@@ -503,5 +508,201 @@ async fn spilled_artifacts_pull_read_verify_and_release() {
     ep.release_worker_handle(offer.handle)
         .await
         .expect("the release is acknowledged");
+    stop_active(activation, &rig.registry, rig.epoch).await;
+}
+
+/// Stream credit tracks drainage, never free slots: a stalled consumer
+/// earns nothing no matter how many ticks pass or how empty the channel
+/// looks, and draining exactly one item earns exactly one replacement.
+#[tokio::test]
+async fn stream_credit_tracks_drainage_not_free_slots() {
+    let revision = lifecycle_revision("credit", 'a');
+    let (driver, observer) = ProcessPluginDriver::scripted(
+        revision.id().clone(),
+        DriverKind::NodeProcess,
+        worker_program(),
+        vec![ProcActivationPlan::worker("stream-stall:16")],
+    );
+    let mut rig = Rig::new("proc.credit", &revision);
+    let mut activation = HostPluginActivation::prepare(
+        &mut rig.slot,
+        rig.epoch,
+        &rig.broker,
+        &rig.grants,
+        as_trait(&driver),
+    )
+    .expect("preparation is inert and succeeds");
+    let id = activation.id().clone();
+    let _handle = activation.activate(&rig.registry).await.expect("starts");
+
+    let mut stream = endpoint(&driver, &id)
+        .call_stream("tool.stream", json!(null), None)
+        .await
+        .expect("the stream call opens");
+
+    let credits_so_far = || {
+        observer
+            .diagnostics_tail(&id, DiagnosticStream::Stdout)
+            .unwrap_or_default()
+            .matches("stall:credit:")
+            .count()
+    };
+
+    // The worker spends its whole opening window (16 items) and stops.
+    // We drain none of them yet.
+    tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+    assert_eq!(
+        credits_so_far(),
+        0,
+        "no drain, no grant: free slots that were never filled earn nothing"
+    );
+
+    // Drain exactly one frame: exactly one replacement credit, once.
+    let first = stream.next_item().await.expect("the first item arrives");
+    assert_eq!(first.seq, 0);
+    tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+    let tail = observer
+        .diagnostics_tail(&id, DiagnosticStream::Stdout)
+        .unwrap_or_default();
+    assert_eq!(
+        tail.matches("stall:credit:").count(),
+        1,
+        "one drained frame funds exactly one grant: {tail}"
+    );
+    assert!(
+        tail.contains("stall:credit:1"),
+        "the grant equals the drainage: {tail}"
+    );
+
+    // More ticks without further drainage grant nothing again.
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    let tail = observer
+        .diagnostics_tail(&id, DiagnosticStream::Stdout)
+        .unwrap_or_default();
+    assert_eq!(tail.matches("stall:credit:").count(), 1);
+
+    // Drain three more: three more replacements, bounded by the window.
+    for _ in 0..3 {
+        assert!(stream.next_item().await.is_some());
+    }
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        let tail = observer
+            .diagnostics_tail(&id, DiagnosticStream::Stdout)
+            .unwrap_or_default();
+        if tail.matches("stall:credit:").count() >= 2 {
+            assert!(
+                tail.contains("stall:credit:3"),
+                "batched drainage lands as one sized grant: {tail}"
+            );
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "drainage must eventually fund grants: {tail}"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+
+    stop_active(activation, &rig.registry, rig.epoch).await;
+}
+
+/// A lossy flood cannot displace capacity reserved for outstanding
+/// lossless credit, every host-local lossy drop stays visible through
+/// the terminal, and terminal-without-drain still settles under a bound.
+#[tokio::test]
+async fn lossy_flood_reserves_room_for_credited_lossless_frames() {
+    let revision = lifecycle_revision("flood-stream", 'b');
+    let (driver, _observer) = ProcessPluginDriver::scripted(
+        revision.id().clone(),
+        DriverKind::NodeProcess,
+        worker_program(),
+        vec![ProcActivationPlan::worker("stream-lossy-flood:3000")],
+    );
+    let mut rig = Rig::new("proc.flood-stream", &revision);
+    let mut activation = HostPluginActivation::prepare(
+        &mut rig.slot,
+        rig.epoch,
+        &rig.broker,
+        &rig.grants,
+        as_trait(&driver),
+    )
+    .expect("preparation is inert and succeeds");
+    let id = activation.id().clone();
+    let _handle = activation.activate(&rig.registry).await.expect("starts");
+
+    let mut stream = endpoint(&driver, &id)
+        .call_stream("tool.stream", json!(null), None)
+        .await
+        .expect("the stream call opens");
+
+    let mut last_frame = None;
+    let mut previous_dropped = 0;
+    while let Some(frame) = stream.next_item().await {
+        assert!(
+            frame.dropped >= previous_dropped,
+            "the drop counter is monotonic"
+        );
+        previous_dropped = frame.dropped;
+        last_frame = Some(frame);
+    }
+    let final_frame = last_frame.expect("at least the final lossless frame arrives");
+    assert_eq!(
+        final_frame.class,
+        yah_plugin_ipc::types::StreamClass::Lossless,
+        "the final credited lossless frame is delivered, not displaced"
+    );
+    assert!(!final_frame.more, "it is also the stream's last item");
+    assert!(
+        final_frame.dropped > 0 && stream.local_drops() > 0,
+        "host-local lossy drops are declared on frames and survive the terminal"
+    );
+    let terminal = tokio::time::timeout(std::time::Duration::from_secs(5), stream.terminal())
+        .await
+        .expect("the call settles under a bound");
+    match terminal.expect("the call's terminal is a success shape") {
+        CallTerminal::Completed(_) => {}
+        other => panic!("exactly one terminal, got {other:?}"),
+    }
+    stop_active(activation, &rig.registry, rig.epoch).await;
+}
+
+/// Calling `terminal()` without ever draining the items cannot wedge:
+/// the terminal is owed whatever the delivery channel holds.
+#[tokio::test]
+async fn terminal_without_draining_settles_under_a_bound() {
+    let revision = lifecycle_revision("no-drain", 'c');
+    let (driver, _observer) = ProcessPluginDriver::scripted(
+        revision.id().clone(),
+        DriverKind::NodeProcess,
+        worker_program(),
+        vec![ProcActivationPlan::worker("stream-lossy-flood:3000")],
+    );
+    let mut rig = Rig::new("proc.no-drain", &revision);
+    let mut activation = HostPluginActivation::prepare(
+        &mut rig.slot,
+        rig.epoch,
+        &rig.broker,
+        &rig.grants,
+        as_trait(&driver),
+    )
+    .expect("preparation is inert and succeeds");
+    let id = activation.id().clone();
+    let _handle = activation.activate(&rig.registry).await.expect("starts");
+
+    let stream = endpoint(&driver, &id)
+        .call_stream("tool.stream", json!(null), None)
+        .await
+        .expect("the stream call opens");
+    // `into_pending` drops the item receiver mid-flight; the muted probe
+    // cancels the stream half within ticks and the terminal still lands.
+    let pending = stream.into_pending();
+    match tokio::time::timeout(std::time::Duration::from_secs(5), pending.terminal())
+        .await
+        .expect("terminal-without-drain cannot wedge")
+    {
+        Ok(CallTerminal::Completed(_)) | Ok(CallTerminal::LostCancelled) => {}
+        other => panic!("exactly one terminal, got {other:?}"),
+    }
     stop_active(activation, &rig.registry, rig.epoch).await;
 }

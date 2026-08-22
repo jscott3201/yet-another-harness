@@ -182,20 +182,52 @@ impl Dispatcher {
                 done,
             })
             .await;
-        if !matches!(applied, Some(Err(AppError::SpillRequired { .. }))) {
-            return;
-        }
-        // The inline result was over the bound. Spill it exactly as the
-        // protocol demands — the session mints the offer and pins the
-        // bytes host-side, and the call still ends with its one terminal.
-        if let Some(bytes) = spillable {
-            let _ = self
-                .commands(|done| PumpCommand::SpillReply {
-                    call_id,
-                    bytes,
-                    done,
-                })
-                .await;
+        match applied {
+            // Applied, or the activation is gone and no terminal is
+            // possible for anyone.
+            Some(Ok(())) | None => {}
+            Some(Err(AppError::SpillRequired { .. })) => {
+                // The inline result was over the bound. Spill it exactly
+                // as the protocol demands — the session mints the offer
+                // and pins the bytes host-side, and the call still ends
+                // with its one terminal.
+                if let Some(bytes) = spillable {
+                    let _ = self
+                        .commands(|done| PumpCommand::SpillReply {
+                            call_id,
+                            bytes,
+                            done,
+                        })
+                        .await;
+                }
+            }
+            // The call ended before the answer landed: an already-ended
+            // race the session's exactly-once law tolerates by design.
+            Some(Err(AppError::UnknownCall | AppError::AlreadySettled)) => {}
+            // The activation is ending or its budget is spent; the call's
+            // terminal is already being settled by the close path.
+            Some(Err(AppError::SessionRetired | AppError::NotActive)) => {}
+            // The session rejected the result's contents (an unsafe
+            // integer, most likely). The call still owes its terminal, so
+            // answer a bounded internal error — static text, always
+            // admissible — rather than strand the worker until deadline.
+            Some(Err(_)) => {
+                let _ = self
+                    .commands(|done| PumpCommand::Reply {
+                        call_id,
+                        outcome: Outcome::Err {
+                            error: WireError {
+                                kind: WireErrorKind::Internal,
+                                message: "the provider result was rejected by the session"
+                                    .to_owned(),
+                                retryable: false,
+                                reconcile_required: false,
+                            },
+                        },
+                        done,
+                    })
+                    .await;
+            }
         }
     }
 
@@ -279,7 +311,10 @@ impl Dispatcher {
     }
 
     async fn acquire(&self, request: &DispatchRequest) -> Outcome {
+        // Exact members only: an undeclared field is a worker bug, not
+        // something to accept silently and guess about.
         #[derive(serde::Deserialize)]
+        #[serde(deny_unknown_fields)]
         struct Acquire {
             capability: String,
         }
@@ -353,6 +388,7 @@ impl Dispatcher {
 
     async fn invoke(&self, request: &DispatchRequest) -> Outcome {
         #[derive(serde::Deserialize)]
+        #[serde(deny_unknown_fields)]
         struct Invoke {
             handle: HandleId,
             input: String,
@@ -422,6 +458,7 @@ impl Dispatcher {
 
     async fn release_request(&self, request: &DispatchRequest) -> Outcome {
         #[derive(serde::Deserialize)]
+        #[serde(deny_unknown_fields)]
         struct Release {
             handle: HandleId,
         }
@@ -461,19 +498,15 @@ impl Dispatcher {
     }
 }
 
-/// Bound provider-authored text to the wire's detail budget without
-/// ever splitting a character: `String::truncate` panics on a non-
-/// boundary index, and a panic here would kill this task and strand an
-/// admitted call's terminal.
-fn bound_chars(mut text: String) -> String {
-    if text.len() > yah_plugin_ipc::MAX_ERROR_DETAIL_CHARS {
-        let mut end = yah_plugin_ipc::MAX_ERROR_DETAIL_CHARS;
-        while !text.is_char_boundary(end) {
-            end -= 1;
-        }
-        text.truncate(end);
-    }
-    text
+/// Bound provider-authored text to the wire's detail budget. The limit
+/// is counted in Unicode scalar values — the same unit the session
+/// clips worker-authored detail in — and the collect can never split a
+/// character, so no byte-offset truncation (which panics off a boundary)
+/// is ever needed.
+fn bound_chars(text: String) -> String {
+    text.chars()
+        .take(yah_plugin_ipc::MAX_ERROR_DETAIL_CHARS)
+        .collect()
 }
 
 /// Map a broker refusal onto the bounded refusal surface, whole-set —

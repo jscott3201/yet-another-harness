@@ -32,27 +32,49 @@ use crate::bootstrap::SpawnedWorker;
 use crate::dispatch::{self, DispatchRequest};
 use crate::endpoint::StreamFrame;
 use crate::shared::{
-    CallEnd, DiagnosticStream, PumpCommand, PumpShared, drain_diagnostics, kind_label,
+    CallEnd, DiagnosticStream, PumpCommand, PumpShared, ReleaseEnd, drain_diagnostics, kind_label,
 };
 
 /// One live stream call's delivery side: where items go and how much
 /// credit the host has outstanding toward the worker.
+///
+/// The conservation law this table maintains, per stream: **frames queued
+/// in the delivery channel plus outstanding lossless credit never exceeds
+/// the channel's bounded capacity.** Grants replace only frames the
+/// consumer has provably drained, lossy frames are admitted only into
+/// unreserved capacity, and so a lossless frame within its granted credit
+/// always finds a slot on arrival — host-local drops of credited lossless
+/// frames are impossible by construction, and every host-local lossy drop
+/// is counted where the consumer can see it even after the terminal.
 struct HostStream {
     inbound: mpsc::Sender<StreamFrame>,
+    /// The delivery channel's total capacity, cached: the right side of
+    /// the conservation law.
+    max_capacity: u32,
     /// The worker's stream-open acknowledgement has arrived, so the
     /// credit window exists and grants are meaningful. Before it, the
     /// window is simply not open yet — not an error, and never a reason
     /// to mute the call.
     opened: bool,
-    /// Lossless items granted but not yet received. Never above the
-    /// negotiated ceiling; re-granted each tick as the consumer drains.
+    /// Lossless items granted but not yet received. With the queued
+    /// count, never above [`Self::max_capacity`].
     outstanding_credit: u32,
-    /// Host-side drops under channel pressure, declared to the consumer
-    /// in the next delivered frame's `dropped` count. Lossy frames drop
-    /// silently by contract; a lossless frame only lands here when a
-    /// lossy flood has filled every slot — possible, so it is declared
-    /// rather than hidden.
+    /// Frames successfully pushed into `inbound`, cumulative across both
+    /// classes. The difference against the current queue depth is what
+    /// the consumer has actually drained — the only quantity grants may
+    /// replace.
+    accepted: u64,
+    /// Replacement credits already granted for drained frames, so no
+    /// drained frame funds a grant twice.
+    replaced: u64,
+    /// Host-side drops under the reservation policy, declared to the
+    /// consumer in every later frame's `dropped` count *and* mirrored
+    /// into the shared counter the terminal reports — a drop followed
+    /// immediately by the terminal is still visible.
     local_drops: u64,
+    /// The consumer-facing mirror of `local_drops`. Lives as long as the
+    /// call's terminal receiver, outlasting this table entry.
+    drops: Arc<std::sync::atomic::AtomicU64>,
 }
 
 mod streams;
@@ -126,8 +148,10 @@ pub(crate) fn start(
         streams: HashMap::new(),
         dispatcher: dispatcher.map(|(queue, _)| queue),
         capability_table,
+        pending_releases: HashMap::new(),
         outbuf: Vec::new(),
         output_open: true,
+        close_orderly: false,
         max_stream_credit,
         limits,
     };
@@ -151,6 +175,10 @@ struct Pump {
     /// Delivery channels for this activation's stream calls, keyed by
     /// call id. Entries die with their call's terminal.
     streams: HashMap<CallId, HostStream>,
+    /// Endpoint-initiated worker-handle releases admitted but not yet
+    /// acknowledged, keyed by the worker-held handle. A waiter here has
+    /// been told nothing yet: success is the worker ack's to give.
+    pending_releases: HashMap<HandleId, oneshot::Sender<Result<ReleaseEnd, AppError>>>,
     /// The bounded lane admitted worker calls are routed into. `None`
     /// keeps the historical unknown-method auto-refusal.
     dispatcher: Option<mpsc::Sender<DispatchRequest>>,
@@ -169,6 +197,11 @@ struct Pump {
     /// may still be in flight toward the host, so input runs to its
     /// natural end and undeliverable output is discarded.
     output_open: bool,
+    /// How the close that ended this pump should classify itself for
+    /// waiters still holding out for an ack: `true` when the host said
+    /// goodbye or the worker announced its own stop, `false` for a bare
+    /// disconnect or fatal fault. Set by whichever arm learns first.
+    close_orderly: bool,
     limits: ProcLimits,
 }
 
@@ -191,6 +224,10 @@ impl Pump {
             // pending table: admissions in the command arm and settlements
             // in `apply_events` alike.
             self.shared.record_pending(self.pending.len());
+            // One gauge update per iteration covers every mutation of the
+            // release-waiter table as well.
+            self.shared
+                .record_pending_releases(self.pending_releases.len());
             if !self.queue_outbox() {
                 input_open = false;
                 self.end_input(&mut wire_buf).await;
@@ -262,22 +299,30 @@ impl Pump {
                     self.on_diagnostics(DiagnosticStream::Stderr, &mut stderr, &err_buf, read);
                 }
                 command = self.commands.recv() => match command {
-                    Some(PumpCommand::Call { method, payload, deadline_ms, stream, inbound, opened, settled }) => {
+                    Some(PumpCommand::Call { method, payload, deadline_ms, stream, inbound, drops, opened, settled }) => {
                         match self.session.call_worker(&method, payload, deadline_ms, stream) {
                             Ok(call_id) => {
                                 if let Some(inbound) = inbound {
+                                    let max_capacity = inbound.max_capacity() as u32;
                                     self.streams.insert(
                                         call_id,
                                         HostStream {
                                             inbound,
+                                            max_capacity,
                                             opened: false,
                                             outstanding_credit: 0,
+                                            accepted: 0,
+                                            replaced: 0,
                                             local_drops: 0,
+                                            drops,
                                         },
                                     );
                                 }
                                 self.pending.insert(call_id, settled);
                                 self.shared.record_pending(self.pending.len());
+            // One gauge update per iteration covers every mutation of the
+            // release-waiter table as well.
+            self.shared.record_pending_releases(self.pending_releases.len());
                                 let _ = opened.send(Ok(call_id));
                             }
                             Err(error) => {
@@ -353,8 +398,18 @@ impl Pump {
                     Some(PumpCommand::ReleaseWorkerHandle { handle, done }) => {
                         // The only handle the host asks a worker to release
                         // is one the worker offered: a spilled artifact.
-                        let _ =
-                            done.send(self.session.release_worker_handle(handle, HandleKind::Artifact));
+                        // Admission refusals answer at once; admission is
+                        // not acknowledgement, so a successful queueing
+                        // retains the waiter for the worker's ack — see
+                        // `apply_events`.
+                        match self.session.release_worker_handle(handle, HandleKind::Artifact) {
+                            Ok(()) => {
+                                self.pending_releases.insert(handle, done);
+                            }
+                            Err(error) => {
+                                let _ = done.send(Err(error));
+                            }
+                        }
                     }
                     Some(PumpCommand::RetireWorkerCapability { handle, done }) => {
                         let _ = done.send(self.session.retire_worker_capability(handle));
@@ -396,6 +451,9 @@ impl Pump {
         let _ = self.worker.channel.shutdown().await;
         self.end_input(&mut wire_buf).await;
         self.apply_events();
+        // Nothing after this can acknowledge: every remaining release
+        // waiter settles here rather than dying with the task.
+        self.settle_pending_releases(self.close_orderly);
         self.reap().await;
         // The group is dead, so these end at end-of-file promptly; text the
         // worker wrote just before dying is retained instead of racing the
@@ -436,6 +494,13 @@ impl Pump {
                         for handle in handles {
                             table.remove(handle);
                         }
+                    }
+                }
+                SessionEvent::WorkerHandleReleased { handle, .. } => {
+                    // The ack is the only thing that turns an admitted
+                    // release into reported success.
+                    if let Some(waiter) = self.pending_releases.remove(&handle) {
+                        let _ = waiter.send(Ok(ReleaseEnd::Acknowledged));
                     }
                 }
                 SessionEvent::HostCallSettled { call_id, outcome } => {
@@ -496,11 +561,21 @@ impl Pump {
                     self.route_worker_call(call_id, &method, payload);
                 }
                 SessionEvent::Fatal { kind, detail } => {
+                    self.close_orderly = false;
+                    self.settle_pending_releases(false);
                     self.shared
                         .set_closed(format!("protocol fault {}: {detail}", kind_label(kind)));
                 }
                 SessionEvent::WorkerGoodbye { reason } => {
+                    self.close_orderly = true;
+                    self.settle_pending_releases(true);
                     self.shared.set_closed(format!("worker goodbye: {reason}"));
+                }
+                _ if self.session.is_closed() && !self.pending_releases.is_empty() => {
+                    // A close no event above named — a bare disconnect,
+                    // most likely. Nothing will acknowledge now.
+                    self.close_orderly = false;
+                    self.settle_pending_releases(false);
                 }
                 // WorkerHandleReleased names a worker-offered artifact —
                 // the dispatcher's table holds only host-minted
@@ -511,6 +586,15 @@ impl Pump {
                 // exactly-once law settles the race.
                 _ => {}
             }
+        }
+    }
+
+    /// Settle every outstanding release waiter as lost — no ack will
+    /// ever arrive. `orderly` records whether the end was announced
+    /// (goodbye either way, or a release provably never written) or bare.
+    fn settle_pending_releases(&mut self, orderly: bool) {
+        for (_, waiter) in self.pending_releases.drain() {
+            let _ = waiter.send(Ok(ReleaseEnd::Lost { orderly }));
         }
     }
 
@@ -531,13 +615,24 @@ impl Pump {
             // than waiting for the session's end to claim — wrongly — that
             // the worker may have acted on it.
             for message in self.session.drain_outbox() {
-                if let HostMessage::Call(call) = message
-                    && let Some(waiter) = self.pending.remove(&call.call_id)
-                {
-                    let _ = waiter.send(CallEnd::Lost {
-                        error: WireErrorKind::Cancelled,
-                        reconcile: false,
-                    });
+                match message {
+                    HostMessage::Call(call) => {
+                        if let Some(waiter) = self.pending.remove(&call.call_id) {
+                            let _ = waiter.send(CallEnd::Lost {
+                                error: WireErrorKind::Cancelled,
+                                reconcile: false,
+                            });
+                        }
+                    }
+                    // A release that can never be written can never be
+                    // acknowledged: the waiter learns now, not at pump
+                    // exit.
+                    HostMessage::Release(release) => {
+                        if let Some(waiter) = self.pending_releases.remove(&release.handle) {
+                            let _ = waiter.send(Ok(ReleaseEnd::Lost { orderly: true }));
+                        }
+                    }
+                    _ => {}
                 }
             }
             return true;
@@ -641,6 +736,8 @@ impl Pump {
     /// Record the host's goodbye as the close cause — before the
     /// settlements that follow can claim it — and queue its frame.
     fn begin_goodbye(&mut self, reason: &str) {
+        self.close_orderly = true;
+        self.settle_pending_releases(true);
         self.shared.set_closed(format!("host goodbye: {reason}"));
         // A goodbye the peer cannot read is not queued: appending to a
         // dead output direction would repopulate the buffer the

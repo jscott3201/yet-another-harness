@@ -9,6 +9,7 @@
 //! the pump alive.
 
 use std::collections::VecDeque;
+use std::sync::Arc;
 use std::sync::{
     Mutex,
     atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering},
@@ -57,6 +58,10 @@ pub(crate) enum PumpCommand {
         /// memory. Dropping the receiver mutes delivery and cancels the
         /// stream half; the terminal is still owed.
         inbound: Option<mpsc::Sender<StreamFrame>>,
+        /// The consumer-visible mirror of host-local stream drops; the
+        /// pump increments it as drops happen so the count outlives the
+        /// call's delivery table.
+        drops: Arc<std::sync::atomic::AtomicU64>,
         opened: oneshot::Sender<Result<CallId, AppError>>,
         settled: oneshot::Sender<CallEnd>,
     },
@@ -91,10 +96,13 @@ pub(crate) enum PumpCommand {
         done: oneshot::Sender<Result<HandleId, AppError>>,
     },
     /// Ask the worker to release a handle it offered (a spilled artifact)
-    /// and wait for its acknowledgement.
+    /// and wait for its acknowledgement. An admission refusal answers at
+    /// once; a successful admission does not complete the waiter — the
+    /// pump retains it until the worker's ack names the handle, or the
+    /// activation ends trying.
     ReleaseWorkerHandle {
         handle: HandleId,
-        done: oneshot::Sender<Result<(), AppError>>,
+        done: oneshot::Sender<Result<ReleaseEnd, AppError>>,
     },
     /// Retire a capability handle the worker released through the
     /// application lane; the call reply is that release's ack.
@@ -106,6 +114,22 @@ pub(crate) enum PumpCommand {
     // deactivation dropped behind a command flood would wait out an
     // arbitrary backlog. It rides a watch signal instead — one value, no
     // queue, always deliverable.
+}
+
+/// How an endpoint-initiated release of a worker-held handle ended. The
+/// acknowledgement is what makes "released" a two-party fact, so success
+/// is reported only when the worker's ack names the handle.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ReleaseEnd {
+    /// The worker acknowledged the release.
+    Acknowledged,
+    /// The activation ended before the ack arrived: goodbye, fatal
+    /// fault, disconnect, an output direction that can no longer carry
+    /// the release, or teardown. `orderly` distinguishes ends where the
+    /// frame provably never reached the worker or the worker announced
+    /// its own stop (`true`) from a bare loss where the worker's table
+    /// state is unknown (`false`).
+    Lost { orderly: bool },
 }
 
 const PHASE_HANDSHAKE: u8 = 0;
@@ -130,6 +154,9 @@ pub struct PumpGauges {
     pub outbound_buffer_capacity: usize,
     /// Host calls with a waiter parked on the pump.
     pub pending_calls: usize,
+    /// Endpoint-initiated worker-handle releases awaiting the worker's
+    /// acknowledgement.
+    pub pending_releases: usize,
     /// Free slots in the bounded command channel right now.
     pub command_channel_available: usize,
     /// The channel's total configured slots.
@@ -162,6 +189,7 @@ pub(crate) struct PumpShared {
     outbound_bytes: AtomicUsize,
     outbound_capacity: AtomicUsize,
     pending_calls: AtomicUsize,
+    pending_releases: AtomicUsize,
     command_channel_capacity: usize,
     /// The item-channel capacity for stream calls: the negotiated credit
     /// ceiling. Credit never exceeds it, so lossless items can always be
@@ -189,6 +217,7 @@ impl PumpShared {
             outbound_bytes: AtomicUsize::new(0),
             outbound_capacity: AtomicUsize::new(0),
             pending_calls: AtomicUsize::new(0),
+            pending_releases: AtomicUsize::new(0),
             command_channel_capacity: limits.command_channel_capacity,
             stream_channel_capacity: max_stream_credit as usize,
         }
@@ -303,6 +332,10 @@ impl PumpShared {
         self.pending_calls.store(count, Ordering::Release);
     }
 
+    pub(crate) fn record_pending_releases(&self, count: usize) {
+        self.pending_releases.store(count, Ordering::Release);
+    }
+
     /// One consistent-enough snapshot of the memory gauges. The command
     /// channel numbers arrive from the caller's sender handle, which is
     /// the only place that can read the queue without keeping the channel
@@ -312,6 +345,7 @@ impl PumpShared {
             outbound_buffer_bytes: self.outbound_bytes.load(Ordering::Acquire),
             outbound_buffer_capacity: self.outbound_capacity.load(Ordering::Acquire),
             pending_calls: self.pending_calls.load(Ordering::Acquire),
+            pending_releases: self.pending_releases.load(Ordering::Acquire),
             command_channel_available: command_available.unwrap_or(0),
             command_channel_capacity: self.command_channel_capacity,
         }

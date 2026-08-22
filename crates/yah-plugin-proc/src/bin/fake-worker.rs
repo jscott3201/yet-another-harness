@@ -73,6 +73,24 @@
 //!   spilled offer of `bytes` pattern-filled bytes held worker-side, then
 //!   serve `artifact.read` pull requests for it until goodbye — the
 //!   digest-carrying offer the host verifies.
+//! - `release-*`: spill an offer like `spill`, then misbehave on the
+//!   host's Release frame: `release-withhold` never acks,
+//!   `release-later:<ms>` acks after a delay, `release-die` exits before
+//!   acking, `release-goodbye` says goodbye instead of acking,
+//!   `release-ack-wrong-kind` acks with the wrong handle kind, and
+//!   `release-bogus-ack` sends an unsolicited ack right after hello —
+//!   every loss path a release waiter must survive, typed.
+//! - `spill-poison:<mode>`: spill an offer that violates the reader's
+//!   contract — wrong chunk lengths (`short`, `long`), a contradictory
+//!   media type (`media`), noncanonical hex (`upper`, `junk`), or a
+//!   digest over the wrong bytes (`digest`) or over zero bytes
+//!   (`empty-digest`) — and otherwise serve honestly.
+//! - `stream-stall:<credit>`: open the host's stream, spend the initial
+//!   credit window on lossless items, then stop and print one line per
+//!   Credit frame received — the overgrant detector.
+//! - `stream-lossy-flood:<count>`: open the host's stream, flood `count`
+//!   lossy items past any window, then send one final credited lossless
+//!   item before the terminal — the reservation detector.
 //!
 //! This is a test fixture, not a worker SDK: it implements exactly what its
 //! scripts need and nothing else.
@@ -475,6 +493,39 @@ fn run(mode: &str, wire: &mut Wire) -> i32 {
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(4);
             scripts::capability_flood(wire, count)
+        }
+        m if m.starts_with("release-withhold") => scripts::release_withhold(wire),
+        m if m.starts_with("release-die") => scripts::release_die(wire),
+        m if m.starts_with("release-goodbye") => scripts::release_goodbye(wire),
+        m if m.starts_with("release-ack-wrong-kind") => scripts::release_ack_wrong_kind(wire),
+        m if m.starts_with("release-bogus-ack") => scripts::release_bogus_ack(wire),
+        m if m.starts_with("release-later:") => {
+            let ms: u64 = m
+                .split(':')
+                .nth(1)
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(500);
+            scripts::release_later(wire, ms)
+        }
+        m if m.starts_with("spill-poison:") => {
+            let mode = m.split(':').nth(1).unwrap_or("short").to_owned();
+            scripts::spill_poison(wire, &mode)
+        }
+        m if m.starts_with("stream-stall:") => {
+            let credit: u32 = m
+                .split(':')
+                .nth(1)
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(16);
+            scripts::stream_stall(wire, credit)
+        }
+        m if m.starts_with("stream-lossy-flood:") => {
+            let count: u64 = m
+                .split(':')
+                .nth(1)
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(3000);
+            scripts::stream_lossy_flood(wire, count)
         }
         m if m.starts_with("spill:") => {
             let bytes: usize = m
