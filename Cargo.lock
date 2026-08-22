@@ -2806,7 +2806,9 @@ dependencies = [
 name = "yah-plugin-proc"
 version = "0.0.1"
 dependencies = [
+ "blake3",
  "libc",
+ "serde",
  "serde_json",
  "tokio",
  "yah-compose",

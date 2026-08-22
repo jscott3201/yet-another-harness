@@ -9,6 +9,7 @@
 //! - `bad-version`: offer only protocol version 99 and read the refusal.
 //! - `crash-after-hello`: complete the handshake, then exit without goodbye.
 //! - `exit-mid-call`: take one call and exit without answering it.
+//! - `fatal-mid-call`: take one call and send an unsolicited release ack.
 //! - `cancel-ack`: hold each call until its cancel arrives, then answer
 //!   with the cancelled outcome.
 //! - `deaf`: complete the handshake, then never touch the channel again —
@@ -53,6 +54,39 @@
 //!   actually release, observed while the worker is still alive.
 //! - `chaos`: handshake, print a diagnostic line, flood 300 calls, go
 //!   deaf — every pressure at once.
+//! - `stream-items:<count>`: handshake, then on the first stream call
+//!   open the stream with credit 4, send `count` lossless items (waiting
+//!   for credit frames as the window demands), and answer the call ok —
+//!   a stream cancel stops production and answers at once.
+//! - `registered-method:<name>`: call an independently registered method
+//!   twice under one provider slot while still serving host calls.
+//! - `registered-cancel-during`: cancel a callback after a host control call.
+//! - `registered-cancel-queued`: cancel a call queued behind a blocked method.
+//! - `registered-panic`: call a panicking method and a healthy sibling.
+//! - `registered-failure`: report one bounded Unicode domain failure.
+//! - `registered-flood:<n>`: flood one method to expose dispatch bounds.
+//! - `audit-echo`: echo host calls and record each payload on diagnostics.
+//! - `spill:<bytes>`: handshake, then answer the first call with a
+//!   spilled offer of `bytes` pattern-filled bytes held worker-side, then
+//!   serve `artifact.read` pull requests for it until goodbye — the
+//!   digest-carrying offer the host verifies.
+//! - `release-*`: spill an offer like `spill`, then misbehave on the
+//!   host's Release frame: `release-withhold` never acks,
+//!   `release-later:<ms>` acks after a delay, `release-die` exits before
+//!   acking, `release-goodbye` says goodbye instead of acking, and
+//!   `release-bogus-ack` sends an unsolicited ack right after hello —
+//!   every loss path a release waiter must survive, typed.
+//! - `spill-poison:<mode>`: spill an offer that violates the reader's
+//!   contract — wrong chunk lengths (`short`, `long`), a contradictory
+//!   media type (`media`), noncanonical hex (`upper`, `junk`), or a
+//!   digest over the wrong bytes (`digest`) or over zero bytes
+//!   (`empty-digest`) — and otherwise serve honestly.
+//! - `stream-stall:<credit>`: open the host's stream, spend the initial
+//!   credit window on lossless items, then stop and print one line per
+//!   Credit frame received — the overgrant detector.
+//! - `stream-lossy-flood:<count>`: open the host's stream, flood `count`
+//!   lossy items past any window, then send one final credited lossless
+//!   item before the terminal — the reservation detector.
 //!
 //! This is a test fixture, not a worker SDK: it implements exactly what its
 //! scripts need and nothing else.
@@ -65,6 +99,9 @@ use yah_plugin_ipc::PROTOCOL_VERSION;
 use yah_plugin_ipc::frame::{self, FrameDecoder};
 use yah_plugin_ipc::types::*;
 use yah_plugin_proc::WORKER_CHANNEL_FD;
+
+#[path = "fake-worker/scripts.rs"]
+mod scripts;
 
 fn main() {
     let mode = std::env::args().nth(1).unwrap_or_default();
@@ -112,6 +149,23 @@ fn run(mode: &str, wire: &mut Wire) -> i32 {
                     Some(HostMessage::Call(_)) => return 70,
                     Some(_) => {}
                     None => return 70,
+                }
+            }
+        }
+        "fatal-mid-call" => {
+            if !wire.handshake() {
+                return 70;
+            }
+            loop {
+                match wire.next_frame() {
+                    Some(HostMessage::Call(_)) => {
+                        wire.send(&WorkerMessage::ReleaseAck(ReleaseAck {
+                            handle: HandleId(999),
+                            kind: HandleKind::Artifact,
+                        }));
+                    }
+                    Some(HostMessage::Goodbye(_)) | None => return 0,
+                    Some(_) => {}
                 }
             }
         }
@@ -432,6 +486,72 @@ fn run(mode: &str, wire: &mut Wire) -> i32 {
             std::thread::sleep(std::time::Duration::from_millis(linger));
             0
         }
+        m if m.starts_with("stream-items:") => {
+            let count: u64 = m
+                .split(':')
+                .nth(1)
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(4);
+            scripts::stream_items(wire, count)
+        }
+        m if m.starts_with("registered-method:") => {
+            let method = m.split(':').nth(1).unwrap_or("application.hold").to_owned();
+            scripts::registered_method(wire, &method)
+        }
+        "registered-cancel-during" => scripts::registered_cancel_during(wire),
+        "registered-cancel-queued" => scripts::registered_cancel_queued(wire),
+        "registered-panic" => scripts::registered_panic(wire),
+        "registered-failure" => scripts::registered_failure(wire),
+        m if m.starts_with("registered-flood:") => {
+            let count = m
+                .split(':')
+                .nth(1)
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(4);
+            scripts::registered_flood(wire, count)
+        }
+        "audit-echo" => serve_audit_echo(wire),
+        m if m.starts_with("release-withhold") => scripts::release_withhold(wire),
+        m if m.starts_with("release-die") => scripts::release_die(wire),
+        m if m.starts_with("release-goodbye") => scripts::release_goodbye(wire),
+        m if m.starts_with("release-bogus-ack") => scripts::release_bogus_ack(wire),
+        m if m.starts_with("release-later:") => {
+            let ms: u64 = m
+                .split(':')
+                .nth(1)
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(500);
+            scripts::release_later(wire, ms)
+        }
+        m if m.starts_with("spill-poison:") => {
+            let mode = m.split(':').nth(1).unwrap_or("short").to_owned();
+            scripts::spill_poison(wire, &mode)
+        }
+        m if m.starts_with("stream-stall:") => {
+            let credit: u32 = m
+                .split(':')
+                .nth(1)
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(16);
+            scripts::stream_stall(wire, credit)
+        }
+        m if m.starts_with("stream-lossy-flood:") => {
+            let count: u64 = m
+                .split(':')
+                .nth(1)
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(3000);
+            scripts::stream_lossy_flood(wire, count)
+        }
+        m if m.starts_with("spill:") => {
+            let bytes: usize = m
+                .split(':')
+                .nth(1)
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(4096);
+            scripts::spill(wire, bytes)
+        }
+
         other => {
             eprintln!("unknown fake-worker mode {other:?}");
             64
@@ -445,9 +565,38 @@ fn serve_conformant(wire: &mut Wire) -> i32 {
     if !wire.handshake() {
         return 70;
     }
+    serve_after_handshake(wire)
+}
+
+/// Echo host calls after the caller has already completed negotiation.
+fn serve_after_handshake(wire: &mut Wire) -> i32 {
     loop {
         match wire.next_frame() {
             Some(HostMessage::Call(call)) => {
+                wire.send(&WorkerMessage::Reply(Reply {
+                    call_id: call.call_id,
+                    outcome: Outcome::Ok {
+                        result: call.payload,
+                    },
+                }));
+            }
+            Some(HostMessage::Goodbye(_)) | None => return 0,
+            Some(_) => {}
+        }
+    }
+}
+
+/// Echo host calls while retaining a worker-authored trace for stale-endpoint
+/// tests. Diagnostics are evidence only; protocol results remain the oracle.
+fn serve_audit_echo(wire: &mut Wire) -> i32 {
+    if !wire.handshake() {
+        return 70;
+    }
+    loop {
+        match wire.next_frame() {
+            Some(HostMessage::Call(call)) => {
+                println!("audit:{}", call.payload);
+                let _ = std::io::stdout().flush();
                 wire.send(&WorkerMessage::Reply(Reply {
                     call_id: call.call_id,
                     outcome: Outcome::Ok {

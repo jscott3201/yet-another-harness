@@ -16,13 +16,15 @@ mod rig;
 
 use fixtures::lifecycle_revision;
 use rig::{
-    Rig, health_becomes, process_gone, reported_helper_pid, scripted, settled_within, stop_active,
+    Rig, endpoint, health_becomes, process_gone, reported_helper_pid, scripted, settled_within,
+    stop_active,
 };
 use serde_json::json;
 use yah_plugin_host::{DriverKind, HostPluginActivation, PluginHealth, PluginStartError};
-use yah_plugin_ipc::types::{Outcome, WireErrorKind};
+use yah_plugin_ipc::types::Outcome;
 use yah_plugin_proc::{
-    CallEnd, DiagnosticStream, ProcActivationPlan, ProcLimits, ProcessPluginDriver, ResourceState,
+    CallTerminal, DiagnosticStream, ProcActivationPlan, ProcLimits, ProcessPluginDriver,
+    ResourceState,
 };
 
 #[tokio::test]
@@ -38,6 +40,7 @@ async fn a_worker_that_stops_reading_stalls_neither_the_clock_nor_the_kill() {
             ..ProcLimits::default()
         },
     );
+    let endpoint_driver = std::sync::Arc::clone(&driver);
     let mut rig = Rig::new("proc.deaf", &revision);
     let mut activation =
         HostPluginActivation::prepare(&mut rig.slot, rig.epoch, &rig.broker, &rig.grants, driver)
@@ -52,17 +55,18 @@ async fn a_worker_that_stops_reading_stalls_neither_the_clock_nor_the_kill() {
     // select arm among many keeps running the deadline clock through the
     // back-pressure.
     let mut calls = Vec::new();
+    let activation_endpoint = endpoint(&endpoint_driver, &id);
     for _ in 0..6 {
         calls.push(
-            observer
-                .begin_call(&id, "tool.flood", json!("x".repeat(200 * 1024)), Some(50))
+            activation_endpoint
+                .call("tool.flood", json!("x".repeat(200 * 1024)), Some(50))
                 .await
                 .expect("the call opens"),
         );
     }
     for call in calls {
         match settled_within(call).await {
-            CallEnd::Lost { error, .. } => assert_eq!(error, WireErrorKind::DeadlineExceeded),
+            CallTerminal::DeadlineExceeded => {}
             other => panic!("expected the deadline, got {other:?}"),
         }
     }
@@ -98,6 +102,7 @@ async fn a_goodbye_behind_a_failing_write_is_still_a_goodbye() {
             ..ProcLimits::default()
         },
     );
+    let endpoint_driver = std::sync::Arc::clone(&driver);
     let mut rig = Rig::new("proc.goodbyewrite", &revision);
     let mut activation =
         HostPluginActivation::prepare(&mut rig.slot, rig.epoch, &rig.broker, &rig.grants, driver)
@@ -115,14 +120,15 @@ async fn a_goodbye_behind_a_failing_write_is_still_a_goodbye() {
     // goodbye simply arrives on the read arm and the same classification
     // must hold; the write-failure half of the pin is exercised on the
     // platform CI runs.
-    let held = observer
-        .begin_call(&id, "tool.hold", json!(null), None)
+    let activation_endpoint = endpoint(&endpoint_driver, &id);
+    let held = activation_endpoint
+        .call("tool.hold", json!(null), None)
         .await
         .expect("the call opens");
     let mut floods = Vec::new();
     for _ in 0..6 {
-        match observer
-            .begin_call(&id, "tool.flood", json!("x".repeat(200 * 1024)), None)
+        match activation_endpoint
+            .call("tool.flood", json!("x".repeat(200 * 1024)), None)
             .await
         {
             Ok(call) => floods.push(call),
@@ -130,10 +136,9 @@ async fn a_goodbye_behind_a_failing_write_is_still_a_goodbye() {
         }
     }
     match settled_within(held).await {
-        CallEnd::Lost { error, reconcile } => {
-            assert_eq!(error, WireErrorKind::Cancelled);
-            assert!(!reconcile, "a goodbye settles without reconciliation");
-        }
+        // A goodbye settles cancelled, without reconciliation — the
+        // terminal says so by being LostCancelled and no other variant.
+        CallTerminal::LostCancelled => {}
         other => panic!("expected the goodbye's cancellation, got {other:?}"),
     }
     let summary = observer.close_summary(&id).expect("the session ended");
@@ -167,6 +172,7 @@ async fn a_worker_past_the_outbound_cap_is_declared_dead_not_buffered() {
             ..ProcLimits::default()
         },
     );
+    let endpoint_driver = std::sync::Arc::clone(&driver);
     let mut rig = Rig::new("proc.outcap", &revision);
     let mut activation =
         HostPluginActivation::prepare(&mut rig.slot, rig.epoch, &rig.broker, &rig.grants, driver)
@@ -178,9 +184,10 @@ async fn a_worker_past_the_outbound_cap_is_declared_dead_not_buffered() {
     // Flood past the clamped floor (~1 MiB) against a worker that will
     // never drain it; later opens may find the session already ended.
     let mut calls = Vec::new();
+    let activation_endpoint = endpoint(&endpoint_driver, &id);
     for _ in 0..8 {
-        match observer
-            .begin_call(&id, "tool.flood", json!("x".repeat(200 * 1024)), None)
+        match activation_endpoint
+            .call("tool.flood", json!("x".repeat(200 * 1024)), None)
             .await
         {
             Ok(call) => calls.push(call),
@@ -195,12 +202,12 @@ async fn a_worker_past_the_outbound_cap_is_declared_dead_not_buffered() {
         calls.len()
     );
     for call in calls {
-        match settled_within(call).await {
-            CallEnd::Lost { reconcile, .. } => {
-                assert!(reconcile, "the worker may hold the flooded calls");
-            }
-            other => panic!("expected the calls lost at the cap, got {other:?}"),
-        }
+        // The worker may hold the flooded calls: the terminal is
+        // outcome-unknown, never a clean cancellation.
+        assert!(
+            matches!(settled_within(call).await, CallTerminal::LostOutcomeUnknown),
+            "the cap settles outcome-unknown"
+        );
     }
     let summary = observer.close_summary(&id).expect("the session ended");
     assert!(
@@ -214,7 +221,8 @@ async fn a_worker_past_the_outbound_cap_is_declared_dead_not_buffered() {
 #[tokio::test]
 async fn a_terminal_arriving_during_deactivation_still_settles_as_itself() {
     let revision = lifecycle_revision("latereply", '4');
-    let (driver, observer) = scripted(&revision, vec![ProcActivationPlan::worker("late-reply")]);
+    let (driver, _observer) = scripted(&revision, vec![ProcActivationPlan::worker("late-reply")]);
+    let endpoint_driver = std::sync::Arc::clone(&driver);
     let mut rig = Rig::new("proc.latereply", &revision);
     let mut activation =
         HostPluginActivation::prepare(&mut rig.slot, rig.epoch, &rig.broker, &rig.grants, driver)
@@ -222,8 +230,8 @@ async fn a_terminal_arriving_during_deactivation_still_settles_as_itself() {
     let id = activation.id().clone();
     let _handle = activation.activate(&rig.registry).await.expect("starts");
 
-    let call = observer
-        .begin_call(&id, "tool.echo", json!("handed-over"), None)
+    let call = endpoint(&endpoint_driver, &id)
+        .call("tool.echo", json!("handed-over"), None)
         .await
         .expect("the call opens");
     // The worker read the call and went deaf; its answer lands a beat
@@ -233,7 +241,9 @@ async fn a_terminal_arriving_during_deactivation_still_settles_as_itself() {
     // was in fact answered.
     stop_active(activation, &rig.registry, rig.epoch).await;
     match settled_within(call).await {
-        CallEnd::Settled(Outcome::Ok { result }) => assert_eq!(result, json!("handed-over")),
+        CallTerminal::Completed(Outcome::Ok { result }) => {
+            assert_eq!(result, json!("handed-over"))
+        }
         other => panic!("expected the late terminal to settle the call, got {other:?}"),
     }
 }
@@ -309,6 +319,7 @@ async fn a_missing_worker_program_fails_the_spawn_not_the_protocol() {
 async fn deactivation_settles_work_the_worker_still_holds() {
     let revision = lifecycle_revision("handover", 'd');
     let (driver, observer) = scripted(&revision, vec![ProcActivationPlan::worker("cancel-ack")]);
+    let endpoint_driver = std::sync::Arc::clone(&driver);
     let mut rig = Rig::new("proc.handover", &revision);
     let mut activation =
         HostPluginActivation::prepare(&mut rig.slot, rig.epoch, &rig.broker, &rig.grants, driver)
@@ -316,8 +327,8 @@ async fn deactivation_settles_work_the_worker_still_holds() {
     let id = activation.id().clone();
     let _handle = activation.activate(&rig.registry).await.expect("starts");
 
-    let call = observer
-        .begin_call(&id, "tool.hold", json!(null), None)
+    let call = endpoint(&endpoint_driver, &id)
+        .call("tool.hold", json!(null), None)
         .await
         .expect("the call opens");
     // Deactivate while the worker holds the call. The work was handed
@@ -325,10 +336,9 @@ async fn deactivation_settles_work_the_worker_still_holds() {
     // waiter may be dropped in silence.
     stop_active(activation, &rig.registry, rig.epoch).await;
     match settled_within(call).await {
-        CallEnd::Lost { error, reconcile } => {
-            assert_eq!(error, WireErrorKind::OutcomeUnknown);
-            assert!(reconcile, "handed-over work always requires reconciliation");
-        }
+        // Handed-over work always requires reconciliation: the terminal
+        // is outcome-unknown, never a clean cancellation.
+        CallTerminal::LostOutcomeUnknown => {}
         other => panic!("expected outcome-unknown, got {other:?}"),
     }
     // The recorded cause is the host's own goodbye, not a synthetic loss.
@@ -346,6 +356,7 @@ async fn a_polite_goodbye_with_work_in_hand_is_not_a_bare_disconnect() {
         &revision,
         vec![ProcActivationPlan::worker("goodbye-mid-call")],
     );
+    let endpoint_driver = std::sync::Arc::clone(&driver);
     let mut rig = Rig::new("proc.polite", &revision);
     let mut activation =
         HostPluginActivation::prepare(&mut rig.slot, rig.epoch, &rig.broker, &rig.grants, driver)
@@ -358,15 +369,13 @@ async fn a_polite_goodbye_with_work_in_hand_is_not_a_bare_disconnect() {
     // buffered goodbye — drained when the child's exit is detected —
     // distinguishes this from a bare disconnect. Loss is classified, not
     // collapsed: a goodbye settles cancelled, without reconciliation.
-    let call = observer
-        .begin_call(&id, "tool.hold", json!(null), None)
+    let call = endpoint(&endpoint_driver, &id)
+        .call("tool.hold", json!(null), None)
         .await
         .expect("the call opens");
     match settled_within(call).await {
-        CallEnd::Lost { error, reconcile } => {
-            assert_eq!(error, WireErrorKind::Cancelled);
-            assert!(!reconcile, "a goodbye settles without reconciliation");
-        }
+        // A goodbye settles cancelled, without reconciliation.
+        CallTerminal::LostCancelled => {}
         other => panic!("expected the goodbye's cancellation, got {other:?}"),
     }
     let summary = observer.close_summary(&id).expect("the session ended");
@@ -387,7 +396,7 @@ async fn an_abandoned_activation_reaps_its_worker() {
         rig.epoch,
         &rig.broker,
         &rig.grants,
-        std::sync::Arc::clone(&driver),
+        rig::as_trait(&driver),
     )
     .expect("preparation is inert and succeeds");
     let id = activation.id().clone();
@@ -410,6 +419,7 @@ async fn an_abandoned_activation_reaps_its_worker() {
 async fn a_dead_worker_is_seen_even_when_a_descendant_holds_its_channel() {
     let revision = lifecycle_revision("descendant", 'f');
     let (driver, observer) = scripted(&revision, vec![ProcActivationPlan::worker("spawn-helper")]);
+    let endpoint_driver = std::sync::Arc::clone(&driver);
     let mut rig = Rig::new("proc.descendant", &revision);
     let mut activation =
         HostPluginActivation::prepare(&mut rig.slot, rig.epoch, &rig.broker, &rig.grants, driver)
@@ -426,15 +436,13 @@ async fn a_dead_worker_is_seen_even_when_a_descendant_holds_its_channel() {
     })
     .await;
     // The dead session refuses new work instead of queueing it toward a
-    // socket only the helper still holds.
-    let refused = observer
-        .begin_call(&id, "tool.echo", json!(null), None)
-        .await;
-    assert!(
-        refused.is_err(),
-        "a dead session must refuse new work: {:?}",
-        refused.err()
-    );
+    // socket only the helper still holds. The refusal may land at
+    // publication or at admission — both are the same fail-closed fact.
+    let refused = match endpoint_driver.endpoint(&id) {
+        Ok(ep) => ep.call("tool.echo", json!(null), None).await.is_err(),
+        Err(_) => true,
+    };
+    assert!(refused, "a dead session must refuse new work");
     // Reclaim sweeps the worker's process group: the helper provably dies
     // with the activation rather than orphaning with the host's ambient
     // authority.
@@ -460,6 +468,7 @@ async fn deactivation_reclaims_everything_even_at_a_generous_grace() {
             ..ProcLimits::default()
         },
     );
+    let endpoint_driver = std::sync::Arc::clone(&driver);
     let mut rig = Rig::new("proc.slowgrace", &revision);
     let mut activation =
         HostPluginActivation::prepare(&mut rig.slot, rig.epoch, &rig.broker, &rig.grants, driver)
@@ -473,17 +482,18 @@ async fn deactivation_reclaims_everything_even_at_a_generous_grace() {
     // inside Linux's ~208 KiB buffer) so the goodbye flush really burns
     // its window.
     let mut calls = Vec::new();
+    let activation_endpoint = endpoint(&endpoint_driver, &id);
     for _ in 0..6 {
         calls.push(
-            observer
-                .begin_call(&id, "tool.flood", json!("x".repeat(200 * 1024)), Some(50))
+            activation_endpoint
+                .call("tool.flood", json!("x".repeat(200 * 1024)), Some(50))
                 .await
                 .expect("the call opens"),
         );
     }
     for call in calls {
         match settled_within(call).await {
-            CallEnd::Lost { error, .. } => assert_eq!(error, WireErrorKind::DeadlineExceeded),
+            CallTerminal::DeadlineExceeded => {}
             other => panic!("expected the deadline, got {other:?}"),
         }
     }
@@ -519,7 +529,7 @@ async fn an_abandoned_worker_that_left_its_group_is_still_reclaimed() {
         rig.epoch,
         &rig.broker,
         &rig.grants,
-        std::sync::Arc::clone(&driver),
+        rig::as_trait(&driver),
     )
     .expect("preparation is inert and succeeds");
     let id = activation.id().clone();
@@ -542,7 +552,7 @@ async fn a_zero_tick_interval_is_clamped_not_a_panic() {
     // A zero interval would panic tokio's timer inside the pump task,
     // failing every activation with a spurious handshake error; the clamp
     // to the clock's floor is what makes this succeed.
-    let (driver, observer) = ProcessPluginDriver::scripted_with_limits(
+    let (driver, _observer) = ProcessPluginDriver::scripted_with_limits(
         revision.id().clone(),
         DriverKind::NodeProcess,
         fixtures::worker_program(),
@@ -553,19 +563,20 @@ async fn a_zero_tick_interval_is_clamped_not_a_panic() {
             ..ProcLimits::default()
         },
     );
+    let endpoint_driver = std::sync::Arc::clone(&driver);
     let mut rig = Rig::new("proc.zerotick", &revision);
     let mut activation =
         HostPluginActivation::prepare(&mut rig.slot, rig.epoch, &rig.broker, &rig.grants, driver)
             .expect("preparation is inert and succeeds");
     let id = activation.id().clone();
     let _handle = activation.activate(&rig.registry).await.expect("starts");
-    let call = observer
-        .begin_call(&id, "tool.echo", json!("ticking"), None)
+    let call = endpoint(&endpoint_driver, &id)
+        .call("tool.echo", json!("ticking"), None)
         .await
         .expect("the call opens");
     assert!(matches!(
         settled_within(call).await,
-        CallEnd::Settled(Outcome::Ok { .. })
+        CallTerminal::Completed(Outcome::Ok { .. })
     ));
     stop_active(activation, &rig.registry, rig.epoch).await;
 }
@@ -576,7 +587,7 @@ async fn a_zero_tick_interval_is_clamped_not_a_panic() {
 #[tokio::test]
 async fn a_worker_that_stops_reading_without_goodbye_is_reported_not_healthy() {
     let revision = lifecycle_revision("halfdead", '0');
-    let (driver, observer) = ProcessPluginDriver::scripted_with_limits(
+    let (driver, _observer) = ProcessPluginDriver::scripted_with_limits(
         revision.id().clone(),
         DriverKind::NodeProcess,
         fixtures::worker_program(),
@@ -586,6 +597,7 @@ async fn a_worker_that_stops_reading_without_goodbye_is_reported_not_healthy() {
             ..ProcLimits::default()
         },
     );
+    let endpoint_driver = std::sync::Arc::clone(&driver);
     let mut rig = Rig::new("proc.halfdead", &revision);
     let mut activation =
         HostPluginActivation::prepare(&mut rig.slot, rig.epoch, &rig.broker, &rig.grants, driver)
@@ -595,12 +607,13 @@ async fn a_worker_that_stops_reading_without_goodbye_is_reported_not_healthy() {
 
     // One call the worker reads before shutting its read half, then a
     // flood whose write failure is what kills the outbound direction.
-    let _held = observer
-        .begin_call(&id, "tool.hold", json!(null), None)
+    let activation_endpoint = endpoint(&endpoint_driver, &id);
+    let _held = activation_endpoint
+        .call("tool.hold", json!(null), None)
         .await
         .expect("the call opens");
-    let _jam = observer
-        .begin_call(&id, "tool.flood", json!("x".repeat(200 * 1024)), None)
+    let _jam = activation_endpoint
+        .call("tool.flood", json!("x".repeat(200 * 1024)), None)
         .await
         .expect("the call opens");
     // No goodbye, no end-of-file, no exit: health is the only signal, and
@@ -618,18 +631,13 @@ async fn a_worker_that_stops_reading_without_goodbye_is_reported_not_healthy() {
     );
     // A call opened after the outbound death provably never reached the
     // worker: it settles immediately, cancelled, without reconciliation.
-    let late = observer
-        .begin_call(&id, "tool.late", json!(null), None)
+    let late = activation_endpoint
+        .call("tool.late", json!(null), None)
         .await
         .expect("the session still admits the call");
     match settled_within(late).await {
-        CallEnd::Lost { error, reconcile } => {
-            assert_eq!(error, WireErrorKind::Cancelled);
-            assert!(
-                !reconcile,
-                "an untransmitted call demands no reconciliation"
-            );
-        }
+        // An untransmitted call demands no reconciliation.
+        CallTerminal::LostCancelled => {}
         other => panic!("expected the never-delivered settlement, got {other:?}"),
     }
     stop_active(activation, &rig.registry, rig.epoch).await;

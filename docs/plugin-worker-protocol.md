@@ -10,8 +10,9 @@ The crate is sans-io: `frame` turns bytes into frames incrementally, and
 `session` is a pure state machine with an injected millisecond clock. Nothing
 in it can block, sleep, spawn, or open a socket. The real IO lives in the
 [process driver](#process-driver) (`crates/yah-plugin-proc`), which spawns
-the worker, owns the transport and the kill path, and authenticates the
-bootstrap; no worker-side SDK exists yet. One hundred forty-nine
+the worker, owns the transport and kill path, authenticates the bootstrap, and
+publishes the negotiated activation's application endpoint; no worker-side SDK
+exists yet. One hundred forty-nine
 deterministic tests in `crates/yah-plugin-ipc/tests/` drive the host side
 of every rule below with a scripted byte-level peer — one hundred thirteen
 session fixtures plus the byte-boundary property suite, the shared fuzz
@@ -273,6 +274,14 @@ answering, usually with the `cancelled` outcome. Silence would be
 indistinguishable from a lost worker. A completion that raced the cancel
 wins — the work happened, and the outcome says so.
 
+For a worker call routed to a registered host method, cancellation is
+cooperative. The handler receives a read-only cancellation view with its
+bounded request. A worker cancel retires the call and reply path immediately;
+activation closure also marks the view cancelled. The callback runs on a
+blocking thread, not the pump, and cannot be forcibly interrupted. Its late
+return cannot emit a second terminal or keep endpoint admission and process
+reclamation open.
+
 Loss is classified, not collapsed:
 
 - After a worker `goodbye`, in-flight host calls settle as `cancelled`
@@ -350,6 +359,28 @@ late answer, the handshake clock, the outbound cap, the forced kill
 path with its group sweep, spawn-failure reporting, and the
 bootstrap's environment and descriptor table end to end. The fake
 worker is a test fixture, not an SDK.
+
+The production `ActivationEndpoint` is bound to one
+`PluginActivationId`. The driver publishes it only after hello/accept and
+withdraws admission when activation cancellation or deactivation begins.
+Retained endpoints hold the pump command sender weakly, so they cannot keep a
+worker alive or follow a replacement activation. Calls, stream delivery,
+stream credit, command queues, dispatch queues, callback concurrency, pending
+waiters, diagnostics, and outbound bytes all have host-owned bounds. Deadline,
+worker goodbye, bare disconnect, and protocol-fatal loss remain separate
+endpoint terminals.
+
+Worker-to-host application methods are registered before the driver starts and
+then frozen. Handlers receive bounded JSON and cooperative cancellation only;
+they do not receive the session, pump, endpoint, or command sender. Results
+return through pump-owned session mutation. Unknown methods and queue overflow
+receive host-authored bounded errors that do not reflect worker text.
+
+The endpoint can pull a worker-spilled result through `artifact.read`, verify
+every declared byte, chunk length, media type, canonical lowercase ASCII hex,
+and the whole-object BLAKE3 digest, then wait for acknowledgement of explicit
+handle release. The worker owns those bytes only for the activation. This is
+ephemeral protocol spill storage, not durable artifact storage.
 
 The pathname-socket lane with kernel-attested peer credentials
 (`getpeereid`, `SO_PEERCRED`) is deliberately absent: it exists to attach
