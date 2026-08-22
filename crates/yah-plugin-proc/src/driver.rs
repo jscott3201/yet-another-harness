@@ -414,12 +414,10 @@ impl ActivationCore {
     async fn shutdown(&self) {
         let taken = self.live.lock().await.take();
         if let Some(handle) = taken {
-            // Withdrawal precedes the goodbye: the shared closing flag
-            // flips before the watch signal moves, so no endpoint can
-            // admit a fresh call into a pump that is already saying
-            // goodbye. The two stores are one atomic window from an
-            // endpoint's point of view — availability reads the flag
-            // first and the watch has no queue to lose.
+            // Withdrawal precedes the goodbye. `set_closing` takes the same
+            // lock as an endpoint's final gate check and `try_send`, so the
+            // winner of that lock determines whether the command precedes
+            // teardown or is refused. No lock is held while awaiting a reply.
             handle.shared.set_closing();
             // The watch signal has no queue: deactivation cannot be
             // dropped behind a command flood, and a pump that already

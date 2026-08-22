@@ -11,7 +11,7 @@
 use std::collections::VecDeque;
 use std::sync::Arc;
 use std::sync::{
-    Mutex,
+    Mutex, MutexGuard,
     atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering},
 };
 
@@ -167,13 +167,14 @@ pub(crate) struct PumpShared {
     /// close: health must name it, but it must not steal the close
     /// summary a later goodbye wins under the first-cause rule.
     output_closed: AtomicBool,
-    /// Deactivation has begun. Set synchronously before the watch signal
-    /// moves, so an endpoint's admission gate sees Closing in the same
-    /// instant withdrawal becomes possible — no window where a fresh call
-    /// is admitted into a pump that is already saying goodbye.
+    /// Serializes the final endpoint gate check and bounded command enqueue
+    /// with explicit deactivation withdrawal.
+    admission: Mutex<()>,
+    /// Deactivation has begun. Written while `admission` is held, before the
+    /// shutdown watch signal moves.
     closing: AtomicBool,
     /// Scope cancellation fires before the activity drain can reach driver
-    /// cleanup. Endpoint admission observes it directly for the same fence.
+    /// cleanup. Endpoint admission checks it at the final admission point.
     scope_cancellation: Option<ScopeCancellation>,
     /// Memory gauges, updated by the pump task at every buffer change.
     outbound_bytes: AtomicUsize,
@@ -193,6 +194,18 @@ struct Diagnostics {
     stderr: VecDeque<u8>,
 }
 
+/// Held across an endpoint's final state check and nonblocking enqueue.
+pub(crate) struct AdmissionGuard<'a> {
+    shared: &'a PumpShared,
+    _held: MutexGuard<'a, ()>,
+}
+
+impl AdmissionGuard<'_> {
+    pub(crate) fn close(&self) {
+        self.shared.closing.store(true, Ordering::Release);
+    }
+}
+
 impl PumpShared {
     pub(crate) fn new(
         limits: &ProcLimits,
@@ -208,6 +221,7 @@ impl PumpShared {
             diagnostics_cap: limits.diagnostics_cap_bytes,
             worker_pid,
             output_closed: AtomicBool::new(false),
+            admission: Mutex::new(()),
             closing: AtomicBool::new(false),
             scope_cancellation,
             outbound_bytes: AtomicUsize::new(0),
@@ -227,8 +241,18 @@ impl PumpShared {
         self.output_closed.load(Ordering::Acquire)
     }
 
+    pub(crate) fn admission_guard(&self) -> AdmissionGuard<'_> {
+        AdmissionGuard {
+            shared: self,
+            _held: self
+                .admission
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        }
+    }
+
     pub fn set_closing(&self) {
-        self.closing.store(true, Ordering::Release);
+        self.admission_guard().close();
     }
 
     pub fn is_closing(&self) -> bool {
@@ -295,6 +319,8 @@ impl PumpShared {
     }
 
     pub(crate) fn set_closed(&self, summary: String) {
+        let admission = self.admission_guard();
+        admission.close();
         {
             let mut held = self
                 .close_summary

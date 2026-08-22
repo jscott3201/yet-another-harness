@@ -303,8 +303,14 @@ impl std::fmt::Debug for ActivationEndpoint {
     }
 }
 
-/// Which admission gate refused, resolved against the shared snapshot.
+/// Which admission gate refused, resolved while explicit withdrawal cannot
+/// cross the check.
 pub(crate) fn admission_gate(shared: &PumpShared) -> Result<(), EndpointError> {
+    let _admission = shared.admission_guard();
+    admission_state(shared)
+}
+
+fn admission_state(shared: &PumpShared) -> Result<(), EndpointError> {
     if shared.is_closed() {
         return Err(EndpointError::Closed {
             summary: shared.close_summary(),
@@ -341,13 +347,24 @@ impl ActivationEndpoint {
         Availability::Active
     }
 
-    fn link(&self) -> Result<mpsc::Sender<PumpCommand>, EndpointError> {
-        admission_gate(&self.shared)?;
-        self.commands
+    /// Linearization point for every endpoint command: explicit withdrawal
+    /// takes this same lock before setting `closing`, and the lock is released
+    /// before any reply wait begins.
+    fn submit(&self, command: PumpCommand) -> Result<(), EndpointError> {
+        let _admission = self.shared.admission_guard();
+        admission_state(&self.shared)?;
+        let commands = self
+            .commands
             .upgrade()
             .ok_or_else(|| EndpointError::Closed {
                 summary: self.shared.close_summary(),
-            })
+            })?;
+        commands.try_send(command).map_err(|error| match error {
+            mpsc::error::TrySendError::Full(_) => EndpointError::AtCapacity,
+            mpsc::error::TrySendError::Closed(_) => EndpointError::Closed {
+                summary: self.shared.close_summary(),
+            },
+        })
     }
 
     /// Admit one unary call. Bounds are checked before a command slot is
@@ -414,11 +431,10 @@ impl ActivationEndpoint {
                 "method outside its length bound",
             )));
         }
-        let commands = self.link()?;
         let (opened_sender, opened) = oneshot::channel();
         let (settled_sender, settled) = oneshot::channel();
         let drops = Arc::new(std::sync::atomic::AtomicU64::new(0));
-        let sent = commands.try_send(PumpCommand::Call {
+        self.submit(PumpCommand::Call {
             method: method.to_owned(),
             payload: payload.clone(),
             deadline_ms,
@@ -427,15 +443,7 @@ impl ActivationEndpoint {
             drops: Arc::clone(&drops),
             opened: opened_sender,
             settled: settled_sender,
-        });
-        if let Err(error) = sent {
-            return Err(match error {
-                mpsc::error::TrySendError::Full(_) => EndpointError::AtCapacity,
-                mpsc::error::TrySendError::Closed(_) => EndpointError::Closed {
-                    summary: self.shared.close_summary(),
-                },
-            });
-        }
+        })?;
         let call_id = opened.await.map_err(|_| EndpointError::Closed {
             summary: self.shared.close_summary(),
         })?;
@@ -452,21 +460,12 @@ impl ActivationEndpoint {
     /// the terminal is still owed, and a completion racing the cancel
     /// wins.
     pub async fn cancel(&self, call_id: CallId, target: CancelTarget) -> Result<(), EndpointError> {
-        let commands = self.link()?;
         let (done_sender, done) = oneshot::channel();
-        let sent = commands.try_send(PumpCommand::Cancel {
+        self.submit(PumpCommand::Cancel {
             call_id,
             target,
             done: done_sender,
-        });
-        if let Err(error) = sent {
-            return Err(match error {
-                mpsc::error::TrySendError::Full(_) => EndpointError::AtCapacity,
-                mpsc::error::TrySendError::Closed(_) => EndpointError::Closed {
-                    summary: self.shared.close_summary(),
-                },
-            });
-        }
+        })?;
         done.await
             .map_err(|_| EndpointError::Closed {
                 summary: self.shared.close_summary(),
@@ -483,20 +482,11 @@ impl ActivationEndpoint {
     /// named refusal, and a release racing a reclaiming terminal is
     /// tolerated once by the session.
     pub async fn release_worker_handle(&self, handle: HandleId) -> Result<(), EndpointError> {
-        let commands = self.link()?;
         let (done_sender, done) = oneshot::channel();
-        let sent = commands.try_send(PumpCommand::ReleaseWorkerHandle {
+        self.submit(PumpCommand::ReleaseWorkerHandle {
             handle,
             done: done_sender,
-        });
-        if let Err(error) = sent {
-            return Err(match error {
-                mpsc::error::TrySendError::Full(_) => EndpointError::AtCapacity,
-                mpsc::error::TrySendError::Closed(_) => EndpointError::Closed {
-                    summary: self.shared.close_summary(),
-                },
-            });
-        }
+        })?;
         // Admission refusals surface here; acknowledgement is delivered
         // by the pump only when the worker's ack names the handle. Any
         // other resolution is a typed non-success, never success.
@@ -774,6 +764,63 @@ mod tests {
         assert!(matches!(
             endpoint.cancel(CallId(101), CancelTarget::Call).await,
             Err(EndpointError::Closed { .. })
+        ));
+    }
+
+    /// A calling thread announces immediately before polling its call while
+    /// this test holds the production admission guard. Closing through that
+    /// guard selects the shutdown side without sleeps or scheduler assumptions.
+    #[tokio::test]
+    async fn closing_gate_wins_against_paused_endpoint_commands() {
+        let limits = ProcLimits::default();
+        let shared = Arc::new(crate::shared::PumpShared::new(&limits, 1, 16, None));
+        let (sender, mut receiver) = mpsc::channel::<PumpCommand>(limits.command_channel_capacity);
+        let endpoint = activation_endpoint(
+            unit_activation_id("closing-race"),
+            sender.downgrade(),
+            Arc::clone(&shared),
+        );
+        shared.set_active();
+
+        let admission = shared.admission_guard();
+        let racing_endpoint = endpoint.clone();
+        let (ready_sender, ready) = std::sync::mpsc::sync_channel(0);
+        let racing = std::thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .build()
+                .expect("unit runtime");
+            ready_sender.send(()).expect("test still waiting");
+            runtime.block_on(racing_endpoint.call(
+                "application.call",
+                serde_json::json!(null),
+                None,
+            ))
+        });
+        ready.recv().expect("calling thread reached the boundary");
+        admission.close();
+        drop(admission);
+
+        assert!(matches!(
+            racing.join().expect("calling thread returns"),
+            Err(EndpointError::Closing)
+        ));
+        assert!(matches!(
+            endpoint
+                .call_stream("application.stream", serde_json::json!(null), None)
+                .await,
+            Err(EndpointError::Closing)
+        ));
+        assert_eq!(
+            endpoint.cancel(CallId(1), CancelTarget::Call).await,
+            Err(EndpointError::Closing)
+        );
+        assert_eq!(
+            endpoint.release_worker_handle(HandleId(1)).await,
+            Err(EndpointError::Closing)
+        );
+        assert!(matches!(
+            receiver.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
         ));
     }
 }
