@@ -17,6 +17,9 @@ cargo clippy --locked --manifest-path tools/protocol-codegen/Cargo.toml -- -D wa
 echo "==> generated protocol artifacts"
 cargo run --locked --manifest-path tools/protocol-codegen/Cargo.toml -- --check
 
+echo "==> TypeScript worker codec"
+bash scripts/test-typescript-sdk.sh
+
 echo "==> workspace clippy"
 cargo clippy --locked --workspace --all-targets -- -D warnings
 

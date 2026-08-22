@@ -2,17 +2,17 @@
 
 This page documents protocol v1 between the YAH host and a supervised worker
 process, implemented in `crates/yah-plugin-ipc`. It is the wire contract the
-supervised process driver serves and the future Node and CPython worker SDKs
-must satisfy, specified and fixture-pinned before either worker runtime
-exists.
+supervised process driver serves. The private TypeScript package implements its
+worker-side byte and JSON admission layer; complete Node and CPython worker
+runtimes do not exist.
 
 The crate is sans-io: `frame` turns bytes into frames incrementally, and
 `session` is a pure state machine with an injected millisecond clock. Nothing
 in it can block, sleep, spawn, or open a socket. The real IO lives in the
 [process driver](#process-driver) (`crates/yah-plugin-proc`), which spawns
 the worker, owns the transport and kill path, authenticates the bootstrap, and
-publishes the negotiated activation's application endpoint; no worker-side SDK
-exists yet. One hundred forty-nine
+publishes the negotiated activation's application endpoint. The TypeScript
+codec has no transport or session state. One hundred forty-nine
 deterministic tests in `crates/yah-plugin-ipc/tests/` drive the host side
 of every rule below with a scripted byte-level peer — one hundred thirteen
 session fixtures plus the byte-boundary property suite, the shared fuzz
@@ -65,6 +65,23 @@ Frame JSON is strict, mirroring the kernel protocol's rules:
 All three exist for the same reason: two SDK decoders must read identical
 bytes into identical values, and duplicate keys and 2^53-adjacent integers
 are exactly where JavaScript's `JSON.parse` and a Rust decoder diverge.
+
+### TypeScript codec boundary
+
+`sdk/typescript` is a private ESM source package. Its incremental decoder
+refuses zero and oversize declarations from the prefix, retains only delivered
+bytes, releases retained chunks on terminal poison, and classifies clean and
+truncated input. Host payload admission uses fatal UTF-8 decoding,
+`lossless-json` with a lexical integer policy and duplicate-name check, then
+strict Ajv 2020 validation against `host.schema.json`. Worker payload encoding
+rejects non-finite and unsafe numbers, unsupported JavaScript values, and
+cycles before validating `worker.schema.json`. Diagnostics are fixed and do
+not include hostile input.
+
+This layer enforces the outer frame limit and raw control-frame limit. It does
+not enforce call-payload, inline-result, stream-data, artifact-read, negotiated
+ceiling, or lifecycle rules. Those require session state; serializing a value
+again would not reproduce Rust's raw-byte class checks.
 
 Field names are `snake_case`; frame tags and enum values are `kebab-case`,
 matching the capability vocabulary the Wasm lane already established.
@@ -323,12 +340,17 @@ Loss is classified, not collapsed:
 
 ## Generated reference
 
-The Rust types in `crates/yah-plugin-ipc/src/types.rs` are the source of
-truth and generate three checked-in artifacts:
+The Rust types and constants in `crates/yah-plugin-ipc/src/types.rs` and
+`crates/yah-plugin-ipc/src/constants.rs` are the source of truth and generate
+three checked-in artifacts:
 
 - `generated/worker-protocol/worker.schema.json`
 - `generated/worker-protocol/host.schema.json`
 - `generated/worker-protocol/protocol.ts`
+
+The TypeScript artifact exports the protocol types plus frozen default wire
+limits, default ceilings, field limits, and protocol version for source-level
+consumers.
 
 Run `cargo run --locked --manifest-path tools/protocol-codegen/Cargo.toml`
 after changing protocol types; the same command with `-- --check` is what the
@@ -431,9 +453,11 @@ to a process the host did not spawn, and no current scenario does that.
 - Restart policy. The driver supervises one process per activation and
   never respawns inside one; whether and when a fresh activation follows a
   death is the composition's decision, deliberately deferred.
-- Any worker SDK. The TypeScript declarations and JSON Schemas are
-  generated, and the driver will spawn anything that speaks the protocol
-  over fd 3 — but no Node or CPython worker exists to load them.
+- Any complete worker SDK or authored worker. The TypeScript codec covers
+  framing and directional wire admission, but has no handshake/session state,
+  Promise calls, streams, cancellation, artifact or handle lifecycle, fd-3
+  adapter, handler registry, spawn/reap path, or publication surface. No Node
+  or CPython worker exists to load it.
 - Reconnect or resume. A session that faults or loses its transport is
   over; there is deliberately no resync path.
 - Retired-id forgetting. Ids are never reused, so the session remembers
@@ -443,6 +467,8 @@ to a process the host did not spawn, and no current scenario does that.
   lifetime. The budget retires new admissions, it never forgets: no
   protocol mechanism for forgetting exists.
 - Any capability family beyond the portable text contract.
-- Worker SDK enforcement evidence. The Rust fake worker exercises the real
-  process and host bridge, but it is not a Node or CPython SDK. Each SDK must
-  pass its own conformance against the same contract.
+- Cross-version and full worker-semantic conformance. The TypeScript codec gate
+  runs Node 26.7.0 and reuses the raw byte corpus. It does not prove the Node
+  24/26 matrix, session behavior, portable capability semantics, or CPython.
+  The Rust fake worker exercises the real process and host bridge, but it is
+  not a worker SDK.

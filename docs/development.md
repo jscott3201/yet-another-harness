@@ -8,17 +8,20 @@
 - The `wasm32-unknown-unknown` target, for the Rust example guest. Also pinned
   by `rust-toolchain.toml`, so rustup installs it and no lane adds a step for
   it; it is listed here as something the build depends on, not as a chore.
-- Node 26, installed yourself. Any 26.x works. The floor is the
+- Node 26, installed yourself. The canonical local and container evidence uses
+  26.7.0. Node 24 and 26 are the intended TypeScript codec support lines, but a
+  version matrix has not run yet. The example guest's dependency floor is the
   `^22.20 || ^24.12 || >=25` range `@napi-rs/lzma` brings into `jco`'s
   dependency tree — `jco` itself declares no `engines` — and npm only *warns*
   on a dependency engines mismatch, so an older Node fails later and less
   clearly than it would if npm refused. This is the repository's one non-Rust
   toolchain and the one requirement here that nothing in the repository
-  installs for you on a development machine; it is needed only to build the
-  example guests, see [Example Guests](#example-guests).
+  installs for you on a development machine; it builds the example guest and
+  checks the private worker codec, see [Example Guests](#example-guests).
 - Network access on the first build so Cargo can fetch the exact public Selene
   Git revision pinned in `Cargo.toml` and `Cargo.lock`, and so `npm ci` can
-  fetch the TypeScript guest's locked dependency tree from the npm registry.
+  fetch the locked TypeScript guest and worker-codec dependency trees from the
+  npm registry.
 
 ## Fast Checks
 
@@ -26,6 +29,7 @@
 bash scripts/install-nextest.sh
 cargo fmt --all --check
 cargo clippy --locked --workspace --all-targets -- -D warnings
+bash scripts/test-typescript-sdk.sh
 bash scripts/test.sh
 ```
 
@@ -85,6 +89,13 @@ Both are pinned and checksum-verified, and both land in the reused
 Hosted CI installs the same two through its own steps. `install-node.sh` covers
 Linux only: it exists for this container, not as a way to install Node on a
 machine you work on.
+
+`scripts/test-typescript-sdk.sh` copies the source package and generated worker
+artifacts under `target/typescript-sdk/`, installs the locked dependencies
+there, type-checks, and runs the Node tests. Staging keeps the repository's
+read-only container mount intact. The corpus test still reads
+`crates/yah-plugin-ipc/tests/corpus/` from the mounted repository rather than
+copying it into the package.
 
 CI writes JUnit to `target/nextest/ci/junit.xml` and uploads it even when tests
 fail. The current suite is about twenty seconds, so build archives and test
@@ -206,8 +217,10 @@ answer identically. Build both:
 bash scripts/build-guests.sh
 ```
 
-`scripts/ci-rust.sh` runs this before the test lane, so the full gate and
-container run cover it; run it by hand only when iterating on a guest.
+`scripts/ci-rust.sh` runs this before the Rust test lane and runs the TypeScript
+worker codec gate after checking generated artifacts, so the full gate and
+container run cover both; run the guest build by hand only when iterating on a
+guest.
 
 Nothing it produces is committed (DEC-038): the artifacts are built from source
 at gate time, which is also the only way the TypeScript component could be
@@ -268,7 +281,7 @@ exception.
 
 Two protocol type sets generate checked-in artifacts: the kernel protocol
 (`crates/yah-kernel/src/protocol/` → `generated/protocol/`) and the worker
-protocol (`crates/yah-plugin-ipc/src/types.rs` →
+protocol (`crates/yah-plugin-ipc/src/types.rs` plus `constants.rs` →
 `generated/worker-protocol/`). After editing either:
 
 ```bash

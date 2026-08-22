@@ -129,13 +129,15 @@ mechanics predate the pivot and are integration candidates for the new
 harness, not architectural authority.
 
 **Not built yet:** the agent loop, model providers, daemon, CLI, UI, plugin
-package loading and admission, the Node and Python process lanes (in
-progress — the [wire protocol](docs/plugin-worker-protocol.md) is
-fixture-pinned, and a supervised process driver now exposes an
-activation-scoped call/stream/artifact endpoint plus bounded registered host
-methods and a real portable text-capability bridge, but the Node and CPython
-SDKs do not exist yet), sandbox enforcement,
-and the graph, memory, and session domains beyond the kernel. The Wasm lane
+package loading and admission, and complete Node and Python process lanes. The
+[wire protocol](docs/plugin-worker-protocol.md) is fixture-pinned, a supervised
+process driver exposes an activation-scoped call/stream/artifact endpoint plus
+bounded registered host methods and a portable text-capability bridge, and a
+private TypeScript package now supplies framing and strict directional wire
+admission. It does not supply handshake or session state, an authored worker,
+fd-3 IO, the Promise/stream/cancellation/artifact/handle APIs, publication, or
+sandbox enforcement. No CPython SDK exists. Also absent are the graph, memory,
+and session domains beyond the kernel. The Wasm lane
 bounds a guest's cost, not its authority:
 guest code still runs in the host process, and no sandbox claim is made.
 
@@ -158,7 +160,7 @@ plugin model spans the execution lanes; the isolation mechanism differs:
 |---|---|---|---|
 | Built-in Rust | landed | First-party components and trusted integrations | Statically linked Rust traits |
 | Wasm Component | landed | Portable third-party plugins | Wasmtime, WIT imports/exports, explicit limits |
-| Node.js / TypeScript | protocol, process driver, endpoint, and host text-capability bridge landed | Modern ESM plugins after package and containment policy land | Future ESM-first SDK over the [process protocol](docs/plugin-worker-protocol.md); no worker SDK or sandbox exists |
+| Node.js / TypeScript | protocol, process driver, endpoint, host text-capability bridge, and private ESM wire codec landed | Modern ESM plugins after package and containment policy land | Source-level framing and strict directional admission over the [process protocol](docs/plugin-worker-protocol.md); no worker session/runtime or sandbox exists |
 | CPython | protocol, process driver, endpoint, and host text-capability bridge landed | Modern Python plugins after package and containment policy land | Future CPython worker and SDK over the process protocol; no worker SDK or sandbox exists |
 | Native embedding | later, optional | Foreign-language applications embedding the Rust library | Optional UniFFI bindings; not a plugin sandbox or universal plugin ABI |
 | Browser / JS host | later, optional | Rust-backed web and JavaScript utilities | Optional `wasm-bindgen` surface |
@@ -176,8 +178,9 @@ yet.
 
 The pivot proceeds as executable vertical slices, each landing with its own
 tests and evidence. The first three have landed; the fourth is underway. Its
-wire protocol, supervised process driver, and activation-scoped production
-endpoint are implemented; worker SDKs and containment are not:
+wire protocol, supervised process driver, activation-scoped production
+endpoint, and TypeScript wire codec are implemented; worker sessions, authored
+workers, the Python SDK, and containment are not:
 
 1. Rust composition kernel with an independent semantic conformance corpus.
 2. Plugin manifest, driver lifecycle, capability grants, and a reusable
@@ -244,6 +247,8 @@ projects are evolving independently and do not define YAH compatibility.
 | `crates/yah-compose/` | Component identity, epoch-fenced lifecycle, reversible effect scopes, typed revocable services, exact-assignment dependency reconciliation, fenced desired revisions |
 | `crates/yah-plugin-host/` | Strict plugin manifest/revision contracts, runtime-neutral driver lifecycle, activation-scoped capability grants and handles, reusable host-side conformance cases |
 | `crates/yah-plugin-wasm/` | Versioned WIT conformance world, compile-checked host and guest bindings, and the Wasmtime component driver with its limit and negative corpora |
+| `crates/yah-plugin-ipc/` | Rust-owned worker protocol types, limits, framing, strict JSON admission, and session state machine |
+| `sdk/typescript/` | Private ESM source package for worker-side framing and strict directional wire admission |
 | `crates/yah-kernel/` | Model-free durability, authority, effect, cancellation, provider, and protocol kernel |
 | `crates/exp001-harness/` | Storage fan-in and crash-recovery evidence harness |
 | `examples/guests/` | The Rust and TypeScript example plugins, built from source by the gate |
@@ -256,7 +261,8 @@ builds use the same storage implementation.
 ## Development
 
 The pinned toolchain is Rust 1.97.1 and the test runner is cargo-nextest
-0.9.143. The TypeScript example guest needs Node 26 and npm.
+0.9.143. The TypeScript example guest and worker codec gate need Node 26 and
+npm.
 
 ```bash
 bash scripts/install-nextest.sh

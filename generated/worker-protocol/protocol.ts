@@ -1,4 +1,37 @@
-// Generated from yah-plugin-ipc Rust protocol types. Do not edit.
+// Generated from yah-plugin-ipc Rust protocol types and constants. Do not edit.
+
+export const PROTOCOL_VERSION = 1 as const;
+
+export const FRAME_PREFIX_BYTES = 4 as const;
+
+export const MAX_WIRE_ID = 9007199254740991 as const;
+
+export const MAX_WIRE_UINT32 = 4294967295 as const;
+
+export const DEFAULT_WIRE_LIMITS = Object.freeze({
+  max_frame_bytes: 1052672,
+  max_control_frame_bytes: 16384,
+  max_call_payload_bytes: 262144,
+  max_inline_result_bytes: 65536,
+  max_stream_data_bytes: 65536,
+  max_artifact_read_bytes: 24576,
+} as const satisfies Readonly<WireLimits>);
+
+export const DEFAULT_CEILINGS = Object.freeze({
+  host_calls_in_flight: 16,
+  worker_calls_in_flight: 32,
+  live_handles: 16,
+  initial_stream_credit: 16,
+  max_stream_credit: 1024,
+} as const satisfies Readonly<Ceilings>);
+
+export const WIRE_FIELD_LIMITS = Object.freeze({
+  error_detail_chars: 512,
+  method_chars: 128,
+  media_type_chars: 128,
+  sdk_identity_chars: 64,
+  goodbye_reason_chars: 256,
+} as const);
 
 export type JsonValue = null | boolean | number | string | JsonValue[] | { [key: string]: JsonValue };
 
