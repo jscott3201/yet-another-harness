@@ -18,7 +18,8 @@ use yah_plugin_host::{
     PluginActivationHandle, PluginActivationId, PluginHealth, PluginRevision,
 };
 use yah_plugin_proc::{
-    CallEnd, DiagnosticStream, PendingCall, ProcActivationPlan, ProcObserver, ProcessPluginDriver,
+    ActivationEndpoint, CallTerminal, DiagnosticStream, PendingCall, ProcActivationPlan,
+    ProcObserver, ProcessPluginDriver,
 };
 
 use super::fixtures::worker_program;
@@ -66,19 +67,37 @@ impl Rig {
     }
 }
 
+/// The concrete driver, so tests can reach [`ProcessPluginDriver::endpoint`].
 pub(crate) fn scripted(
     revision: &PluginRevision,
     plans: Vec<ProcActivationPlan>,
-) -> (
-    std::sync::Arc<dyn yah_plugin_host::PluginDriver>,
-    ProcObserver,
-) {
+) -> (std::sync::Arc<ProcessPluginDriver>, ProcObserver) {
     ProcessPluginDriver::scripted(
         revision.id().clone(),
         DriverKind::NodeProcess,
         worker_program(),
         plans,
     )
+}
+
+/// A trait-object view for the host's activation guard, which takes
+/// `&Arc<dyn PluginDriver>`.
+pub(crate) fn as_trait(
+    driver: &std::sync::Arc<ProcessPluginDriver>,
+) -> std::sync::Arc<dyn yah_plugin_host::PluginDriver> {
+    let coerced: std::sync::Arc<dyn yah_plugin_host::PluginDriver> = driver.clone();
+    coerced
+}
+
+/// The invocation endpoint for a started activation. Publication is gated
+/// on negotiation, so this fails loudly rather than returning a dead end.
+pub(crate) fn endpoint(
+    driver: &ProcessPluginDriver,
+    id: &PluginActivationId,
+) -> ActivationEndpoint {
+    driver
+        .endpoint(id)
+        .expect("the started activation publishes an endpoint")
 }
 
 /// Stop a successfully activated component the way a composition does:
@@ -112,8 +131,8 @@ pub(crate) async fn health_becomes(
 }
 
 /// A settle that regresses into silence must fail the test, not wedge CI.
-pub(crate) async fn settled_within(call: PendingCall) -> CallEnd {
-    tokio::time::timeout(Duration::from_secs(5), call.settled())
+pub(crate) async fn settled_within(call: PendingCall) -> CallTerminal {
+    tokio::time::timeout(Duration::from_secs(5), call.terminal())
         .await
         .expect("the call settles within its bound")
         .expect("the call settles")

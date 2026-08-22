@@ -10,6 +10,8 @@ description = "Supervised process driver and authenticated fd-3 worker bootstrap
 # The protocol crate stays sans-io on purpose; this crate owns the only real
 # IO: the socketpair, the spawned child, the byte pump, and the kill path.
 [dependencies]
+blake3.workspace = true
+serde.workspace = true
 libc.workspace = true
 serde_json.workspace = true
 tokio = { workspace = true, features = [
@@ -21,8 +23,6 @@ tokio = { workspace = true, features = [
     "sync",
     "time",
 ] }
+yah-compose = { path = "../yah-compose" }
 yah-plugin-host = { path = "../yah-plugin-host" }
 yah-plugin-ipc = { path = "../yah-plugin-ipc" }
-
-[dev-dependencies]
-yah-compose = { path = "../yah-compose" }
