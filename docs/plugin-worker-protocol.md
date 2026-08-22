@@ -382,8 +382,12 @@ drained — free slots that were never filled earn nothing, however often the
 clock ticks — so a slow consumer is throttled by exactly the window it has
 not consumed, and a within-credit lossless frame always finds a slot on
 arrival. Lossy frames spend no credit, so they are admitted only into
-capacity no outstanding lossless credit is reserved against; past that they
-drop locally, declared in every later frame's cumulative `dropped` count and
+capacity no outstanding lossless credit is reserved against — a producer
+holding the whole window therefore starves its own lossy frames,
+deliberately: the window is the throttle, the reservation is what
+guarantees a within-credit lossless frame a slot, and the drops are
+declared either way. Past the reservation, lossy frames drop locally,
+declared in every later frame's cumulative `dropped` count and
 mirrored into a counter that survives the terminal (`local_drops`), because
 a drop followed immediately by the end of the stream would otherwise have no
 frame left to ride. Dropping the item receiver mutes delivery and cancels

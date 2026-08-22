@@ -122,6 +122,13 @@ impl super::Pump {
                 match &frame.class {
                     StreamClass::Lossless => stream.inbound.try_send(frame),
                     StreamClass::Lossy => {
+                        // Every slot occupied or reserved is unavailable
+                        // to lossy traffic. A producer holding the whole
+                        // window therefore starves its own lossy frames —
+                        // deliberately: the window is the throttle, the
+                        // reservation is what guarantees a within-credit
+                        // lossless frame a slot, and the drops are
+                        // declared either way.
                         let free = stream.inbound.capacity() as u32;
                         let occupied = stream.max_capacity - free.min(stream.max_capacity);
                         if occupied + stream.outstanding_credit < stream.max_capacity {

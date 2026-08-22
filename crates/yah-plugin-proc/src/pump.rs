@@ -320,9 +320,6 @@ impl Pump {
                                 }
                                 self.pending.insert(call_id, settled);
                                 self.shared.record_pending(self.pending.len());
-            // One gauge update per iteration covers every mutation of the
-            // release-waiter table as well.
-            self.shared.record_pending_releases(self.pending_releases.len());
                                 let _ = opened.send(Ok(call_id));
                             }
                             Err(error) => {
@@ -523,14 +520,6 @@ impl Pump {
                     if let Some(stream) = self.streams.get_mut(&call_id) {
                         stream.opened = true;
                         stream.outstanding_credit = credit;
-                    }
-                }
-                SessionEvent::CreditGranted {
-                    call_id,
-                    additional,
-                } => {
-                    if let Some(stream) = self.streams.get_mut(&call_id) {
-                        stream.outstanding_credit += additional;
                     }
                 }
                 SessionEvent::StreamItem {

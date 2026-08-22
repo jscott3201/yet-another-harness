@@ -54,6 +54,19 @@ impl HostSession {
             return Err(AppError::NotActive);
         }
         let Some(entry) = self.handles.get(&handle) else {
+            // A retirement racing a reclaiming terminal is the same
+            // tolerated crossing a wire Release enjoys: the id was
+            // reclaimed, not released, so it is remembered apart with
+            // its kind and spent here — the application's reply already
+            // told the worker the handle is gone.
+            if let Some(kind) = self.reclaimed_handles.get(&handle).copied() {
+                if kind != HandleKind::Capability {
+                    return Err(AppError::InvalidField("release with the wrong kind"));
+                }
+                self.reclaimed_handles.remove(&handle);
+                self.retired_handles.insert(handle);
+                return Ok(());
+            }
             return Err(if self.retired_handles.contains(&handle) {
                 AppError::AlreadyReleased
             } else {

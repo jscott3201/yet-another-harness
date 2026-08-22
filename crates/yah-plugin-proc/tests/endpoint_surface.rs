@@ -415,7 +415,35 @@ async fn dispatcher_saturation_refuses_one_past_the_bound_without_losing_admitte
     // queue, and everything past the bound is refused on the call itself
     // — retryable, before any provider runs.
     diagnostics_show(&observer, &id, ":ResourceExhausted:retryable=true").await;
-    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    // Wait for the refusal count to settle rather than trusting one
+    // sleep: straggling prints must all be in the tail before it is read
+    // for exact accounting. The admitted invoke prints nothing yet — it
+    // is parked in the provider — so stability, not a total, is the
+    // signal.
+    let settled_deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let mut last_refused = None;
+    let mut stable_reads = 0;
+    loop {
+        let refused_now = observer
+            .diagnostics_tail(&id, yah_plugin_proc::DiagnosticStream::Stdout)
+            .unwrap_or_default()
+            .matches("ResourceExhausted:retryable=true")
+            .count();
+        if Some(refused_now) == last_refused {
+            stable_reads += 1;
+        } else {
+            stable_reads = 0;
+            last_refused = Some(refused_now);
+        }
+        if stable_reads >= 8 {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < settled_deadline,
+            "the refusal burst never settled"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
     // Nothing completed while the gate was shut: the provider is parked
     // in its one slot.
     let tail = observer

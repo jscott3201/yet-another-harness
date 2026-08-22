@@ -69,11 +69,12 @@ pub enum EndpointError {
     Unsettled(CallTerminal),
     /// A release this endpoint initiated ended without the worker's
     /// acknowledgement because the activation ended first. `orderly`
-    /// marks ends where the release provably never reached the worker or
-    /// the worker announced its own stop — safe to treat as released on
-    /// the next activation — while `false` means the worker's table state
-    /// is unknown and reconciliation belongs to the caller. Either way
-    /// the id is spent host-side: never reported as acknowledged success.
+    /// marks ends where treating the handle as released is safe — the
+    /// worker announced its own stop, the host said goodbye, or the
+    /// release provably never reached it — while `false` means a bare
+    /// disconnect or fatal fault where the worker's table state is
+    /// unknown and reconciliation belongs to the caller. Either way the
+    /// id is spent host-side: never reported as acknowledged success.
     ReleaseLost { orderly: bool },
 }
 
@@ -370,7 +371,9 @@ impl ActivationEndpoint {
         payload: serde_json::Value,
         deadline_ms: Option<u32>,
     ) -> Result<StreamCall, EndpointError> {
-        let (outbound, items) = mpsc::channel(self.shared.stream_channel_capacity());
+        // One slot is the floor: a zero-capacity channel would reject
+        // every delivery including frames the window itself admitted.
+        let (outbound, items) = mpsc::channel(self.shared.stream_channel_capacity().max(1));
         let pending = self
             .admit(method, &payload, deadline_ms, true, Some(outbound))
             .await?;
@@ -551,7 +554,11 @@ impl<'e> ArtifactReader<'e> {
     }
 
     /// Pull the next bounded chunk. Offset arithmetic is checked; a
-    /// read past the declared size is refused before the wire.
+    /// read past the declared size is refused before the wire. The pull
+    /// carries no deadline of its own — a worker that never answers
+    /// holds the caller until the call's own clock (if any) or the
+    /// activation ends — so callers against untrusted workers should
+    /// wrap this in their own timeout.
     pub async fn next_chunk(&mut self) -> Result<Option<Vec<u8>>, EndpointError> {
         if self.remaining == 0 {
             return Ok(None);

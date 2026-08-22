@@ -125,10 +125,11 @@ pub(crate) enum ReleaseEnd {
     Acknowledged,
     /// The activation ended before the ack arrived: goodbye, fatal
     /// fault, disconnect, an output direction that can no longer carry
-    /// the release, or teardown. `orderly` distinguishes ends where the
-    /// frame provably never reached the worker or the worker announced
-    /// its own stop (`true`) from a bare loss where the worker's table
-    /// state is unknown (`false`).
+    /// the release, or teardown. `orderly` marks ends where treating the
+    /// handle as released is safe — the worker announced its own stop,
+    /// the host said goodbye, or the frame provably never reached it —
+    /// while `false` means a bare disconnect or fatal fault where the
+    /// worker's table state is unknown.
     Lost { orderly: bool },
 }
 
