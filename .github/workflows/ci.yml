@@ -68,7 +68,7 @@ jobs:
         # DEC-038 builds every guest artifact from source at gate time, and the
         # TypeScript one needs `jco`. Pinned to a major the lockfile was
         # resolved against; `npm ci` in the build script does the rest.
-        uses: actions/setup-node@2028fbc5c25fe9cf00d9f06a71cc4710d4507903 # v6.0.0
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: '26'
           cache: npm
