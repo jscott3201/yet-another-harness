@@ -70,6 +70,10 @@ export function parseWireJson(bytes: Uint8Array): JsonValue {
 
 /** Serialize a preflighted JSON value without non-finite-to-null conversion. */
 export function stringifyWireJson(value: JsonValue): Uint8Array {
+  return encoder.encode(stringifyJson(value));
+}
+
+function stringifyJson(value: JsonValue): string {
   let text: string | undefined;
   try {
     text = stringify(value, undefined, undefined, [negativeZeroStringifier]);
@@ -79,10 +83,10 @@ export function stringifyWireJson(value: JsonValue): Uint8Array {
   if (text === undefined) {
     throw codecError("INVALID_OUTBOUND_VALUE");
   }
-  return encoder.encode(text);
+  return text;
 }
 
-/** Refuse JavaScript values whose JSON serialization would omit or rewrite data. */
+/** Refuse values that serialization would mutate or strict wire admission would reject. */
 export function assertJsonRepresentable(value: unknown): asserts value is JsonValue {
   const active = new WeakSet<object>();
   const work: Array<Readonly<{ value: unknown; leave: boolean }>> = [{ value, leave: false }];
@@ -105,7 +109,11 @@ export function assertJsonRepresentable(value: unknown): asserts value is JsonVa
       if (!Number.isFinite(current)) {
         throw codecError("NON_FINITE_NUMBER");
       }
-      if (Number.isInteger(current) && !Number.isSafeInteger(current)) {
+      if (
+        Number.isInteger(current) &&
+        !Number.isSafeInteger(current) &&
+        integerPattern.test(stringifyJson(current))
+      ) {
         throw codecError("UNSAFE_INTEGER");
       }
       continue;

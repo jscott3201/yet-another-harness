@@ -9,9 +9,11 @@ import {
   encodeWorkerMessage,
   type WorkerMessage,
 } from "../src/index.ts";
+import { parseWireJson, stringifyWireJson } from "../src/json.ts";
 import { expectCodecError } from "./support.ts";
 
 const encoder = new TextEncoder();
+const decoder = new TextDecoder();
 
 test("host payload admission is directional and preserves arbitrary JSON payload data", () => {
   const payload = encoder.encode(
@@ -55,7 +57,7 @@ test("outer payload bounds apply even when framing helpers are bypassed", () => 
   );
 });
 
-test("outbound encoding refuses every JavaScript value that JSON would mutate", () => {
+test("outbound encoding refuses non-representable values and plain unsafe integers", () => {
   const cyclic: Record<string, unknown> = {};
   cyclic.self = cyclic;
   const sparse = new Array(1);
@@ -83,6 +85,33 @@ test("outbound encoding refuses every JavaScript value that JSON would mutate", 
     ["\ud800", "INVALID_UNICODE"],
   ] as const) {
     expectCodecError(code, () => encodeWorkerMessage(workerCall(value) as WorkerMessage));
+  }
+});
+
+test("outbound number admission follows the emitted token class", () => {
+  for (const [value, token] of [
+    [1e21, "1e+21"],
+    [-1e21, "-1e+21"],
+  ] as const) {
+    const scalar = stringifyWireJson(value);
+    assert.equal(decoder.decode(scalar), token);
+    assert.equal(parseWireJson(scalar), value);
+
+    const payload = encodeWorkerMessage(workerCall(value) as WorkerMessage);
+    assert.equal(decoder.decode(payload).endsWith(`"payload":${token}}`), true);
+    const parsed = parseWireJson(payload);
+    assert.equal((parsed as Record<string, unknown>).payload, value);
+    assert.deepEqual(encodeWorkerMessage(parsed as WorkerMessage), payload);
+  }
+
+  for (const [value, token] of [
+    [100_000_000_000_000_000_000, "100000000000000000000"],
+    [999_999_999_999_999_900_000, "999999999999999900000"],
+  ] as const) {
+    assert.equal(decoder.decode(stringifyWireJson(value)), token);
+    expectCodecError("UNSAFE_INTEGER", () =>
+      encodeWorkerMessage(workerCall(value) as WorkerMessage),
+    );
   }
 });
 
